@@ -9,9 +9,10 @@
 **Cyclone** is a legal practice management platform with a React frontend and FastAPI backend, persisted to Supabase (PostgreSQL). The full spec lives in `CYCLONE_PRD.md` at the repo root. Read it before beginning any non-trivial feature work.
 
 **Repo:** https://github.com/tjdaley/cyclone.git  
-**Stack:** React (Vite) · FastAPI · Supabase (PostgreSQL) · Docker  
+**Stack:** React 18 (Vite) · FastAPI · Supabase (PostgreSQL) · Docker  
 **Python:** 3.11+  
-**Node:** 20+
+**Node:** 20+  
+**Status:** Scaffolding complete — backend API, frontend SPA, and database DDL fully implemented. See §16 for what's not yet built.
 
 ---
 
@@ -19,32 +20,115 @@
 
 ```
 cyclone/
-├── app/                        # FastAPI backend
-│   ├── main.py
-│   ├── dependencies.py         # Shared Depends() — get_db_manager, get_current_user, require_role
+├── app/                           # FastAPI backend
+│   ├── main.py                    # App factory, middleware, router registration
+│   ├── dependencies.py            # get_db_manager, get_current_user, require_role
+│   ├── Dockerfile                 # Python 3.11-slim
+│   ├── requirements.txt           # pip dependencies
 │   ├── util/
-│   │   ├── settings.py         # Settings(BaseSettings) singleton — see §5
-│   │   └── loggerfactory.py    # LoggerFactory — see §6
+│   │   ├── settings.py            # Settings(BaseSettings) singleton — see §5
+│   │   └── loggerfactory.py       # LoggerFactory — see §6
+│   ├── middleware/
+│   │   └── auth_middleware.py     # JWT validation, injects uid/role/email into request.state
 │   ├── db/
-│   │   ├── supabasemanager.py  # DatabaseManager ABC + SupabaseManager — see §7
-│   │   ├── models/             # Pydantic domain + InDB models — see §8
-│   │   └── repositories/       # BaseRepository[T] subclasses — see §8
-│   ├── routers/                # FastAPI route handlers (thin — delegate to services)
-│   ├── services/               # Business logic, LLM calls, PDF, Stripe
-│   └── schemas/                # Pydantic request/response schemas (separate from DB models)
-├── frontend/                   # React + Vite
-│   ├── src/
-│   │   ├── components/
-│   │   ├── pages/
-│   │   ├── hooks/
-│   │   ├── context/
-│   │   └── lib/                # API client, Supabase client, helpers
-│   └── vite.config.ts
-├── docker-compose.yml
-├── docker-compose.override.yml # Dev overrides — committed, no secrets
-├── .env.example                # All keys, no values — committed
-├── CYCLONE_PRD.md              # Full product spec
-└── CLAUDE.md                   # This file
+│   │   ├── supabasemanager.py     # DatabaseManager ABC + SupabaseManager — see §7
+│   │   ├── models/                # Pydantic domain + InDB models — see §8
+│   │   │   ├── staff.py           # StaffMember, StaffRole, FullName, BarAdmission
+│   │   │   ├── client.py          # Client, ClientStatus
+│   │   │   ├── matter.py          # Matter, MatterStaff, BillingSplit, OpposingParty, MatterRateOverride
+│   │   │   ├── billing_entry.py   # BillingEntry, EntryType
+│   │   │   ├── billing_cycle.py   # BillingCycle, BillingCycleStatus
+│   │   │   ├── trust_ledger.py    # TrustLedgerEntry (immutable — no updated_at)
+│   │   │   ├── fee_agreement.py   # FeeAgreement, FeeAgreementStatus
+│   │   │   ├── matter_event.py    # MatterEvent, EventType
+│   │   │   ├── discovery.py       # DiscoveryRequest, DiscoveryResponse, RFASelection
+│   │   │   ├── user_role.py       # UserRole, UserRoleType
+│   │   │   └── audit_log.py       # AuditLog (immutable — id is UUID str, no updated_at)
+│   │   └── repositories/          # BaseRepository[T] subclasses — see §8
+│   │       ├── base_repo.py       # Generic CRUD wrapper
+│   │       ├── staff.py           # get_by_supabase_uid, get_by_slug, get_by_office
+│   │       ├── client.py          # get_by_email, get_by_status
+│   │       ├── matter.py          # + MatterRateOverrideRepository, MatterStaffRepository,
+│   │       │                      #   BillingSplitRepository, OpposingPartyRepository
+│   │       ├── billing_entry.py   # get_by_matter, get_unbilled_for_matter
+│   │       ├── billing_cycle.py   # get_by_matter, get_open_cycle
+│   │       ├── trust_ledger.py    # get_by_matter, get_deposits (append-only)
+│   │       ├── fee_agreement.py   # get_by_matter, get_executed
+│   │       ├── matter_event.py    # get_by_matter, get_by_staff
+│   │       ├── discovery.py       # DiscoveryRequestRepository, DiscoveryResponseRepository
+│   │       ├── user_role.py       # get_by_uid, uid_has_role
+│   │       └── audit_log.py       # get_by_entity, get_by_uid (read-only)
+│   ├── routers/                   # FastAPI route handlers (thin — delegate to services)
+│   │   ├── health.py              # GET /api/health, GET /api/config (public)
+│   │   ├── auth_flow.py           # GET /api/v1/auth/me, POST /api/v1/auth/correlate-staff
+│   │   ├── staff.py               # CRUD /api/v1/staff
+│   │   ├── clients.py             # CRUD /api/v1/clients + conflict-check
+│   │   ├── matters.py             # CRUD /api/v1/matters + rate overrides, staff, opposing parties
+│   │   ├── billing.py             # Entries, cycles, balance, NL parse
+│   │   ├── discovery.py           # Requests, ingest, responses
+│   │   └── admin.py               # User roles, audit log (admin-only)
+│   ├── services/                  # Business logic, LLM calls
+│   │   ├── llm_service.py         # LLMService singleton — 5 vendors, complete() + complete_fast()
+│   │   ├── billing_service.py     # Rate resolution, pro bono, NL parse, balance, cycle close
+│   │   ├── audit_logger.py        # AuditLogger.log() — never re-raises on failure
+│   │   └── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
+│   └── schemas/                   # Pydantic request/response schemas
+│       ├── common.py              # MessageResponse, DeletedResponse, PaginatedMeta
+│       ├── staff.py               # StaffCreateRequest, StaffUpdateRequest, StaffResponse
+│       ├── client.py              # + ConflictCheckRequest/Response
+│       ├── matter.py              # + MatterRateOverrideRequest/Response
+│       ├── billing.py             # + NLBillingParseRequest/Response, ClientBalanceResponse
+│       └── discovery.py           # + DiscoveryIngestRequest
+├── frontend/                      # React + Vite + TypeScript + Tailwind CSS
+│   ├── Dockerfile                 # Multi-stage: node build → nginx
+│   ├── nginx.conf                 # SPA fallback + /api proxy
+│   ├── package.json               # react@18, react-router-dom@6, @supabase/supabase-js@2
+│   ├── vite.config.ts             # Port 3000, /api proxy to localhost:8000
+│   ├── tailwind.config.js         # Custom colors: navy, gold, off-white, etc.
+│   ├── tsconfig.json              # Strict mode, ES2020
+│   ├── index.html                 # Google Fonts (Inter, Playfair Display, JetBrains Mono)
+│   ├── public/
+│   │   └── favicon.svg            # Navy/gold brand mark
+│   └── src/
+│       ├── main.tsx               # React 18 entry point
+│       ├── App.tsx                # BrowserRouter, public + protected routes
+│       ├── index.css              # Tailwind directives + component layer (btn-primary, card, input)
+│       ├── context/
+│       │   └── AuthContext.tsx     # Session, profile, density, refreshProfile, signOut
+│       ├── lib/
+│       │   ├── supabaseClient.ts  # Auth only — never use for data queries
+│       │   └── api.ts             # apiFetch<T>() with Bearer token injection
+│       ├── components/
+│       │   ├── ProtectedRoute.tsx # Guards /app/* routes — redirects unauthenticated/uncorrelated users
+│       │   └── AppShell.tsx       # Sidebar nav, mobile hamburger, role-based menu items
+│       └── pages/
+│           ├── LandingPage.tsx    # Marketing page — hero, features, CTA
+│           ├── LoginPage.tsx      # Google OAuth via Supabase
+│           ├── AuthCallbackPage.tsx # Session exchange, routing to dashboard/onboarding
+│           ├── OnboardingPage.tsx  # Staff correlation on first login
+│           ├── AccessDeniedPage.tsx
+│           └── app/
+│               ├── DashboardPage.tsx  # Stats + recent matters table
+│               ├── BillingPage.tsx    # Matter selector, NL parse → preview → commit, entries
+│               ├── MattersPage.tsx    # Filterable/searchable matters list
+│               ├── ClientsPage.tsx    # Conflict check panel + client list
+│               ├── DiscoveryPage.tsx  # Discovery requests by matter
+│               └── AdminPage.tsx      # Staff management, linked/unlinked accounts
+├── db/
+│   └── migrations/                # SQL DDL
+│       ├── 001_extensions.sql     # pg_trgm, pgcrypto
+│       ├── 002_tables.sql         # 17 tables
+│       ├── 003_indexes_triggers.sql # Indexes, triggers (immutability, pro bono, splits)
+│       ├── 004_functions.sql      # search_conflicts, resolve_billing_rate, views
+│       ├── 005_rls.sql            # Row-Level Security policies
+│       ├── 006_staff_auth_fields.sql # Nullable supabase_uid, auth_email for correlation
+│       └── run_all.sql
+├── docker-compose.yml             # Production: api (8000), frontend (3000/nginx)
+├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging
+├── .env.example                   # All keys, no values — committed
+├── .env.frontend.example          # Frontend-only env template
+├── CYCLONE_PRD.md                 # Full product spec with implementation status
+└── CLAUDE.md                      # This file
 ```
 
 ---
@@ -56,7 +140,7 @@ These override everything else, including your own judgment about "better" patte
 1. **Read before you write.** Before editing any existing module, read it fully. Never assume file contents match what you expect.
 2. **No new patterns without justification.** If the codebase already has a pattern for something (logging, DB access, settings), use it. Do not introduce a second way to do the same thing.
 3. **No raw SQL from the frontend.** All data mutations and queries go through FastAPI endpoints.
-4. **No new `Settings()` instantiations.** Import `settings` from `app.util.settings` everywhere except `supabasemanager.py`, which has its own local `SETTINGS = Settings()` for historical reasons.
+4. **No new `Settings()` instantiations.** Import `settings` from `util.settings` everywhere except `supabasemanager.py`, which has its own local `SETTINGS = Settings()` for historical reasons.
 5. **No direct `logging.getLogger()` calls.** Use `LoggerFactory.create_logger(__name__)` exclusively.
 6. **No LLM calls outside `app/services/llm_service.py`.** All AI completions are dispatched through the `LLMService` singleton.
 7. **No `supabase.create_client()` outside `supabasemanager.py`.** All DB access goes through repository classes.
@@ -64,23 +148,30 @@ These override everything else, including your own judgment about "better" patte
 
 ---
 
-## 4. Coding Standards
+## 4. Import Paths — CRITICAL
 
-### Python
-- **Style:** PEP 8; 4-space indent; max line length 120
-- **Type hints:** Required on all function signatures (args and return types)
-- **Docstrings:** Required on all public methods; use the existing `:param name: ... :type name: ... :return: ... :rtype: ...` format found in `supabasemanager.py`
-- **Imports:** stdlib → third-party → local app; alphabetical within each group; no wildcard imports
-- **f-strings:** Preferred for interpolation in application code; use `%s` format args in log calls (lazy evaluation)
-- **Exception handling:** Catch the narrowest exception possible; always log at `ERROR` or higher before re-raising
+The backend runs from inside the `app/` directory:
 
-### TypeScript / React
-- **Style:** ESLint + Prettier defaults; 2-space indent
-- **Component files:** One component per file; filename matches component name (PascalCase)
-- **Hooks:** Custom hooks in `src/hooks/`; prefix with `use`
-- **No inline styles.** Use Tailwind utility classes or CSS custom properties only
-- **No direct Supabase data queries from components.** All data fetching goes through `src/lib/api.ts` (the FastAPI client wrapper)
-- **Supabase JS client** (`src/lib/supabaseClient.ts`) is used only for auth session management
+```bash
+uvicorn main:app --app-dir app --host 0.0.0.0 --port 8000 --reload
+```
+
+**All Python imports use relative paths (no `app.` prefix):**
+
+```python
+# ✅ Correct — these are the actual import patterns in the codebase
+from util.settings import settings
+from util.loggerfactory import LoggerFactory
+from db.supabasemanager import SupabaseManager, DatabaseManager
+from db.models.staff import StaffMember, StaffMemberInDB
+from db.repositories.staff import StaffRepository
+from middleware.auth_middleware import AuthMiddleware
+from services.billing_service import BillingService
+from schemas.common import MessageResponse
+
+# ❌ Wrong — do NOT use absolute imports with app. prefix
+from app.util.settings import settings
+```
 
 ---
 
@@ -90,7 +181,7 @@ These override everything else, including your own judgment about "better" patte
 - The module-level singleton `settings = Settings()` is the **only** instance used throughout the app (except `supabasemanager.py`)
 - **Import pattern:**
   ```python
-  from app.util.settings import settings
+  from util.settings import settings
   ```
 - **Dynamic access:** Use `settings.getattr(item, default)` — do not use `getattr(settings, item)` directly
 - **Adding new fields:** Add to the `Settings` class with a safe default (usually `""` or `None`); add the key to `.env.example` in the same PR
@@ -98,22 +189,26 @@ These override everything else, including your own judgment about "better" patte
 
 ### Fields Claude Code Must Know About
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `supabase_url` | `str` | Supabase project URL |
-| `supabase_service_role_key` | `str` | Used by backend only — never expose to frontend |
-| `supabase_anon_key` | `str` | Used by frontend Supabase JS client |
-| `llm_vendor` | `str` | Active LLM vendor: `"anthropic"`, `"gemini"`, `"openai"`, `"groq"`, `"deepseek"` |
-| `llm_fast_vendor` | `str` | Vendor for latency-sensitive calls |
-| `llm_temperature` | `float` | Default: `0.1` |
-| `llm_top_p` | `float` | Default: `0.1` |
-| `stripe_secret_key` | `str` | Stripe server-side key |
-| `stripe_publishable_key` | `str` | Safe to expose via `GET /api/config` |
-| `time_increment_options` | `list[float]` | Valid billing time increments, e.g. `[0.1, 0.25, 0.5, 1.0]` |
-| `default_refresh_trigger_pct` | `float` | Default retainer refresh threshold: `0.40` |
-| `is_development` | `bool` | True in dev; gates debug behavior |
-| `log_level` | `str` | Default: `"WARNING"` |
-| `log_format` | `str` | Python `logging` format string |
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `version` | `str` | `"2026.04.05"` | API version string |
+| `host_url` | `str` | `"http://localhost:8000"` | CORS and URL generation |
+| `is_development` | `bool` | `False` | Gates debug behavior and docs endpoints |
+| `firm_name` | `str` | `"Your Law Firm"` | Displayed in config endpoint |
+| `supabase_url` | `str` | `""` | Supabase project URL |
+| `supabase_service_role_key` | `str` | `""` | Used by backend only — never expose to frontend |
+| `supabase_jwt_secret` | `str` | `""` | JWT validation in auth middleware |
+| `supabase_anon_key` | `str` | `""` | Used by frontend Supabase JS client |
+| `llm_vendor` | `str` | `"gemini"` | Active LLM vendor: `"anthropic"`, `"gemini"`, `"openai"`, `"groq"`, `"deepseek"` |
+| `llm_fast_vendor` | `str` | `"gemini"` | Vendor for latency-sensitive calls |
+| `llm_temperature` | `float` | `0.1` | LLM temperature |
+| `llm_top_p` | `float` | `0.1` | LLM top-p sampling |
+| `stripe_secret_key` | `str` | `""` | Stripe server-side key |
+| `stripe_publishable_key` | `str` | `""` | Safe to expose via `GET /api/config` |
+| `time_increment_options` | `list` | `[0.1, 0.25, 0.5, 1.0]` | Valid billing time increments |
+| `default_refresh_trigger_pct` | `float` | `0.40` | Default retainer refresh threshold |
+| `log_level` | `str` | `"WARNING"` | Python logging level |
+| `log_format` | `str` | format string | Python logging format |
 
 ---
 
@@ -124,7 +219,7 @@ These override everything else, including your own judgment about "better" patte
 Every module that needs logging must declare a module-level logger:
 
 ```python
-from app.util.loggerfactory import LoggerFactory
+from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
 ```
@@ -170,7 +265,7 @@ SupabaseManager(DatabaseManager)   ← concrete implementation
         ↑ used by
 BaseRepository[T]                  ← generic CRUD base
         ↑ inherited by
-BillingEntryRepository, StaffRepository, ...  ← domain repos
+BillingEntryRepository, StaffRepository, ...  ← domain repos (14 total)
         ↑ injected into
 Service classes                    ← business logic
         ↑ called by
@@ -179,7 +274,7 @@ Route handlers (via Depends())
 
 ### SupabaseManager Rules
 
-- `SupabaseManager` uses `supabase_service_role_key` — it bypasses Supabase RLS. Access control is enforced at the FastAPI route layer via `require_role()`.
+- `SupabaseManager` uses `supabase_service_role_key` — it **bypasses Supabase RLS**. Access control is enforced at the FastAPI route layer via `require_role()`.
 - All methods retry 3 times on `APIError` with exponential backoff (2–10s).
 - `select_one` returns `None` on PGRST116 (no row found) — callers must handle `None`.
 - `insert()` will raise `ValueError` if `data` is a string. Always pass a `dict`:
@@ -197,9 +292,9 @@ Route handlers (via Depends())
 
 ```python
 # app/db/repositories/my_entity.py
-from app.db.repositories.base_repo import BaseRepository
-from app.db.models.my_entity import MyEntityInDB
-from app.db.supabasemanager import DatabaseManager
+from db.repositories.base_repo import BaseRepository
+from db.models.my_entity import MyEntityInDB
+from db.supabasemanager import DatabaseManager
 
 class MyEntityRepository(BaseRepository[MyEntityInDB]):
     def __init__(self, manager: DatabaseManager):
@@ -215,17 +310,9 @@ class MyEntityRepository(BaseRepository[MyEntityInDB]):
 Repositories are constructed in FastAPI route handlers via `Depends()`:
 
 ```python
-# app/dependencies.py
-from app.db.supabasemanager import SupabaseManager
-
-def get_db_manager() -> SupabaseManager:
-    return SupabaseManager()
-```
-
-```python
 # In a route handler
-from app.dependencies import get_db_manager
-from app.db.repositories.billing_entry import BillingEntryRepository
+from dependencies import get_db_manager
+from db.repositories.billing_entry import BillingEntryRepository
 
 @router.get("/billing/{matter_id}")
 def get_entries(matter_id: int, manager = Depends(get_db_manager)):
@@ -237,7 +324,7 @@ def get_entries(matter_id: int, manager = Depends(get_db_manager)):
 
 ## 8. Model Conventions (`app/db/models/`)
 
-Follow the pattern in `app/db/models/attorney.py` exactly:
+Follow the established pattern:
 
 ```python
 from pydantic import BaseModel, Field, ConfigDict
@@ -261,39 +348,28 @@ class MyEntityInDB(MyEntity):
 ### Rules
 - Every field must have `description=` in `Field()`
 - `InDB` models always add `id`, `created_at`, `updated_at` — nothing else
+- **Exception:** `TrustLedgerEntry` and `AuditLog` are immutable — their `InDB` models have no `updated_at`
+- **Exception:** `AuditLog` has `id: str` (UUID) rather than `int`
 - `model_config = ConfigDict(from_attributes=True)` goes on `InDB` only
 - Do not use `orm_mode = True` (deprecated Pydantic v1 syntax)
 
-### Staff Model (replaces Attorney)
+### Key Enums
 
-The starter `Attorney` model is an example only. The real user model is `StaffMember`:
-
-```python
-# app/db/models/staff.py
-from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
-from datetime import datetime
-
-StaffRole = Literal["attorney", "paralegal", "admin"]
-
-class StaffMember(BaseModel):
-    supabase_uid: str = Field(..., description="Supabase auth UID — foreign key to auth.users")
-    role: StaffRole = Field(..., description="Staff role")
-    email: str = Field(..., description="Work email")
-    first_name: str = Field(..., description="First name")
-    last_name: str = Field(..., description="Last name")
-    slug: str = Field(..., description="URL-safe unique identifier")
-    # ... bar admissions, office_id, telephone, etc.
-
-class StaffMemberInDB(StaffMember):
-    id: int = Field(..., description="Primary key")
-    created_at: datetime = Field(..., description="Set by database")
-    updated_at: Optional[datetime] = Field(default=None, description="Set by database")
-    model_config = ConfigDict(from_attributes=True)
-```
-
-Delete `app/db/models/attorney.py` and `app/db/repositories/attorney.py` once `StaffMember` is live and tested.
+| Model File | Enum | Values |
+|-----------|------|--------|
+| `staff.py` | `StaffRole` | attorney, paralegal, admin |
+| `client.py` | `ClientStatus` | prospect, pending_conflict_check, conflict_flagged, active, inactive |
+| `matter.py` | `MatterType` | divorce, child_custody, modification, enforcement, cps, probate, estate_planning, civil, other |
+| `matter.py` | `MatterStatus` | intake, conflict_review, active, closed, archived |
+| `billing_entry.py` | `EntryType` | time, expense, flat_fee |
+| `billing_cycle.py` | `BillingCycleStatus` | open, closed |
+| `trust_ledger.py` | `TrustTransactionType` | deposit, withdrawal, refund |
+| `fee_agreement.py` | `FeeAgreementStatus` | draft, sent_to_client, executed, voided |
+| `matter_event.py` | `EventType` | hearing, deposition, deadline, mediation, appointment, other |
+| `discovery.py` | `DiscoveryRequestType` | interrogatory, rfa, rfp, witness_list |
+| `discovery.py` | `DiscoveryRequestStatus` | pending_client, client_responded, attorney_review, finalized, objected |
+| `discovery.py` | `RFASelection` | admit, deny, lack_sufficient_information |
+| `user_role.py` | `UserRoleType` | client, attorney, paralegal, admin |
 
 ---
 
@@ -301,24 +377,45 @@ Delete `app/db/models/attorney.py` and `app/db/repositories/attorney.py` once `S
 
 - Routes are **thin** — they validate input, call a service method, and return a response. No business logic in route handlers.
 - All routes are versioned: `/api/v1/...`
-- Utility routes (health check, config): `GET /api/health`, `GET /api/config`
-- Use `Depends(require_role([...]))` on every protected route
+- Utility routes (health check, config): `GET /api/health`, `GET /api/config` — excluded from auth
+- Auth routes (`/api/v1/auth/me`, `/api/v1/auth/correlate-staff`) require a valid JWT but NOT `require_role()`
+- All other routes use `Depends(require_role([...]))` for RBAC
 - Return Pydantic response schemas (from `app/schemas/`) — never return raw `InDB` models directly to the frontend
 
 ### Middleware Stack (in order)
-1. `CORSMiddleware`
-2. `AuthMiddleware` — validates Supabase JWT; injects `supabase_uid` and `role` into `request.state`
-3. Route-level `Depends(require_role([...]))`
+1. `CORSMiddleware` — localhost origins in dev; `host_url` only in prod
+2. `AuthMiddleware` — validates Supabase JWT; injects `supabase_uid`, `role`, `email` into `request.state`; excluded paths: `/api/health`, `/api/config`, `/docs`, `/openapi.json`, `/redoc`; passes through `OPTIONS` preflight
+3. Route-level `Depends(require_role([...]))` — resolves authoritative role from `user_roles` table, not JWT claim
 
 ---
 
-## 10. LLM Service (`app/services/llm_service.py`)
+## 10. Authentication & Correlation Flow
+
+### Staff Lifecycle
+1. Admin creates a staff record with `auth_email` set (the Google email the person will use)
+2. Staff member signs in via Google OAuth → redirected to `/auth/callback`
+3. `AuthCallbackPage` calls `GET /api/v1/auth/me` — returns null (no role yet)
+4. Redirected to `/onboarding` → calls `POST /api/v1/auth/correlate-staff`
+5. Backend matches `auth_email` → writes `supabase_uid`, creates `user_roles` record
+6. Subsequent logins skip onboarding — `getMe()` returns the existing role
+
+### Key Details
+- `staff.supabase_uid` is nullable — null means "not yet linked"
+- `staff.auth_email` has a UNIQUE constraint + partial index (`WHERE supabase_uid IS NULL`)
+- The correlation endpoint is idempotent
+- `auth_flow.py` routes do NOT use `require_role()` — any authenticated user can access them
+- Migration `006_staff_auth_fields.sql` implements the schema changes
+
+---
+
+## 11. LLM Service (`app/services/llm_service.py`)
 
 All LLM calls go through a single `LLMService` class. No other file in the codebase imports an LLM SDK directly.
 
-- Dispatches on `settings.llm_vendor`
+- `complete(system_prompt, user_message)` → dispatches to `settings.llm_vendor`
+- `complete_fast(system_prompt, user_message)` → dispatches to `settings.llm_fast_vendor`
 - Supported vendors: `anthropic`, `gemini`, `openai`, `groq`, `deepseek`
-- Use `settings.llm_fast_vendor` for latency-sensitive calls (e.g., real-time billing parse)
+- Lazy imports per vendor (avoids loading unused SDKs)
 - Always log at `DEBUG` level before and after LLM calls (prompt truncated to 200 chars if needed)
 - LLM responses that should be structured data must instruct the model to return **only valid JSON with no markdown fences or preamble**; parse with `model.model_validate_json(response_text)`
 
@@ -332,9 +429,32 @@ All LLM calls go through a single `LLMService` class. No other file in the codeb
 
 ---
 
-## 11. Audit Log
+## 12. Business Logic: Billing
 
-Sensitive actions must write a record to the `audit_log` table **in addition to** the application log. Use a shared `AuditLogger` service for this — do not write to `audit_log` directly from route handlers.
+### Rate Resolution Order (BillingService.resolve_rate)
+
+1. `matter_rate_overrides` — per-staff, per-matter override
+2. `matter.rate_card` — rates by role (e.g. `{"attorney": 350, "paralegal": 150}`)
+3. `staff.default_billing_rate` — staff member's default rate
+4. **Pro bono override:** if `matter.is_pro_bono` is True, TIME entries → rate=0, amount=0
+
+This is enforced in three places:
+- Python: `BillingService.resolve_rate()` (primary)
+- SQL function: `resolve_billing_rate()` (for reporting queries)
+- DB trigger: `enforce_pro_bono_zero_rate` (backstop on INSERT/UPDATE)
+
+### Immutability Rules
+- Billed entries cannot be edited — `prevent_billed_entry_edit` trigger
+- Trust ledger entries cannot be updated or deleted — `deny_trust_ledger_mutation` trigger
+- Audit log entries cannot be updated or deleted — `deny_audit_log_mutation` trigger
+
+---
+
+## 13. Audit Log
+
+Sensitive actions must write a record to the `audit_log` table **in addition to** the application log. Use the `AuditLogger` service — do not write to `audit_log` directly from route handlers.
+
+`AuditLogger.log()` **never re-raises on failure** — audit logging must not crash the primary operation.
 
 Actions requiring an audit log entry:
 - Billing entry created / edited / deleted
@@ -344,154 +464,135 @@ Actions requiring an audit log entry:
 - Trust ledger transaction posted
 - User role changed
 
-Schema:
-```sql
-CREATE TABLE audit_log (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at   TIMESTAMPTZ DEFAULT now(),
-    supabase_uid TEXT,
-    action       TEXT NOT NULL,      -- e.g. 'billing_entry.created'
-    entity_type  TEXT NOT NULL,      -- e.g. 'billing_entry'
-    entity_id    TEXT,
-    before_json  JSONB,
-    after_json   JSONB
-);
-```
-
 ---
 
-## 12. Frontend Conventions
+## 14. Frontend Conventions
 
 ### API Calls
 All backend calls go through `src/lib/api.ts`. Never call `fetch()` or `axios` directly from a component.
 
 ```typescript
-// src/lib/api.ts
-const BASE_URL = import.meta.env.VITE_API_BASE_URL;
-
-export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const session = await supabase.auth.getSession();
-  const token = session.data.session?.access_token;
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options?.headers,
-    },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { apiFetch } from '../lib/api'
+const data = await apiFetch<MyType>('/api/v1/some-endpoint')
 ```
 
+`apiFetch<T>()` automatically attaches the Supabase Bearer token from the current session.
+
+### Supabase JS Client
+Used **only** for auth session management (`src/lib/supabaseClient.ts`). Do not use `supabase.from(...)` for data queries from the frontend.
+
+### Routing
+- Public routes: `/`, `/login`, `/auth/callback`, `/onboarding`, `/access-denied`
+- Protected routes: `/app/*` wrapped in `ProtectedRoute` → `AppShell`
+- `ProtectedRoute` redirects to `/login` (no session), `/onboarding` (no role), or `/access-denied` (client role)
+- Admin-only nav items (e.g. Admin page) filtered by role in `AppShell`
+
 ### Dual-Density Layout
-The `AppShell` component sets a `data-density` attribute on `<body>` based on the user's role:
+`AuthContext` sets `document.body.dataset.density` based on the user's role:
 - `data-density="relaxed"` — client portal (generous spacing, larger type)
 - `data-density="compact"` — staff portal (tighter grid, more info per viewport)
 
-CSS custom properties and Tailwind variants key off this attribute to adjust spacing and font sizes globally. Do not hardcode density-specific styles in individual components.
-
-### Supabase JS Client
-Used **only** for auth:
-```typescript
-// src/lib/supabaseClient.ts
-import { createClient } from '@supabase/supabase-js';
-export const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
-```
-Do not use `supabase.from(...)` for data queries from the frontend.
+### Styling
+- Tailwind CSS utility classes only — no inline styles
+- Custom component classes defined in `src/index.css` `@layer components`: `btn-primary`, `btn-secondary`, `btn-gold`, `card`, `input`, `label`
+- Custom colors in `tailwind.config.js`: navy, gold, off-white, text-primary, text-secondary, border
+- Fonts: `font-display` (Playfair Display), `font-sans` (Inter), `font-mono` (JetBrains Mono)
 
 ---
 
-## 13. Docker
+## 15. Docker
 
-### Base (`docker-compose.yml`)
-```yaml
-services:
-  api:
-    build: ./app
-    ports: ["8000:8000"]
-    env_file: .env
-
-  frontend:
-    build: ./frontend
-    ports: ["3000:80"]
-    env_file: .env.frontend
+### Running with Docker
+```bash
+docker compose up              # Dev (override auto-applied): hot reload, DEBUG logging
+docker compose -f docker-compose.yml up  # Production: static nginx + uvicorn
 ```
 
-### Dev Overrides (`docker-compose.override.yml`)
-```yaml
-services:
-  api:
-    volumes:
-      - ./app:/app
-    environment:
-      - IS_DEVELOPMENT=true
-      - LOG_LEVEL=DEBUG
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+### Running without Docker
+```bash
+# Terminal 1 — backend
+uvicorn main:app --app-dir app --host 0.0.0.0 --port 8000 --reload
 
-  frontend:
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000
+# Terminal 2 — frontend
+cd frontend && npm install && npm run dev
 ```
 
-Run dev stack: `docker compose up` (override is applied automatically).  
-Run production stack: `docker compose -f docker-compose.yml up`.
+Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 
-### Startup Checks (`app/main.py`)
-On startup:
-1. Pydantic validates all `Settings` fields — raises `ValidationError` before accepting requests if required fields are missing
+### Production Frontend
+Multi-stage Docker build: `npm run build` → static bundle served by nginx. Nginx config handles SPA fallback (`try_files $uri $uri/ /index.html`) and proxies `/api/` to the backend service.
+
+### Startup Checks
+1. Pydantic validates all `Settings` fields — raises `ValidationError` before accepting requests
 2. `SupabaseManager.__init__` raises `ValueError` if `supabase_url` or `supabase_service_role_key` are empty
-3. Log at `INFO`: `"Cyclone API started | env=%s llm_vendor=%s log_level=%s"`
+3. Logs at `INFO`: `"Cyclone API started | env=%s llm_vendor=%s log_level=%s"`
 
 ---
 
-## 14. Environment Variables
+## 16. Implementation Status — What's Not Built Yet
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Client Portal (separate from staff) | Not started | Client role exists; no client-facing pages |
+| PDF bill generation | Not started | WeasyPrint in requirements.txt; no `pdf_service.py` |
+| Stripe checkout / webhooks | Not started | Keys configured; no handler |
+| Email notifications | Not started | No email service |
+| Fee agreement templates + e-sign | Not started | Model exists; no UI or workflow |
+| Discovery response editing UI | Partial | Request viewing works; response CRUD not wired |
+| Client intake form / StepWizard | Not started | |
+| File upload (receipts, documents) | Not started | |
+| Shared components (DataTable, ConfirmDialog) | Not started | Pages use inline tables |
+| Test suite | Not started | No unit or integration tests |
+| Phase 2 conflict checking (pg_trgm) | SQL ready | Python wiring uses substring match only |
+
+---
+
+## 17. Environment Variables
 
 | Variable | Used By | Notes |
 |----------|---------|-------|
+| `FIRM_NAME` | Backend | Displayed in `/api/config` |
+| `IS_DEVELOPMENT` | Backend | Gates debug behavior and docs |
+| `HOST_URL` | Backend | CORS allowed origin |
 | `SUPABASE_URL` | Backend + Frontend | Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend only | Never expose to frontend |
 | `SUPABASE_ANON_KEY` | Frontend only | Subject to RLS |
-| `SUPABASE_JWT_SECRET` | Backend (auth middleware) | |
-| `LLM_VENDOR` | Backend | Active vendor |
+| `SUPABASE_JWT_SECRET` | Backend | Auth middleware token validation |
+| `LLM_VENDOR` | Backend | Active vendor: gemini, openai, anthropic, groq, deepseek |
+| `LLM_FAST_VENDOR` | Backend | Vendor for latency-sensitive calls |
 | `ANTHROPIC_API_KEY` | Backend | If vendor = anthropic |
 | `GEMINI_API_KEY` | Backend | If vendor = gemini |
 | `OPENAI_API_KEY` | Backend | If vendor = openai |
 | `GROQ_API_KEY` | Backend | If vendor = groq |
+| `DEEPSEEK_API_KEY` | Backend | If vendor = deepseek |
 | `STRIPE_SECRET_KEY` | Backend | Never expose to frontend |
 | `STRIPE_PUBLISHABLE_KEY` | Backend → `/api/config` → Frontend | |
 | `STRIPE_WEBHOOK_SECRET` | Backend | Webhook validation |
-| `IS_DEVELOPMENT` | Backend | Gates debug behavior |
 | `LOG_LEVEL` | Backend | Default: WARNING |
 | `VITE_SUPABASE_URL` | Frontend build | Baked in at build time |
 | `VITE_SUPABASE_ANON_KEY` | Frontend build | |
 | `VITE_API_BASE_URL` | Frontend build | |
 
-`.env.example` must be kept current. Every new env var added to the codebase must appear in `.env.example` in the same commit.
+`.env.example` must be kept current. Every new env var must appear in `.env.example` in the same commit.
 
 ---
 
-## 15. What NOT to Do
+## 18. What NOT to Do
 
 | Don't | Do Instead |
 |-------|-----------|
+| Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |
 | Call `logging.getLogger()` directly | `LoggerFactory.create_logger(__name__)` |
-| Instantiate `Settings()` in app code | `from app.util.settings import settings` |
+| Instantiate `Settings()` in app code | `from util.settings import settings` |
 | Call `supabase.create_client()` outside `supabasemanager.py` | Use a repository class |
-| Pass a JSON string to `repo.insert()` | Pass `.model_dump()` |
+| Pass a JSON string to `repo.insert()` | Pass `.model_dump()` (a dict) |
 | Write business logic in route handlers | Write it in a service class |
 | Query Supabase tables from React components | Go through `src/lib/api.ts` → FastAPI |
 | Use `orm_mode = True` | Use `ConfigDict(from_attributes=True)` |
 | Log PII (names, amounts, case facts) | Log entity IDs only |
 | Import LLM SDKs outside `llm_service.py` | Call `llm_service.complete(...)` |
 | Hardcode environment-specific values | Use `settings.*` |
+| Use `supabase.from(...)` in frontend components | Use `apiFetch()` from `src/lib/api.ts` |
 
 ---
 
