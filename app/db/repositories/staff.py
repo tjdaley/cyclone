@@ -5,10 +5,10 @@ Replaces the illustrative attorney.py repository starter.
 """
 from typing import Optional
 
-from app.db.models.staff import StaffMemberInDB
-from app.db.repositories.base_repo import BaseRepository
-from app.db.supabasemanager import DatabaseManager
-from app.util.loggerfactory import LoggerFactory
+from db.models.staff import StaffMemberInDB
+from db.repositories.base_repo import BaseRepository
+from db.supabasemanager import DatabaseManager
+from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
 

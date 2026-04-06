@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-reasoner"
     deepseek_base_url: str = "https://api.deepseekr.com/v1/"
 
+    # Billing settings
+    time_increment_options: list = [0.1, 0.25, 0.5, 1.0]
+    default_refresh_trigger_pct: float = 0.40
+
+    # Stripe settings
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_publishable_key: str = ""  # safe to expose to frontend via GET /api/config
+
     class Config:
         env_file = ".env"
         # extra = "forbid"  # Pydantic will throw an error if unexpected env vars are present

@@ -8,8 +8,8 @@ from postgrest.base_request_builder import APIResponse
 from postgrest.types import CountMethod
 from postgrest.exceptions import APIError
 
-from app.util.settings import Settings
-from app.util.loggerfactory import LoggerFactory
+from util.settings import Settings
+from util.loggerfactory import LoggerFactory
 
 import logging
 

@@ -46,12 +46,26 @@ class StaffMember(BaseModel):
     Domain model for a staff member.
 
     Covers attorneys, paralegals, and admins. Non-attorneys will have an
-    empty ``bar_admissions`` list. ``supabase_uid`` links this record to the
-    Supabase Auth user created during onboarding.
+    empty ``bar_admissions`` list.
+
+    Lifecycle:
+    1. Admin creates the record with ``auth_email`` set to the address the
+       employee will use to sign in (e.g. their Google account email).
+       ``supabase_uid`` is left null at this point.
+    2. On the employee's first login the auth correlation endpoint matches
+       ``auth_email`` to the Supabase Auth session email and writes the
+       resulting ``auth.users.id`` into ``supabase_uid``, forming a permanent
+       link between the staff record and the auth system.
     """
-    supabase_uid: str = Field(
-        ...,
-        description="Supabase Auth UID — foreign key to auth.users; set at account creation",
+    supabase_uid: Optional[str] = Field(
+        default=None,
+        description="Supabase Auth UID — set automatically on first login via the correlation flow",
+    )
+    auth_email: Optional[str] = Field(
+        default=None,
+        description="The email address the staff member will use to sign in (Google / magic link). "
+                    "Used once to correlate the Supabase Auth user with this record. "
+                    "Distinct from the work email field.",
     )
     role: StaffRole = Field(..., description="Staff role governing portal access and permissions")
     name: FullName = Field(..., description="Full legal name of the staff member")
@@ -65,6 +79,13 @@ class StaffMember(BaseModel):
     bar_admissions: List[BarAdmission] = Field(  # type: ignore[assignment]
         default_factory=list,
         description="State bar admissions; empty list for non-attorney roles",
+    )
+    default_billing_rate: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Default hourly billing rate in USD for this staff member. "
+                    "Null for admin roles that do not bill time. "
+                    "Overridden per-matter by MatterRateOverride records.",
     )
 
 

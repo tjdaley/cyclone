@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #1A1A1A;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Compact density — staff portal */
+  body[data-density="compact"] {
+    font-size: 14px;
+    --spacing-card: 1rem;
+  }
+
+  /* Relaxed density — client portal */
+  body[data-density="relaxed"] {
+    font-size: 15px;
+    --spacing-card: 1.5rem;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center px-5 py-2.5
+           rounded-md bg-navy text-white font-medium text-sm
+           hover:bg-navy-light transition-colors focus:outline-none
+           focus:ring-2 focus:ring-gold focus:ring-offset-2;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center px-5 py-2.5
+           rounded-md border border-navy text-navy font-medium text-sm
+           hover:bg-navy hover:text-white transition-colors
+           focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2;
+  }
+
+  .btn-gold {
+    @apply inline-flex items-center justify-center px-5 py-2.5
+           rounded-md bg-gold text-navy font-semibold text-sm
+           hover:bg-gold-light transition-colors focus:outline-none
+           focus:ring-2 focus:ring-navy focus:ring-offset-2;
+  }
+
+  .card {
+    @apply bg-white rounded-lg border border-border shadow-sm p-6;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-border px-3 py-2 text-sm
+           placeholder:text-text-secondary
+           focus:outline-none focus:ring-2 focus:ring-navy focus:border-transparent;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-text-primary mb-1;
+  }
+}
