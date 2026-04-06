@@ -1,9 +1,9 @@
 """
 app/db/models/attorney.py - Data model for attorneys
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
-from datetime import Datetime
+from datetime import datetime
 
 class FullName:
   courtesy_title: Optional[str] = Field(default=None, description="Courtesy title, e.g. Mr., Ms., Dr.")
@@ -26,5 +26,6 @@ class Attorney:
 
 class AttorneyInDB(Attorney):
   id: int = Field(..., description="Unique key for this table")
-  created_at: Datetime = Field(..., description="Date/time this record was created. Set by database")
-  updated_at: Optional[Datetime] = Field(default=None, description="Date/time this record was last updated. Set by database")
+  created_at: datetime = Field(..., description="Date/time this record was created. Set by database")
+  updated_at: Optional[datetime] = Field(default=None, description="Date/time this record was last updated. Set by database")
+  model_config = ConfigDict(from_attributes=True)
