@@ -37,7 +37,14 @@ class LLMService:
         :rtype: str
         :raises ValueError: If the configured vendor is not supported.
         """
-        return self._dispatch(settings.llm_vendor, system_prompt, user_message)
+        model = getattr(settings, f"{settings.llm_vendor}_model", None)
+        if not model:
+            LOGGER.error(
+                "LLMService.complete: no model configured for vendor=%s",
+                settings.llm_vendor,
+             )
+            raise ValueError(f"No model configured for vendor {settings.llm_vendor}")
+        return self._dispatch(settings.llm_vendor, model, system_prompt, user_message)
 
     def complete_fast(self, system_prompt: str, user_message: str) -> str:
         """
@@ -52,9 +59,16 @@ class LLMService:
         :return: Model response text.
         :rtype: str
         """
-        return self._dispatch(settings.llm_fast_vendor, system_prompt, user_message)
+        model = getattr(settings, f"{settings.llm_fast_vendor}_fast_model", None)
+        if not model:
+            LOGGER.error(
+                "LLMService.complete_fast: no fast model configured for vendor=%s, falling back to primary model",
+                settings.llm_fast_vendor,
+             )
+            raise ValueError(f"No fast model configured for vendor {settings.llm_fast_vendor}")
+        return self._dispatch(settings.llm_fast_vendor, model, system_prompt, user_message)
 
-    def _dispatch(self, vendor: str, system_prompt: str, user_message: str) -> str:
+    def _dispatch(self, vendor: str, model: str, system_prompt: str, user_message: str) -> str:
         """
         Route to the appropriate vendor implementation.
 
@@ -85,7 +99,7 @@ class LLMService:
         if handler is None:
             raise ValueError("Unsupported LLM vendor: %s" % vendor)
         try:
-            response = handler(system_prompt, user_message)
+            response = handler(model, system_prompt, user_message)
         except Exception as e:
             LOGGER.error("LLMService._dispatch: vendor=%s error: %s", vendor, str(e))
             raise
@@ -99,10 +113,12 @@ class LLMService:
 
     # ── Vendor implementations ─────────────────────────────────────────────
 
-    def _call_anthropic(self, system_prompt: str, user_message: str) -> str:
+    def _call_anthropic(self, model: str, system_prompt: str, user_message: str) -> str:
         """
         Call the Anthropic Messages API.
 
+        :param model: Model identifier string.
+        :type model: str
         :param system_prompt: System prompt text.
         :type system_prompt: str
         :param user_message: User message text.
@@ -114,7 +130,7 @@ class LLMService:
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
-            model=settings.anthropic_model,
+            model=model,
             max_tokens=2048,
             temperature=settings.llm_temperature,
             system=system_prompt,
@@ -122,10 +138,12 @@ class LLMService:
         )
         return response.content[0].text
 
-    def _call_gemini(self, system_prompt: str, user_message: str) -> str:
+    def _call_gemini(self, model: str, system_prompt: str, user_message: str) -> str:
         """
         Call the Google Gemini API via the google-genai SDK.
 
+        :param model: Model identifier string.
+        :type model: str
         :param system_prompt: System prompt text.
         :type system_prompt: str
         :param user_message: User message text.
@@ -138,7 +156,7 @@ class LLMService:
 
         client = genai.Client(api_key=settings.gemini_api_key)
         response = client.models.generate_content(
-            model=settings.gemini_model,
+            model=model,
             contents=user_message,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -148,10 +166,12 @@ class LLMService:
         )
         return response.text
 
-    def _call_openai(self, system_prompt: str, user_message: str) -> str:
+    def _call_openai(self, model: str, system_prompt: str, user_message: str) -> str:
         """
         Call the OpenAI Chat Completions API.
 
+        :param model: Model identifier string.
+        :type model: str
         :param system_prompt: System prompt text.
         :type system_prompt: str
         :param user_message: User message text.
@@ -163,7 +183,7 @@ class LLMService:
 
         client = OpenAI(api_key=settings.openai_api_key)
         response = client.chat.completions.create(
-            model=settings.openai_model,
+            model=model,
             temperature=settings.llm_temperature,
             top_p=settings.llm_top_p,
             messages=[
@@ -173,10 +193,12 @@ class LLMService:
         )
         return response.choices[0].message.content or ""
 
-    def _call_groq(self, system_prompt: str, user_message: str) -> str:
+    def _call_groq(self, model: str, system_prompt: str, user_message: str) -> str:
         """
         Call the Groq API (OpenAI-compatible interface).
 
+        :param model: Model identifier string.
+        :type model: str
         :param system_prompt: System prompt text.
         :type system_prompt: str
         :param user_message: User message text.
@@ -191,7 +213,7 @@ class LLMService:
             base_url=settings.groq_base_url,
         )
         response = client.chat.completions.create(
-            model=settings.groq_model,
+            model=model,
             temperature=settings.llm_temperature,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -200,10 +222,12 @@ class LLMService:
         )
         return response.choices[0].message.content or ""
 
-    def _call_deepseek(self, system_prompt: str, user_message: str) -> str:
+    def _call_deepseek(self, model: str, system_prompt: str, user_message: str) -> str:
         """
         Call the DeepSeek API (OpenAI-compatible interface).
 
+        :param model: Model identifier string.
+        :type model: str
         :param system_prompt: System prompt text.
         :type system_prompt: str
         :param user_message: User message text.
@@ -218,7 +242,7 @@ class LLMService:
             base_url=settings.deepseek_base_url,
         )
         response = client.chat.completions.create(
-            model=settings.deepseek_model,
+            model=model,
             temperature=settings.llm_temperature,
             messages=[
                 {"role": "system", "content": system_prompt},

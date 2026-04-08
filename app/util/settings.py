@@ -37,19 +37,24 @@ class Settings(BaseSettings):
     # LLM settings
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
+    gemini_fast_model: str = "gemini-2.0-flash"
 
     openai_api_key: str = ""
     openai_model: str = ""
+    openai_fast_model: str = ""
 
     anthropic_api_key: str = ""
     anthropic_model: str = ""
+    anthropic_fast_model: str = ""
 
     groq_api_key: str = ""
     groq_model: str = "groq/compound"
+    groq_fast_model: str = "groq/fast"
     groq_base_url: str = "https://api.groq.ai/v1/"
 
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-reasoner"
+    deepseek_fast_model: str = "deepseek-reasoner-fast"
     deepseek_base_url: str = "https://api.deepseekr.com/v1/"
 
     # Client intake settings
