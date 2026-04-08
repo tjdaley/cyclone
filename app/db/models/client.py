@@ -28,11 +28,25 @@ class Client(BaseModel):
     trust_ledger and billing_entries tables at runtime.
     """
     name: FullName = Field(..., description="Client's full legal name")
-    email: str = Field(..., description="Primary email address for billing statements and portal access")
+    auth_email: str = Field(
+        ...,
+        description="Email address the client will use to sign in to the client portal. "
+                    "Used for first-login correlation, same as staff.auth_email.",
+    )
+    email: str = Field(..., description="Primary email address for billing statements and correspondence")
     telephone: str = Field(..., description="Primary telephone number")
-    referral_source: Optional[str] = Field(
+    referral_type: str = Field(
+        ...,
+        description="Category of referral: 'attorney', 'former client', 'search', 'ai', 'other'. "
+                    "Valid values come from settings.referral_types.",
+    )
+    referral_source: str = Field(
+        ...,
+        description="Name of the referring attorney, former client, search engine, AI vendor, etc.",
+    )
+    referred_to_staff_id: Optional[int] = Field(
         default=None,
-        description="How the client was referred to the firm, e.g. 'Google', 'Existing Client'",
+        description="FK to staff table — who the matter was referred to. Null means referred to firm generally.",
     )
     status: ClientStatus = Field(
         default=ClientStatus.prospect,
@@ -41,6 +55,14 @@ class Client(BaseModel):
     prior_counsel: Optional[str] = Field(
         default=None,
         description="Name of prior counsel, if any, for conflict-check purposes",
+    )
+    ok_to_rehire: bool = Field(
+        default=True,
+        description="Would the firm take another matter from this client?",
+    )
+    ending_ar_balance: float = Field(
+        default=0.0,
+        description="Ending accounts receivable balance in USD",
     )
     notes: Optional[str] = Field(
         default=None,

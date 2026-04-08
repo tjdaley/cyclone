@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "WebSearch",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(docker compose:*)"
+    ]
+  }
+}

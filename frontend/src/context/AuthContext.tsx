@@ -23,8 +23,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   const fetchProfile = async () => {
-    const p = await getMe()
-    setProfile(p)
+    try {
+      const p = await getMe()
+      setProfile(p)
+    } catch {
+      // 404 (no role yet) is expected on first login — profile stays null
+      setProfile(null)
+    }
   }
 
   useEffect(() => {

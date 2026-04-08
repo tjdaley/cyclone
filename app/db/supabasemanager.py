@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from datetime import date, datetime
+from enum import Enum
 from typing import Any, Optional, Type, TypeVar
 from postgrest import SyncSelectRequestBuilder
 from pydantic import BaseModel
@@ -20,6 +22,23 @@ logging.getLogger("postgrest").setLevel(logging.DEBUG)
 LOGGER = LoggerFactory.create_logger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _json_safe(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert datetime and enum values in a dict so httpx can JSON-serialize it."""
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+        elif isinstance(v, date):
+            out[k] = v.isoformat()
+        elif isinstance(v, Enum):
+            out[k] = v.value
+        elif isinstance(v, dict):
+            out[k] = _json_safe(v)
+        else:
+            out[k] = v
+    return out
 
 SETTINGS = Settings()
 
@@ -176,6 +195,7 @@ class SupabaseManager(DatabaseManager):
             LOGGER.error("CRITICAL: String passed to insert instead of dict. Raising error.")
             raise ValueError("The 'data' argument must be a dictionary, not a JSON string.")
 
+        data = _json_safe(data)
         try:
             result = self.client.table(table).insert(data).execute()
             if not result.data:
@@ -209,6 +229,7 @@ class SupabaseManager(DatabaseManager):
         :return: Parsed instance of the updated record.
         :rtype: BaseModel
         """
+        data = _json_safe(data)
         try:
             result = self.client.table(table).update(data).eq("id", record_id).execute()
             return result_type(**result.data[0])  # type: ignore

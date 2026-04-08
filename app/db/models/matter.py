@@ -1,7 +1,7 @@
 """
 app/db/models/matter.py - Domain and database models for legal matters.
 """
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Optional
 
@@ -118,6 +118,11 @@ class Matter(BaseModel):
         }
     """
     client_id: int = Field(..., description="Foreign key to the primary client on this matter")
+    short_name: Optional[str] = Field(
+        default=None,
+        description="Short display name, e.g. 'SALMONS - divorce - 2026'. "
+                    "Auto-generated from client last name, matter type, and year if not provided.",
+    )
     matter_name: str = Field(..., description="Human-readable matter name, e.g. 'Smith v. Jones Divorce'")
     matter_type: MatterType = Field(..., description="Category of matter; drives fee agreement template selection")
     status: MatterStatus = Field(default=MatterStatus.intake, description="Current lifecycle status of the matter")
@@ -144,6 +149,34 @@ class Matter(BaseModel):
         default=False,
         description="When True, all TIME billing entries on this matter are automatically set to $0.00. "
                     "Expense and flat-fee entries are unaffected.",
+    )
+    fee_agreement_signed_date: Optional[date] = Field(
+        default=None,
+        description="Date the fee agreement was signed by the client",
+    )
+    opened_date: Optional[date] = Field(
+        default=None,
+        description="Date the matter was officially opened",
+    )
+    closed_date: Optional[date] = Field(
+        default=None,
+        description="Date the matter was closed",
+    )
+    state: str = Field(
+        default="Texas",
+        description="State where the matter is filed or administered",
+    )
+    county: str = Field(
+        ...,
+        description="County where the matter is filed",
+    )
+    court_name: Optional[str] = Field(
+        default=None,
+        description="Name of the court, e.g. '401st District Court'",
+    )
+    matter_number: Optional[str] = Field(
+        default=None,
+        description="Court-assigned case/matter number",
     )
     notes: Optional[str] = Field(default=None, description="Internal matter notes; not visible to the client")
 

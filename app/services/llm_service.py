@@ -69,7 +69,7 @@ class LLMService:
         :raises ValueError: If ``vendor`` is not in the supported set.
         """
         LOGGER.debug(
-            "LLMService._dispatch: vendor=%s prompt=%.%ds",
+            "LLMService._dispatch: vendor=%s prompt=%.*s",
             vendor,
             _MAX_LOG_CHARS,
             user_message,
@@ -84,9 +84,13 @@ class LLMService:
         handler = dispatch_map.get(vendor)
         if handler is None:
             raise ValueError("Unsupported LLM vendor: %s" % vendor)
-        response = handler(system_prompt, user_message)
+        try:
+            response = handler(system_prompt, user_message)
+        except Exception as e:
+            LOGGER.error("LLMService._dispatch: vendor=%s error: %s", vendor, str(e))
+            raise
         LOGGER.debug(
-            "LLMService._dispatch: vendor=%s response=%.%ds",
+            "LLMService._dispatch: vendor=%s response=%.*s",
             vendor,
             _MAX_LOG_CHARS,
             response,
@@ -120,7 +124,7 @@ class LLMService:
 
     def _call_gemini(self, system_prompt: str, user_message: str) -> str:
         """
-        Call the Google Gemini API.
+        Call the Google Gemini API via the google-genai SDK.
 
         :param system_prompt: System prompt text.
         :type system_prompt: str
@@ -129,18 +133,19 @@ class LLMService:
         :return: Response text.
         :rtype: str
         """
-        import google.generativeai as genai  # noqa: PLC0415
+        from google import genai  # noqa: PLC0415
+        from google.genai import types  # noqa: PLC0415
 
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            system_instruction=system_prompt,
-            generation_config=genai.GenerationConfig(
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
                 temperature=settings.llm_temperature,
                 top_p=settings.llm_top_p,
             ),
         )
-        response = model.generate_content(user_message)
         return response.text
 
     def _call_openai(self, system_prompt: str, user_message: str) -> str:

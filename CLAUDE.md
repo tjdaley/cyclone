@@ -46,18 +46,18 @@ cyclone/
 │   │   │   └── audit_log.py       # AuditLog (immutable — id is UUID str, no updated_at)
 │   │   └── repositories/          # BaseRepository[T] subclasses — see §8
 │   │       ├── base_repo.py       # Generic CRUD wrapper
-│   │       ├── staff.py           # get_by_supabase_uid, get_by_slug, get_by_office
-│   │       ├── client.py          # get_by_email, get_by_status
+│   │       ├── staff.py           # Domain queries (by uid, slug, office)
+│   │       ├── client.py          # Domain queries (by email, status)
 │   │       ├── matter.py          # + MatterRateOverrideRepository, MatterStaffRepository,
 │   │       │                      #   BillingSplitRepository, OpposingPartyRepository
-│   │       ├── billing_entry.py   # get_by_matter, get_unbilled_for_matter
-│   │       ├── billing_cycle.py   # get_by_matter, get_open_cycle
-│   │       ├── trust_ledger.py    # get_by_matter, get_deposits (append-only)
-│   │       ├── fee_agreement.py   # get_by_matter, get_executed
-│   │       ├── matter_event.py    # get_by_matter, get_by_staff
+│   │       ├── billing_entry.py   # Domain queries (by matter, unbilled, cycle, staff)
+│   │       ├── billing_cycle.py   # Domain queries (by matter, open/closed)
+│   │       ├── trust_ledger.py    # Domain queries (by matter, deposits) — append-only
+│   │       ├── fee_agreement.py   # Domain queries (by matter, executed, pending)
+│   │       ├── matter_event.py    # Domain queries (by matter, staff)
 │   │       ├── discovery.py       # DiscoveryRequestRepository, DiscoveryResponseRepository
-│   │       ├── user_role.py       # get_by_uid, uid_has_role
-│   │       └── audit_log.py       # get_by_entity, get_by_uid (read-only)
+│   │       ├── user_role.py       # Auth entry point: lookup by supabase_uid, auth_email
+│   │       └── audit_log.py       # Read-only queries (by entity, uid, action)
 │   ├── routers/                   # FastAPI route handlers (thin — delegate to services)
 │   │   ├── health.py              # GET /api/health, GET /api/config (public)
 │   │   ├── auth_flow.py           # GET /api/v1/auth/me, POST /api/v1/auth/correlate-staff
@@ -194,10 +194,10 @@ from app.util.settings import settings
 | `version` | `str` | `"2026.04.05"` | API version string |
 | `host_url` | `str` | `"http://localhost:8000"` | CORS and URL generation |
 | `is_development` | `bool` | `False` | Gates debug behavior and docs endpoints |
-| `firm_name` | `str` | `"Your Law Firm"` | Displayed in config endpoint |
+| `firm_name` | `str` | `"Your Law Firm - Override in .env"` | Displayed in config endpoint |
 | `supabase_url` | `str` | `""` | Supabase project URL |
 | `supabase_service_role_key` | `str` | `""` | Used by backend only — never expose to frontend |
-| `supabase_jwt_secret` | `str` | `""` | JWT validation in auth middleware |
+| `supabase_jwt_secret` | `str` | `""` | **Currently unused** — auth middleware uses JWKS/ES256 instead |
 | `supabase_anon_key` | `str` | `""` | Used by frontend Supabase JS client |
 | `llm_vendor` | `str` | `"gemini"` | Active LLM vendor: `"anthropic"`, `"gemini"`, `"openai"`, `"groq"`, `"deepseek"` |
 | `llm_fast_vendor` | `str` | `"gemini"` | Vendor for latency-sensitive calls |
@@ -367,8 +367,8 @@ class MyEntityInDB(MyEntity):
 | `fee_agreement.py` | `FeeAgreementStatus` | draft, sent_to_client, executed, voided |
 | `matter_event.py` | `EventType` | hearing, deposition, deadline, mediation, appointment, other |
 | `discovery.py` | `DiscoveryRequestType` | interrogatory, rfa, rfp, witness_list |
-| `discovery.py` | `DiscoveryRequestStatus` | pending_client, client_responded, attorney_review, finalized, objected |
-| `discovery.py` | `RFASelection` | admit, deny, lack_sufficient_information |
+| `discovery.py` | `DiscoveryRequestStatus` | pending_client, pending_review, finalized, objected |
+| `discovery.py` | `RFASelection` | admit, deny, insufficient_information |
 | `user_role.py` | `UserRoleType` | client, attorney, paralegal, admin |
 
 ---
@@ -384,27 +384,22 @@ class MyEntityInDB(MyEntity):
 
 ### Middleware Stack (in order)
 1. `CORSMiddleware` — localhost origins in dev; `host_url` only in prod
-2. `AuthMiddleware` — validates Supabase JWT; injects `supabase_uid`, `role`, `email` into `request.state`; excluded paths: `/api/health`, `/api/config`, `/docs`, `/openapi.json`, `/redoc`; passes through `OPTIONS` preflight
+2. `AuthMiddleware` — validates Supabase JWT via JWKS (ES256); injects `supabase_uid`, `role`, `email` into `request.state`; excluded paths: `/api/health`, `/api/config`, `/docs`, `/openapi.json`, `/redoc`; passes through `OPTIONS` preflight
 3. Route-level `Depends(require_role([...]))` — resolves authoritative role from `user_roles` table, not JWT claim
 
 ---
 
 ## 10. Authentication & Correlation Flow
 
-### Staff Lifecycle
-1. Admin creates a staff record with `auth_email` set (the Google email the person will use)
-2. Staff member signs in via Google OAuth → redirected to `/auth/callback`
-3. `AuthCallbackPage` calls `GET /api/v1/auth/me` — returns null (no role yet)
-4. Redirected to `/onboarding` → calls `POST /api/v1/auth/correlate-staff`
-5. Backend matches `auth_email` → writes `supabase_uid`, creates `user_roles` record
-6. Subsequent logins skip onboarding — `getMe()` returns the existing role
+### How It Works
 
-### Key Details
-- `staff.supabase_uid` is nullable — null means "not yet linked"
-- `staff.auth_email` has a UNIQUE constraint + partial index (`WHERE supabase_uid IS NULL`)
-- The correlation endpoint is idempotent
-- `auth_flow.py` routes do NOT use `require_role()` — any authenticated user can access them
-- Migration `006_staff_auth_fields.sql` implements the schema changes
+- Frontend auth uses Supabase JS (Google OAuth). All data access goes through FastAPI.
+- `user_roles` is the **auth entry point**. It has `supabase_uid` (nullable) and `auth_email` (nullable). Login lookup: `user_roles WHERE supabase_uid = <jwt sub>` — single query.
+- `staff.supabase_uid` is also nullable and gets populated during correlation, but is **not** the auth lookup path.
+- `GET /api/v1/auth/me` returns **404** when no role is found. The frontend treats 404 as "needs correlation" and redirects to `/onboarding`.
+- `POST /api/v1/auth/correlate-staff` matches `user_roles.auth_email` to the JWT email (where `supabase_uid IS NULL`), then writes `supabase_uid` into both `user_roles` and `staff`. It is idempotent.
+- `auth_flow.py` routes do NOT use `require_role()` — any authenticated user can access them.
+- Read `auth_flow.py`, `AuthCallbackPage.tsx`, and `OnboardingPage.tsx` for the actual implementation.
 
 ---
 
@@ -433,10 +428,10 @@ All LLM calls go through a single `LLMService` class. No other file in the codeb
 
 ### Rate Resolution Order (BillingService.resolve_rate)
 
-1. `matter_rate_overrides` — per-staff, per-matter override
-2. `matter.rate_card` — rates by role (e.g. `{"attorney": 350, "paralegal": 150}`)
-3. `staff.default_billing_rate` — staff member's default rate
-4. **Pro bono override:** if `matter.is_pro_bono` is True, TIME entries → rate=0, amount=0
+1. **Pro bono short-circuit:** if `matter.is_pro_bono` is True → rate=0, amount=0 (returns immediately)
+2. `matter_rate_overrides` — per-staff, per-matter override
+3. `matter.rate_card` — rates by role (e.g. `{"attorney": 350, "paralegal": 150}`)
+4. `staff.default_billing_rate` — staff member's default rate
 
 This is enforced in three places:
 - Python: `BillingService.resolve_rate()` (primary)
@@ -557,7 +552,7 @@ Multi-stage Docker build: `npm run build` → static bundle served by nginx. Ngi
 | `SUPABASE_URL` | Backend + Frontend | Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend only | Never expose to frontend |
 | `SUPABASE_ANON_KEY` | Frontend only | Subject to RLS |
-| `SUPABASE_JWT_SECRET` | Backend | Auth middleware token validation |
+| `SUPABASE_JWT_SECRET` | Backend | **Currently unused** — middleware uses JWKS/ES256 instead |
 | `LLM_VENDOR` | Backend | Active vendor: gemini, openai, anthropic, groq, deepseek |
 | `LLM_FAST_VENDOR` | Backend | Vendor for latency-sensitive calls |
 | `ANTHROPIC_API_KEY` | Backend | If vendor = anthropic |

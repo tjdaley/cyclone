@@ -5,7 +5,8 @@ import { getMatters } from '../../lib/api'
 
 interface Matter {
   id: number
-  caption: string
+  matter_name: string
+  short_name: string
   matter_type: string
   status: string
   is_pro_bono: boolean
@@ -22,9 +23,11 @@ function StatCard({ label, value, sub }: { label: string; value: string | number
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  open:     'bg-green-100 text-green-800',
-  closed:   'bg-gray-100 text-gray-600',
-  pending:  'bg-amber-100 text-amber-800',
+  active:          'bg-green-100 text-green-800',
+  intake:          'bg-blue-100 text-blue-800',
+  conflict_review: 'bg-amber-100 text-amber-800',
+  closed:          'bg-gray-100 text-gray-600',
+  archived:        'bg-gray-100 text-gray-500',
 }
 
 export default function DashboardPage() {
@@ -40,7 +43,7 @@ export default function DashboardPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const open   = matters.filter(m => m.status === 'open').length
+  const open   = matters.filter(m => m.status === 'active' || m.status === 'intake' || m.status === 'conflict_review').length
   const proBono = matters.filter(m => m.is_pro_bono).length
 
   return (
@@ -97,7 +100,7 @@ export default function DashboardPage() {
               {matters.slice(0, 8).map(m => (
                 <tr key={m.id} className="border-b border-border last:border-0 hover:bg-off-white/60 transition-colors">
                   <td className="px-5 py-3 font-medium text-navy">
-                    {m.caption}
+                    {m.short_name}
                     {m.is_pro_bono && (
                       <span className="ml-2 text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5">Pro bono</span>
                     )}

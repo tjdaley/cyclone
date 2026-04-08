@@ -39,9 +39,11 @@ def assign_role(
     _=Depends(require_role(["admin"])),
 ) -> dict:
     """
-    Assign an application role to a Supabase Auth user.
+    Assign an application role to a staff or client record.
 
-    Body fields: supabase_uid (str), role (str), staff_id (int|null), client_id (int|null).
+    Body fields: role (str), auth_email (str|null), staff_id (int|null),
+    client_id (int|null). ``supabase_uid`` is left null — it is written
+    automatically when the user logs in for the first time.
     Role changes are written to the audit log.
     """
     try:
@@ -50,10 +52,10 @@ def assign_role(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     repo = UserRoleRepository(manager)
-    if repo.uid_has_role(role_obj.supabase_uid):
+    if role_obj.staff_id and repo.staff_has_role(role_obj.staff_id):
         raise HTTPException(
             status_code=409,
-            detail="User already has a role. Use PATCH to change it.",
+            detail="Staff member already has a role. Use PATCH to change it.",
         )
 
     record = repo.insert(role_obj.model_dump())

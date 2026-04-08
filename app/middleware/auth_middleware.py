@@ -7,6 +7,7 @@ downstream ``require_role()`` dependencies.
 """
 from typing import Optional
 
+import httpx
 from fastapi import Request, Response
 from jose import JWTError, jwt
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -25,6 +26,16 @@ _EXCLUDED_PATHS: set[str] = {
     "/openapi.json",
     "/redoc",
 }
+
+# Fetch JWKS from Supabase at module load for ES256 verification
+_JWKS_URL = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
+_JWKS: dict = {"keys": []}
+try:
+    _resp = httpx.get(_JWKS_URL, timeout=10)
+    _JWKS = _resp.json()
+    LOGGER.info("AuthMiddleware: fetched JWKS from %s (%d keys)", _JWKS_URL, len(_JWKS.get("keys", [])))
+except Exception as e:
+    LOGGER.error("AuthMiddleware: failed to fetch JWKS from %s: %s", _JWKS_URL, e)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -95,11 +106,26 @@ def _decode_token(token: str) -> tuple[Optional[str], Optional[str], Optional[st
     :rtype: tuple[Optional[str], Optional[str], Optional[str]]
     """
     try:
+        # Get the key ID from the token header to find the matching JWKS key
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+
+        signing_key = None
+        for key in _JWKS.get("keys", []):
+            if key.get("kid") == kid:
+                signing_key = key
+                break
+
+        if not signing_key:
+            LOGGER.warning("AuthMiddleware: no JWKS key found for kid=%s", kid)
+            return None, None, None
+
         payload = jwt.decode(
             token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            options={"verify_aud": False},  # Supabase JWTs don't always include aud
+            signing_key,
+            algorithms=["ES256"],
+            audience="authenticated",
+            issuer=f"{settings.supabase_url}/auth/v1",
         )
         uid: Optional[str] = payload.get("sub")
         email: Optional[str] = payload.get("email")

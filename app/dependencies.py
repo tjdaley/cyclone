@@ -77,9 +77,9 @@ def require_role(allowed_roles: list[str]) -> Callable:
         if uid is None:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Resolve role from the user_roles table (authoritative)
-        repo = UserRoleRepository(manager)
-        role_record = repo.get_by_uid(uid)
+        # Single-query lookup: user_roles WHERE supabase_uid = uid
+        role_repo = UserRoleRepository(manager)
+        role_record = role_repo.get_by_uid(uid)
         if role_record is None:
             LOGGER.warning("require_role: no role record found for uid=%s", uid)
             raise HTTPException(status_code=403, detail="No role assigned to this account")

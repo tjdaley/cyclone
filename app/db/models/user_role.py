@@ -24,12 +24,30 @@ class UserRole(BaseModel):
     """
     Domain model for a user role assignment.
 
-    Exactly one of ``staff_id`` or ``client_id`` should be non-null,
-    depending on whether ``role`` is a staff role or ``client``.
+    This table is the auth entry point. On every authenticated request the
+    middleware's UID is looked up here directly:
+    ``user_roles WHERE supabase_uid = <jwt sub>``.
+
+    From the resulting record the caller can determine whether this is a
+    staff or client user by checking which FK is populated.
+
+    Lifecycle:
+    1. Admin creates the record with ``auth_email`` set and
+       ``supabase_uid`` null. Exactly one of ``staff_id`` or ``client_id``
+       must be populated.
+    2. On first login, ``POST /api/v1/auth/correlate-staff`` matches
+       ``auth_email`` to the JWT email and writes ``supabase_uid`` into
+       both this record and the corresponding ``staff`` record.
+    3. Subsequent logins hit ``user_roles WHERE supabase_uid = X`` in a
+       single query.
     """
-    supabase_uid: str = Field(
-        ...,
-        description="Supabase Auth UID from auth.users; unique per row",
+    supabase_uid: Optional[str] = Field(
+        default=None,
+        description="Supabase Auth UID — null until first-login correlation",
+    )
+    auth_email: Optional[str] = Field(
+        default=None,
+        description="Email used for first-login correlation; matches the Google/magic-link address",
     )
     role: UserRoleType = Field(..., description="Application role granted to this user")
     staff_id: Optional[int] = Field(

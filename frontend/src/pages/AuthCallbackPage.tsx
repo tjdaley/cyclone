@@ -39,11 +39,16 @@ export default function AuthCallbackPage() {
         if (profile) {
           navigate('/app/dashboard', { replace: true })
         } else {
-          // Authenticated but no role record — needs staff correlation
           navigate('/onboarding', { replace: true })
         }
-      } catch {
-        navigate('/access-denied', { replace: true })
+      } catch (err) {
+        // 404 means authenticated but no role yet — needs staff correlation
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('404') || msg.toLowerCase().includes('no role')) {
+          navigate('/onboarding', { replace: true })
+        } else {
+          navigate('/access-denied', { replace: true })
+        }
       }
     }
 

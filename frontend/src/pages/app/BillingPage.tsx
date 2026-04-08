@@ -3,7 +3,7 @@ import { getMatters, getBillingEntries, parseNLBillingEntry, apiFetch } from '..
 
 interface Matter {
   id: number
-  caption: string
+  matter_name: string
   status: string
 }
 
@@ -51,7 +51,7 @@ export default function BillingPage() {
   useEffect(() => {
     getMatters().then((data: unknown) => {
       const ms = data as Matter[]
-      setMatters(ms.filter(m => m.status === 'open'))
+      setMatters(ms.filter(m => m.status === 'active'))
     }).catch(console.error)
   }, [])
 
@@ -120,7 +120,7 @@ export default function BillingPage() {
         >
           <option value="">— choose a matter —</option>
           {matters.map(m => (
-            <option key={m.id} value={m.id}>{m.caption}</option>
+            <option key={m.id} value={m.id}>{m.matter_name}</option>
           ))}
         </select>
       </div>

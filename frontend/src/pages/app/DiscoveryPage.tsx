@@ -3,7 +3,7 @@ import { getMatters, getDiscoveryRequests } from '../../lib/api'
 
 interface Matter {
   id: number
-  caption: string
+  matter_name: string
   status: string
 }
 
@@ -84,7 +84,7 @@ export default function DiscoveryPage() {
         >
           <option value="">— choose a matter —</option>
           {matters.map(m => (
-            <option key={m.id} value={m.id}>{m.caption}</option>
+            <option key={m.id} value={m.id}>{m.matter_name}</option>
           ))}
         </select>
       </div>

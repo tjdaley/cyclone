@@ -7,7 +7,9 @@ import LandingPage      from './pages/LandingPage'
 import LoginPage        from './pages/LoginPage'
 import AuthCallbackPage from './pages/AuthCallbackPage'
 import OnboardingPage   from './pages/OnboardingPage'
-import AccessDeniedPage from './pages/AccessDeniedPage'
+import AccessDeniedPage    from './pages/AccessDeniedPage'
+import PrivacyPolicyPage  from './pages/PrivacyPolicyPage'
+import TermsOfUsePage     from './pages/TermsOfUsePage'
 
 import DashboardPage  from './pages/app/DashboardPage'
 import BillingPage    from './pages/app/BillingPage'
@@ -26,7 +28,9 @@ export default function App() {
           <Route path="/login"         element={<LoginPage />} />
           <Route path="/auth/callback" element={<AuthCallbackPage />} />
           <Route path="/onboarding"    element={<OnboardingPage />} />
-          <Route path="/access-denied" element={<AccessDeniedPage />} />
+          <Route path="/access-denied"   element={<AccessDeniedPage />} />
+          <Route path="/privacy"         element={<PrivacyPolicyPage />} />
+          <Route path="/terms"           element={<TermsOfUsePage />} />
 
           {/* Protected — staff portal */}
           <Route element={<ProtectedRoute />}>

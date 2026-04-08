@@ -1,7 +1,8 @@
 """
 app/schemas/matter.py - Request and response schemas for matter endpoints.
 """
-from typing import Any, List, Optional
+from datetime import date
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,7 @@ from db.models.matter import MatterStatus, MatterType
 class MatterCreateRequest(BaseModel):
     """Body for POST /api/v1/matters."""
     client_id: int = Field(..., description="Primary client for this matter")
+    short_name: Optional[str] = Field(default=None, description="Short display name, e.g. 'SALMONS - divorce - 2026'")
     matter_name: str = Field(..., description="Human-readable matter name")
     matter_type: MatterType = Field(..., description="Category of matter")
     billing_review_staff_id: Optional[int] = Field(default=None)
@@ -18,11 +20,19 @@ class MatterCreateRequest(BaseModel):
     retainer_amount: float = Field(default=0.0, ge=0.0)
     refresh_trigger_pct: float = Field(default=0.40, ge=0.0, le=1.0)
     is_pro_bono: bool = Field(default=False)
+    fee_agreement_signed_date: Optional[date] = Field(default=None)
+    opened_date: Optional[date] = Field(default=None)
+    closed_date: Optional[date] = Field(default=None)
+    state: str = Field(default="Texas")
+    county: str = Field(..., description="County where the matter is filed")
+    court_name: Optional[str] = Field(default=None)
+    matter_number: Optional[str] = Field(default=None)
     notes: Optional[str] = None
 
 
 class MatterUpdateRequest(BaseModel):
     """Body for PATCH /api/v1/matters/{id}."""
+    short_name: Optional[str] = None
     matter_name: Optional[str] = None
     status: Optional[MatterStatus] = None
     billing_review_staff_id: Optional[int] = None
@@ -30,6 +40,13 @@ class MatterUpdateRequest(BaseModel):
     retainer_amount: Optional[float] = Field(default=None, ge=0.0)
     refresh_trigger_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     is_pro_bono: Optional[bool] = None
+    fee_agreement_signed_date: Optional[date] = None
+    opened_date: Optional[date] = None
+    closed_date: Optional[date] = None
+    state: Optional[str] = None
+    county: Optional[str] = None
+    court_name: Optional[str] = None
+    matter_number: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -37,6 +54,7 @@ class MatterResponse(BaseModel):
     """Response body for matter endpoints."""
     id: int
     client_id: int
+    short_name: Optional[str]
     matter_name: str
     matter_type: MatterType
     status: MatterStatus
@@ -45,6 +63,13 @@ class MatterResponse(BaseModel):
     retainer_amount: float
     refresh_trigger_pct: float
     is_pro_bono: bool
+    fee_agreement_signed_date: Optional[date]
+    opened_date: Optional[date]
+    closed_date: Optional[date]
+    state: str
+    county: str
+    court_name: Optional[str]
+    matter_number: Optional[str]
     notes: Optional[str]
 
 

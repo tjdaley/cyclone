@@ -244,6 +244,8 @@ export default function LandingPage() {
             &copy; {new Date().getFullYear()} &mdash; Legal Practice Management Platform
           </p>
           <div className="flex gap-6 text-xs text-white/40">
+            <Link to="/privacy" className="hover:text-white/70 transition-colors">Privacy Policy</Link>
+            <Link to="/terms" className="hover:text-white/70 transition-colors">Terms of Use</Link>
             <a href="/api/health" className="hover:text-white/70 transition-colors">API Status</a>
           </div>
         </div>
