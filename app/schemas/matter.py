@@ -2,11 +2,11 @@
 app/schemas/matter.py - Request and response schemas for matter endpoints.
 """
 from datetime import date
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from db.models.matter import MatterStatus, MatterType
+from db.models.matter import MatterStatus, MatterType, RateCard
 
 
 class MatterCreateRequest(BaseModel):
@@ -16,7 +16,7 @@ class MatterCreateRequest(BaseModel):
     matter_name: str = Field(..., description="Human-readable matter name")
     matter_type: MatterType = Field(..., description="Category of matter")
     billing_review_staff_id: Optional[int] = Field(default=None)
-    rate_card: dict[str, Any] = Field(default_factory=dict, description="Rate card by role or staff_id")
+    rate_card: RateCard = Field(default_factory=RateCard, description="Per-role hourly rates")
     retainer_amount: float = Field(default=0.0, ge=0.0)
     refresh_trigger_pct: float = Field(default=0.40, ge=0.0, le=1.0)
     is_pro_bono: bool = Field(default=False)
@@ -36,7 +36,7 @@ class MatterUpdateRequest(BaseModel):
     matter_name: Optional[str] = None
     status: Optional[MatterStatus] = None
     billing_review_staff_id: Optional[int] = None
-    rate_card: Optional[dict[str, Any]] = None
+    rate_card: Optional[RateCard] = None
     retainer_amount: Optional[float] = Field(default=None, ge=0.0)
     refresh_trigger_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     is_pro_bono: Optional[bool] = None
@@ -59,7 +59,7 @@ class MatterResponse(BaseModel):
     matter_type: MatterType
     status: MatterStatus
     billing_review_staff_id: Optional[int]
-    rate_card: dict[str, Any]
+    rate_card: RateCard
     retainer_amount: float
     refresh_trigger_pct: float
     is_pro_bono: bool

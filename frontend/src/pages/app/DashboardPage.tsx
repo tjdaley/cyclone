@@ -2,15 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { getMatters } from '../../lib/api'
-
-interface Matter {
-  id: number
-  matter_name: string
-  short_name: string
-  matter_type: string
-  status: string
-  is_pro_bono: boolean
-}
+import type { Matter } from '../../types'
 
 function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
@@ -38,7 +30,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     getMatters()
-      .then((data: unknown) => setMatters(data as Matter[]))
+      .then(setMatters)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load matters'))
       .finally(() => setLoading(false))
   }, [])
@@ -100,7 +92,7 @@ export default function DashboardPage() {
               {matters.slice(0, 8).map(m => (
                 <tr key={m.id} className="border-b border-border last:border-0 hover:bg-off-white/60 transition-colors">
                   <td className="px-5 py-3 font-medium text-navy">
-                    {m.short_name}
+                    {m.short_name ?? m.matter_name}
                     {m.is_pro_bono && (
                       <span className="ml-2 text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5">Pro bono</span>
                     )}

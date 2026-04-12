@@ -1,11 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getMatters, getDiscoveryRequests } from '../../lib/api'
-
-interface Matter {
-  id: number
-  matter_name: string
-  status: string
-}
+import type { Matter } from '../../types'
 
 interface DiscoveryRequest {
   id: number
@@ -40,10 +35,9 @@ export default function DiscoveryPage() {
   const [expanded, setExpanded]     = useState<number | null>(null)
 
   useEffect(() => {
-    getMatters().then((data: unknown) => {
-      const ms = data as Matter[]
-      setMatters(ms.filter(m => m.status === 'open'))
-    }).catch(console.error)
+    getMatters()
+      .then(ms => setMatters(ms.filter(m => m.status === 'active')))
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
@@ -51,7 +45,7 @@ export default function DiscoveryPage() {
     setLoading(true)
     setError(null)
     getDiscoveryRequests(matterId)
-      .then((data: unknown) => setRequests(data as DiscoveryRequest[]))
+      .then(data => setRequests(data as DiscoveryRequest[]))
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load'))
       .finally(() => setLoading(false))
   }, [matterId])
@@ -84,7 +78,7 @@ export default function DiscoveryPage() {
         >
           <option value="">— choose a matter —</option>
           {matters.map(m => (
-            <option key={m.id} value={m.id}>{m.matter_name}</option>
+            <option key={m.id} value={m.id}>{m.short_name ?? m.matter_name}</option>
           ))}
         </select>
       </div>

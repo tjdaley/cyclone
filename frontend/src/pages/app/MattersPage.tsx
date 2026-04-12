@@ -3,46 +3,8 @@ import { useAuth } from '../../context/AuthContext'
 import {
   getMatters, createMatter, updateMatter, getClients, getStaff,
   getRateOverrides, setRateOverride, deleteRateOverride,
-  MatterCreatePayload,
 } from '../../lib/api'
-
-interface Matter {
-  id: number
-  client_id: number
-  short_name: string | null
-  matter_name: string
-  matter_type: string
-  status: string
-  is_pro_bono: boolean
-  retainer_amount: number
-  fee_agreement_signed_date: string | null
-  opened_date: string | null
-  closed_date: string | null
-  state: string
-  county: string
-  court_name: string | null
-  matter_number: string | null
-  notes: string | null
-}
-
-interface ClientOption {
-  id: number
-  name: { first_name: string; last_name: string }
-}
-
-interface StaffOption {
-  id: number
-  name: { first_name: string; last_name: string }
-  role: string
-  default_billing_rate: number | null
-}
-
-interface RateOverride {
-  id: number
-  matter_id: number
-  staff_id: number
-  rate: number
-}
+import type { Matter, MatterCreatePayload, RateOverride, Client, Staff } from '../../types'
 
 const MATTER_TYPES = [
   'divorce', 'child_custody', 'modification', 'enforcement',
@@ -79,8 +41,8 @@ export default function MattersPage() {
   const [filter, setFilter]     = useState<'all' | 'active' | 'closed'>('active')
   const [search, setSearch]     = useState('')
 
-  const [clients, setClients]   = useState<ClientOption[]>([])
-  const [staff, setStaff]       = useState<StaffOption[]>([])
+  const [clients, setClients]   = useState<Client[]>([])
+  const [staff, setStaff]       = useState<Staff[]>([])
 
   // Create form
   const [showCreate, setShowCreate]     = useState(false)
@@ -125,18 +87,18 @@ export default function MattersPage() {
 
   useEffect(() => {
     getMatters()
-      .then((data: unknown) => setMatters(data as Matter[]))
+      .then(setMatters)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load'))
       .finally(() => setLoading(false))
-    getClients().then((data: unknown) => setClients(data as ClientOption[])).catch(console.error)
-    getStaff().then((data: unknown) => setStaff(data as StaffOption[])).catch(console.error)
+    getClients().then(setClients).catch(console.error)
+    getStaff().then(setStaff).catch(console.error)
   }, [])
 
   useEffect(() => {
     if (!editId) { setOverrides([]); return }
     setLoadingOverrides(true); setOvError(null)
     getRateOverrides(editId)
-      .then(data => setOverrides(data as RateOverride[]))
+      .then(setOverrides)
       .catch(console.error)
       .finally(() => setLoadingOverrides(false))
   }, [editId])
@@ -204,7 +166,7 @@ export default function MattersPage() {
         retainer_amount: parseFloat(edRetainer) || 0,
         notes: edNotes.trim() || null,
       }
-      const updated = await updateMatter(editId, payload) as Matter
+      const updated = await updateMatter(editId, payload)
       setMatters(prev => prev.map(m => m.id === editId ? updated : m))
       setEditId(null)
     } catch (err) {
@@ -230,7 +192,7 @@ export default function MattersPage() {
         notes: newNotes.trim() || undefined,
       }
       const created = await createMatter(payload)
-      setMatters(prev => [created as Matter, ...prev])
+      setMatters(prev => [created, ...prev])
       setShowCreate(false)
       setNewClientId(''); setNewShortName(''); setNewName(''); setNewType(''); setNewProBono(false)
       setNewState('Texas'); setNewCounty(''); setNewCourtName(''); setNewMatterNumber(''); setNewNotes('')
@@ -244,7 +206,7 @@ export default function MattersPage() {
     if (!editId || !ovStaffId || !ovRate) return
     setSavingOv(true); setOvError(null)
     try {
-      const saved = await setRateOverride(editId, Number(ovStaffId), parseFloat(ovRate)) as RateOverride
+      const saved = await setRateOverride(editId, Number(ovStaffId), parseFloat(ovRate))
       setOverrides(prev => {
         const idx = prev.findIndex(o => o.staff_id === Number(ovStaffId))
         if (idx >= 0) { const next = [...prev]; next[idx] = saved; return next }

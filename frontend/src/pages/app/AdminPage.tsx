@@ -1,19 +1,9 @@
 import { useEffect, useState } from 'react'
-import { apiFetch } from '../../lib/api'
+import { getStaff } from '../../lib/api'
+import type { Staff } from '../../types'
 
-interface StaffMember {
-  id: number
-  first_name: string
-  last_name: string
-  email: string
-  role: string
-  auth_email: string | null
-  supabase_uid: string | null
-  default_billing_rate: number | null
-}
-
-function fullName(s: StaffMember) {
-  return `${s.first_name} ${s.last_name}`
+function fullName(s: Staff) {
+  return `${s.name.first_name} ${s.name.last_name}`
 }
 
 const ROLE_COLOR: Record<string, string> = {
@@ -23,12 +13,12 @@ const ROLE_COLOR: Record<string, string> = {
 }
 
 export default function AdminPage() {
-  const [staff, setStaff]     = useState<StaffMember[]>([])
+  const [staff, setStaff]     = useState<Staff[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
 
   useEffect(() => {
-    apiFetch<StaffMember[]>('/api/v1/staff')
+    getStaff()
       .then(setStaff)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load staff'))
       .finally(() => setLoading(false))

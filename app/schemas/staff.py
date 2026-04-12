@@ -13,7 +13,10 @@ from db.models.staff import BarAdmission, FullName, StaffRole
 
 class StaffCreateRequest(BaseModel):
     """Body for POST /api/v1/staff — create a new staff member."""
-    supabase_uid: str = Field(..., description="Supabase Auth UID from auth.users")
+    auth_email: Optional[str] = Field(
+        default=None,
+        description="Email the staff member will use to sign in (used in correlation flow)",
+    )
     role: StaffRole = Field(..., description="Staff role")
     name: FullName = Field(..., description="Full legal name")
     office_id: int = Field(..., description="Foreign key to the offices table")
@@ -30,6 +33,7 @@ class StaffCreateRequest(BaseModel):
 
 class StaffUpdateRequest(BaseModel):
     """Body for PATCH /api/v1/staff/{id} — partial update of a staff member."""
+    auth_email: Optional[str] = None
     role: Optional[StaffRole] = None
     name: Optional[FullName] = None
     office_id: Optional[int] = None
@@ -43,7 +47,8 @@ class StaffUpdateRequest(BaseModel):
 class StaffResponse(BaseModel):
     """Response body for staff endpoints."""
     id: int
-    supabase_uid: str
+    supabase_uid: Optional[str]
+    auth_email: Optional[str]
     role: StaffRole
     name: FullName
     office_id: int

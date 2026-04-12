@@ -101,3 +101,10 @@ def _cors_origins() -> list[str]:
 
 
 app = create_app()
+
+# -- Health check endpoint is unauthenticated, so we add it last to ensure it's not wrapped by
+#    AuthMiddleware. --
+@app.get("/api/healthcheck")
+async def healthcheck():
+    return {"status": "ok", "message": "Texas Law Brand Engine API is running."}
+

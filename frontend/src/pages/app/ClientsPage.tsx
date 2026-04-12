@@ -1,41 +1,6 @@
 import { useEffect, useState, FormEvent } from 'react'
-import { getClients, getStaff, createClient, updateClient, conflictCheck, ClientCreatePayload } from '../../lib/api'
-
-interface ClientName {
-  courtesy_title?: string | null
-  first_name: string
-  middle_name?: string | null
-  last_name: string
-  suffix?: string | null
-}
-
-interface Client {
-  id: number
-  name: ClientName
-  auth_email: string
-  email: string
-  telephone: string
-  referral_type: string
-  referral_source: string
-  referred_to_staff_id: number | null
-  prior_counsel: string | null
-  status: string
-  ok_to_rehire: boolean
-  ending_ar_balance: number
-  notes: string | null
-}
-
-interface ConflictHit {
-  id: number
-  full_name: string
-  role: string
-  matter_caption: string
-}
-
-interface StaffOption {
-  id: number
-  name: { first_name: string; last_name: string }
-}
+import { getClients, getStaff, createClient, updateClient, conflictCheck } from '../../lib/api'
+import type { Client, ClientCreatePayload, ConflictHit, Staff } from '../../types'
 
 function fullName(c: Client) {
   return `${c.name.first_name} ${c.name.last_name}`
@@ -54,7 +19,7 @@ const STATUS_COLOR: Record<string, string> = {
 
 export default function ClientsPage() {
   const [clients, setClients]   = useState<Client[]>([])
-  const [staff, setStaff]       = useState<StaffOption[]>([])
+  const [staff, setStaff]       = useState<Staff[]>([])
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState<string | null>(null)
   const [search, setSearch]     = useState('')
@@ -101,12 +66,12 @@ export default function ClientsPage() {
 
   useEffect(() => {
     getClients()
-      .then((data: unknown) => setClients(data as Client[]))
+      .then(setClients)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load'))
       .finally(() => setLoading(false))
 
     getStaff()
-      .then((data: unknown) => setStaff(data as StaffOption[]))
+      .then(setStaff)
       .catch(console.error)
   }, [])
 
@@ -154,7 +119,7 @@ export default function ClientsPage() {
         ending_ar_balance: parseFloat(edArBalance) || 0,
         notes: edNotes.trim() || null,
       }
-      const updated = await updateClient(editId, payload) as Client
+      const updated = await updateClient(editId, payload)
       setClients(prev => prev.map(c => c.id === editId ? updated : c))
       setEditId(null)
     } catch (err) {
@@ -171,7 +136,7 @@ export default function ClientsPage() {
     const opposingNames = ccOpposing.split(',').map(s => s.trim()).filter(Boolean)
     try {
       const result = await conflictCheck(ccName.trim(), opposingNames)
-      setCcHits((result as { hits: ConflictHit[] }).hits ?? [])
+      setCcHits((result.hits as ConflictHit[]) ?? [])
     } catch (err) {
       setCcError(err instanceof Error ? err.message : 'Check failed')
     } finally { setChecking(false) }
@@ -194,7 +159,7 @@ export default function ClientsPage() {
         notes: newNotes.trim() || undefined,
       }
       const created = await createClient(payload)
-      setClients(prev => [created as Client, ...prev])
+      setClients(prev => [created, ...prev])
       setShowCreate(false)
       setNewFirst(''); setNewLast(''); setNewAuthEmail(''); setNewEmail(''); setNewTelephone('')
       setNewReferralType(''); setNewReferralSource(''); setNewReferredTo(''); setNewPriorCounsel(''); setNewNotes('')

@@ -4,7 +4,9 @@
       "Bash(npm run:*)",
       "WebSearch",
       "WebFetch(domain:ai.google.dev)",
-      "Bash(docker compose:*)"
+      "Bash(docker compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

@@ -3,7 +3,7 @@ app/db/models/matter.py - Domain and database models for legal matters.
 """
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -101,21 +101,42 @@ class OpposingPartyInDB(OpposingParty):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RateCard(BaseModel):
+    """
+    Per-matter rates by staff role.
+
+    Used by ``BillingService.resolve_rate`` as the second tier of rate
+    resolution:
+
+    1. ``matter_rate_overrides`` (per-staff, per-matter override row)
+    2. ``Matter.rate_card`` — *this model* — by staff role
+    3. ``StaffMember.default_billing_rate``
+
+    Stored as JSONB on the ``matters.rate_card`` column. Admin is
+    intentionally absent: admins do not bill time. Per-staff overrides
+    live in the ``matter_rate_overrides`` table, not here.
+    """
+    attorney: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Hourly rate in USD for any attorney working this matter",
+    )
+    paralegal: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Hourly rate in USD for any paralegal working this matter",
+    )
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class Matter(BaseModel):
     """
     Domain model for a legal matter.
 
     A matter belongs to one primary client but may have billing splits
-    across multiple clients (see BillingSplit). The ``rate_card`` is a
-    flexible JSONB object keyed by role name or staff_id.
-
-    Example rate_card::
-
-        {
-            "attorney": 350.0,
-            "paralegal": 150.0,
-            "staff_overrides": {"42": 400.0}
-        }
+    across multiple clients (see BillingSplit). See ``RateCard`` above for
+    the structure of the ``rate_card`` field.
     """
     client_id: int = Field(..., description="Foreign key to the primary client on this matter")
     short_name: Optional[str] = Field(
@@ -130,9 +151,9 @@ class Matter(BaseModel):
         default=None,
         description="Foreign key to the staff member responsible for approving bills on this matter",
     )
-    rate_card: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Hourly rates keyed by role ('attorney', 'paralegal') or staff_id string override",
+    rate_card: RateCard = Field(
+        default_factory=RateCard,
+        description="Per-role hourly rates for this matter. See RateCard.",
     )
     retainer_amount: float = Field(
         default=0.0,

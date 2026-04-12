@@ -26,17 +26,21 @@ from util.settings import settings
 LOGGER = LoggerFactory.create_logger(__name__)
 
 _NL_BILLING_SYSTEM_PROMPT = """\
-You are a legal billing assistant. Parse the user's natural language billing \
-entry into a structured JSON object with these fields:
+You are a legal billing assistant. Today's date is {today}.
+
+Parse the user's natural language billing entry into a structured JSON object \
+with these fields:
 - hours (float, must be one of: 0.1, 0.25, 0.5, 1.0 or multiples thereof)
-- client_name (string)
-- matter_name (string)
-- description (string — clean, professional billing language)
+- description (string — clean, professional billing language; do not include \
+  the date, client name, or matter name in the description)
 - entry_type: "time" | "expense" | "flat_fee"
 - billable: true (default) | false
+- invoice_date (string in YYYY-MM-DD format — the date the work was \
+  performed, if mentioned or inferable from relative terms like "yesterday", \
+  "last Friday", "on April 3". Set to null if not mentioned.)
 
 Respond ONLY with valid JSON. No markdown fences, no explanation.
-If a required field cannot be determined, set it to null.\
+If a field cannot be determined, set it to null.\
 """
 
 
@@ -46,29 +50,26 @@ class ParsedBillingEntry:
     def __init__(
         self,
         hours: Optional[float],
-        client_name: Optional[str],
-        matter_name: Optional[str],
         description: Optional[str],
         entry_type: str,
         billable: bool,
+        invoice_date: Optional[str],
     ):
         self.hours = hours
-        self.client_name = client_name
-        self.matter_name = matter_name
         self.description = description
         self.entry_type = entry_type
         self.billable = billable
+        self.invoice_date = invoice_date
 
     @classmethod
     def from_dict(cls, data: dict) -> "ParsedBillingEntry":
         """Construct from an LLM-returned dict."""
         return cls(
             hours=data.get("hours"),
-            client_name=data.get("client_name"),
-            matter_name=data.get("matter_name"),
             description=data.get("description"),
             entry_type=data.get("entry_type", "time"),
             billable=bool(data.get("billable", True)),
+            invoice_date=data.get("invoice_date"),
         )
 
 
@@ -134,8 +135,7 @@ class BillingService:
             raise ValueError("Staff not found: id=%s" % staff_id)
 
         # 2. Rate card by role
-        rate_card: dict = matter.rate_card or {}
-        role_rate = rate_card.get(staff.role.value)
+        role_rate = getattr(matter.rate_card, staff.role.value, None) if matter.rate_card else None
         if role_rate is not None:
             LOGGER.debug(
                 "BillingService.resolve_rate: using rate_card role=%s rate=%s",
@@ -288,8 +288,10 @@ class BillingService:
         :rtype: ParsedBillingEntry
         :raises ValueError: If the LLM response cannot be parsed as JSON.
         """
+        from datetime import date as date_type
         LOGGER.info("BillingService.parse_natural_language: parsing entry")
-        response_text = llm_service.complete_fast(_NL_BILLING_SYSTEM_PROMPT, text)
+        prompt = _NL_BILLING_SYSTEM_PROMPT.format(today=date_type.today().isoformat())
+        response_text = llm_service.complete_fast(prompt, text)
         try:
             data = json.loads(response_text)
             return ParsedBillingEntry.from_dict(data)

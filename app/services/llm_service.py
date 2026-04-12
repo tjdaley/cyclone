@@ -136,7 +136,7 @@ class LLMService:
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
-        return response.content[0].text
+        return response.content[0].text  # type: ignore[attr-defined]
 
     def _call_gemini(self, model: str, system_prompt: str, user_message: str) -> str:
         """
@@ -164,7 +164,7 @@ class LLMService:
                 top_p=settings.llm_top_p,
             ),
         )
-        return response.text
+        return response.text  # type: ignore[attr-defined]
 
     def _call_openai(self, model: str, system_prompt: str, user_message: str) -> str:
         """

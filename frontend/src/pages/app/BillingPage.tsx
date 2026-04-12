@@ -1,31 +1,6 @@
 import { useEffect, useState, FormEvent } from 'react'
 import { getMatters, getBillingEntries, parseNLBillingEntry, apiFetch } from '../../lib/api'
-
-interface Matter {
-  id: number
-  matter_name: string
-  status: string
-}
-
-interface BillingEntry {
-  id: number
-  entry_type: string
-  description: string
-  hours: number | null
-  rate: number | null
-  amount: number
-  entry_date: string
-  billed: boolean
-}
-
-interface ParsedPreview {
-  entry_type: string
-  description: string
-  hours: number | null
-  rate: number | null
-  amount: number
-  matter_id: number | null
-}
+import type { Matter, BillingEntry, ParsedBillingPreview } from '../../types'
 
 function formatCurrency(n: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
@@ -42,24 +17,24 @@ export default function BillingPage() {
   const [loadingEntries, setLoadingEntries] = useState(false)
 
   // NL billing input
-  const [nlText, setNlText]         = useState('')
-  const [parsing, setParsing]       = useState(false)
-  const [preview, setPreview]       = useState<ParsedPreview | null>(null)
-  const [nlError, setNlError]       = useState<string | null>(null)
-  const [committing, setCommitting] = useState(false)
+  const [nlText, setNlText]             = useState('')
+  const [parsing, setParsing]           = useState(false)
+  const [preview, setPreview]           = useState<ParsedBillingPreview | null>(null)
+  const [previewDate, setPreviewDate]   = useState('')  // editable invoice_date from preview
+  const [nlError, setNlError]           = useState<string | null>(null)
+  const [committing, setCommitting]     = useState(false)
 
   useEffect(() => {
-    getMatters().then((data: unknown) => {
-      const ms = data as Matter[]
-      setMatters(ms.filter(m => m.status === 'active'))
-    }).catch(console.error)
+    getMatters()
+      .then(ms => setMatters(ms.filter(m => m.status === 'active')))
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
     if (!matterId) return
     setLoadingEntries(true)
     getBillingEntries(matterId)
-      .then((data: unknown) => setEntries(data as BillingEntry[]))
+      .then(setEntries)
       .catch(console.error)
       .finally(() => setLoadingEntries(false))
   }, [matterId])
@@ -71,8 +46,9 @@ export default function BillingPage() {
     setNlError(null)
     setPreview(null)
     try {
-      const result = await parseNLBillingEntry(nlText) as ParsedPreview
+      const result = await parseNLBillingEntry(nlText, matterId ?? undefined)
       setPreview(result)
+      setPreviewDate(result.invoice_date ?? '')
     } catch (err) {
       setNlError(err instanceof Error ? err.message : 'Parse failed')
     } finally {
@@ -86,13 +62,23 @@ export default function BillingPage() {
     try {
       await apiFetch(`/api/v1/billing/entries`, {
         method: 'POST',
-        body: JSON.stringify({ ...preview, matter_id: matterId }),
+        body: JSON.stringify({
+          matter_id: matterId,
+          entry_type: preview.entry_type,
+          description: preview.description,
+          hours: preview.hours,
+          rate: preview.rate,
+          amount: preview.amount,
+          billable: preview.billable,
+          invoice_date: previewDate || null,
+        }),
       })
       setPreview(null)
+      setPreviewDate('')
       setNlText('')
       // Refresh entries
       const data = await getBillingEntries(matterId)
-      setEntries(data as BillingEntry[])
+      setEntries(data)
     } catch (err) {
       setNlError(err instanceof Error ? err.message : 'Commit failed')
     } finally {
@@ -100,7 +86,7 @@ export default function BillingPage() {
     }
   }
 
-  const unbilledTotal = entries.filter(e => !e.billed).reduce((s, e) => s + e.amount, 0)
+  const unbilledTotal = entries.filter(e => !e.billed).reduce((s, e) => s + (e.amount ?? 0), 0)
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -120,7 +106,7 @@ export default function BillingPage() {
         >
           <option value="">— choose a matter —</option>
           {matters.map(m => (
-            <option key={m.id} value={m.id}>{m.matter_name}</option>
+            <option key={m.id} value={m.id}>{m.short_name ?? m.matter_name}</option>
           ))}
         </select>
       </div>
@@ -166,10 +152,22 @@ export default function BillingPage() {
                       <p className="font-medium text-navy">{formatCurrency(preview.rate)}/hr</p>
                     </div>
                   )}
-                  <div>
-                    <p className="text-text-secondary text-xs mb-0.5">Amount</p>
-                    <p className="font-semibold text-navy">{formatCurrency(preview.amount)}</p>
-                  </div>
+                  {preview.amount != null && (
+                    <div>
+                      <p className="text-text-secondary text-xs mb-0.5">Amount</p>
+                      <p className="font-semibold text-navy">{formatCurrency(preview.amount)}</p>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 mb-4">
+                  <label className="text-text-secondary text-xs">Service date</label>
+                  <input
+                    type="date"
+                    className="input text-sm py-1 px-2 w-40"
+                    value={previewDate}
+                    onChange={e => setPreviewDate(e.target.value)}
+                  />
+                  {!previewDate && <span className="text-xs text-text-secondary">(defaults to today)</span>}
                 </div>
                 <p className="text-sm text-navy mb-4">{preview.description}</p>
                 <div className="flex gap-3">
@@ -212,10 +210,10 @@ export default function BillingPage() {
                 <tbody>
                   {entries.filter(e => !e.billed).map(e => (
                     <tr key={e.id} className="border-b border-border last:border-0 hover:bg-off-white/60">
-                      <td className="px-5 py-3 text-text-secondary whitespace-nowrap">{formatDate(e.entry_date)}</td>
+                      <td className="px-5 py-3 text-text-secondary whitespace-nowrap">{formatDate(e.invoice_date)}</td>
                       <td className="px-5 py-3 text-navy">{e.description}</td>
                       <td className="px-5 py-3 text-text-secondary hidden md:table-cell capitalize">{e.entry_type}</td>
-                      <td className="px-5 py-3 text-right font-medium text-navy">{formatCurrency(e.amount)}</td>
+                      <td className="px-5 py-3 text-right font-medium text-navy">{e.amount != null ? formatCurrency(e.amount) : '—'}</td>
                     </tr>
                   ))}
                 </tbody>

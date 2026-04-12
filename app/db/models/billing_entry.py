@@ -34,7 +34,8 @@ class BillingEntry(BaseModel):
         description="Foreign key to the billing_cycles table; null until the entry is included in a cycle",
     )
     entry_type: EntryType = Field(..., description="Category of entry: time, expense, or flat_fee")
-    entry_date: date = Field(..., description="Date the work was performed or the expense was incurred")
+    entry_date: date = Field(..., description="Date the billing entry was recorded (server-set)")
+    invoice_date: date = Field(..., description="Date the work was performed or the expense was incurred")
     hours: Optional[float] = Field(
         default=None,
         ge=0.0,

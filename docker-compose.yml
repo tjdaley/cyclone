@@ -1,21 +1,33 @@
 services:
   api:
+    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.0
     build: ./app
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     env_file: .env
     volumes:
       - ./.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   frontend:
+    image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.0
     build:
       context: ./frontend
       args:
         VITE_SUPABASE_URL: ${SUPABASE_URL}
-        VITE_SUPABASE_ANON_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
         VITE_API_BASE_URL: ${API_BASE_URL:-}
     ports:
-      - "3000:80"
-    env_file: .env.frontend
+      - "8094:80"
+
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - api

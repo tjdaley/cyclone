@@ -51,9 +51,30 @@ def create_entry(
     """
     Create a billing entry.
 
-    For pro-bono matters, TIME entry amounts are automatically zeroed.
+    ``staff_id`` is resolved from the authenticated user if not provided.
+    ``entry_date`` is always set to today. ``invoice_date`` defaults to today
+    if not provided. For pro-bono matters, TIME entry amounts are zeroed.
     """
-    entry = BillingEntry(**body.model_dump())
+    from datetime import date as date_type
+    from db.repositories.staff import StaffRepository
+
+    today = date_type.today()
+
+    # Resolve staff_id from JWT if not provided
+    staff_id = body.staff_id
+    if staff_id is None:
+        staff_repo = StaffRepository(manager)
+        staff = staff_repo.get_by_supabase_uid(request.state.supabase_uid)
+        if staff is None:
+            raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
+        staff_id = staff.id
+
+    entry_data = body.model_dump()
+    entry_data["staff_id"] = staff_id
+    entry_data["entry_date"] = today
+    entry_data["invoice_date"] = body.invoice_date or today
+
+    entry = BillingEntry(**entry_data)
     svc = BillingService(manager)
     created = svc.create_entry(entry, supabase_uid=request.state.supabase_uid)
     return BillingEntryResponse(**created.model_dump())
@@ -100,6 +121,7 @@ def delete_entry(
 @router.post("/parse", response_model=NLBillingParseResponse)
 def parse_natural_language(
     body: NLBillingParseRequest,
+    request: Request,
     manager=Depends(get_db_manager),
     _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> NLBillingParseResponse:
@@ -107,23 +129,39 @@ def parse_natural_language(
     Parse a natural-language billing description into structured fields.
 
     Returns a preview card — not committed until the attorney POSTs to
-    /api/v1/billing/entries.
+    /api/v1/billing/entries. If ``matter_id`` is provided, the rate is
+    resolved from the matter/staff rate chain and the amount is computed.
     """
     svc = BillingService(manager)
     try:
         parsed = svc.parse_natural_language(body.text)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
+    # Resolve rate if we know the matter and the logged-in staff member
+    rate = None
+    amount = None
+    if body.matter_id and parsed.entry_type == "time" and parsed.hours:
+        try:
+            from db.repositories.staff import StaffRepository
+            staff_repo = StaffRepository(manager)
+            staff = staff_repo.get_by_supabase_uid(request.state.supabase_uid)
+            if staff:
+                rate = svc.resolve_rate(body.matter_id, staff.id)
+                amount = round(parsed.hours * rate, 2)
+        except Exception:
+            pass  # Rate resolution failed — preview without rate
+
+    confidence = "high" if parsed.hours and parsed.description else "low"
     return NLBillingParseResponse(
-        parsed={
-            "hours": parsed.hours,
-            "client_name": parsed.client_name,
-            "matter_name": parsed.matter_name,
-            "description": parsed.description,
-            "entry_type": parsed.entry_type,
-            "billable": parsed.billable,
-        },
-        confidence="high" if all([parsed.hours, parsed.client_name, parsed.matter_name]) else "low",
+        entry_type=parsed.entry_type,
+        description=parsed.description or "",
+        hours=parsed.hours,
+        rate=rate,
+        amount=amount,
+        invoice_date=parsed.invoice_date,
+        billable=parsed.billable,
+        confidence=confidence,
     )
 
 
