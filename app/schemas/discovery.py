@@ -1,50 +1,99 @@
 """
 app/schemas/discovery.py - Request and response schemas for discovery endpoints.
 """
+from datetime import date
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from db.models.discovery import DiscoveryRequestStatus, DiscoveryRequestType, RFASelection
+from db.models.discovery import (
+    DiscoveryRequestStatus,
+    DocumentRequestType,
+    RFASelection,
+)
 
 
-class DiscoveryIngestRequest(BaseModel):
-    """Body for POST /api/v1/discovery/ingest."""
-    matter_id: int = Field(..., description="Matter to associate ingested requests with")
-    staff_id: int = Field(..., description="Staff member performing the ingestion")
-    raw_text: str = Field(
-        ...,
-        description="Raw text of the discovery requests, pasted or extracted from a PDF",
-    )
+# ── Discovery Document (parent) ──────────────────────────────────────────────
 
-
-class DiscoveryRequestResponse(BaseModel):
-    """Response for a single discovery request item."""
+class DiscoveryDocumentResponse(BaseModel):
+    """Response for a discovery_requests (parent document) record."""
     id: int
     matter_id: int
-    request_type: DiscoveryRequestType
+    ingested_by_staff_id: int
+    propounded_date: date
+    due_date: date
+    request_type: DocumentRequestType
+    look_back_date: Optional[date]
+    response_served_date: Optional[date]
+
+
+class DiscoveryDocumentUpdateRequest(BaseModel):
+    """Body for PATCH /api/v1/discovery/documents/{id}."""
+    propounded_date: Optional[date] = None
+    due_date: Optional[date] = None
+    look_back_date: Optional[date] = None
+    response_served_date: Optional[date] = None
+
+
+# ── Discovery Request Items ──────────────────────────────────────────────────
+
+class DiscoveryRequestItemResponse(BaseModel):
+    """Response for a single discovery_request_items record."""
+    id: int
+    discovery_request_id: int
+    matter_id: int
     request_number: int
     source_text: str
     status: DiscoveryRequestStatus
     ingested_by_staff_id: int
+    interpretations: list[str]
+    privileges: list[dict]
+    objections: list[dict]
+    client_response_needed: bool
+    response: Optional[str] = None
 
 
-class DiscoveryIngestResponse(BaseModel):
-    """Response from POST /api/v1/discovery/ingest — items are previews pending commit."""
-    matter_id: int
-    item_count: int = Field(..., description="Number of items parsed from the raw text")
-    items: list[DiscoveryRequestResponse]
+class DiscoveryRequestItemUpdateRequest(BaseModel):
+    """Body for PATCH /api/v1/discovery/items/{item_id}."""
+    source_text: Optional[str] = None
+    client_response_needed: Optional[bool] = None
+    interpretations: Optional[list[str]] = None
+    privileges: Optional[list[dict]] = None
+    objections: Optional[list[dict]] = None
+    response: Optional[str] = None
 
+
+# ── Standard lookups ─────────────────────────────────────────────────────────
+
+class StandardPrivilegeResponse(BaseModel):
+    """Response for a standard_privileges row."""
+    id: int
+    slug: str
+    text: str
+
+
+class StandardObjectionResponse(BaseModel):
+    """Response for a standard_objections row."""
+    id: int
+    slug: str
+    applies_to: list[str]
+    text: str
+
+
+# ── Upload / Ingestion ───────────────────────────────────────────────────────
+
+class DiscoveryUploadResponse(BaseModel):
+    """Response from POST /api/v1/discovery/upload — full ingestion result."""
+    document: DiscoveryDocumentResponse
+    item_count: int
+    items: list[DiscoveryRequestItemResponse]
+    warnings: list[str] = Field(default_factory=list, description="Non-fatal issues during ingestion")
+
+
+# ── Discovery Responses (unchanged — per-item responses) ─────────────────────
 
 class DiscoveryResponseUpdateRequest(BaseModel):
-    """
-    Body for PATCH /api/v1/discovery/responses/{id}.
-
-    Clients submit ``client_response_text`` and ``rfa_selection``.
-    Attorneys/paralegals may additionally set ``attorney_objection``,
-    ``privilege_claimed``, ``attorney_note``, ``final_response_text``,
-    and ``is_final``.
-    """
+    """Body for PATCH /api/v1/discovery/responses/{id}."""
     client_response_text: Optional[str] = None
     rfa_selection: Optional[RFASelection] = None
     has_responsive_documents: Optional[bool] = None

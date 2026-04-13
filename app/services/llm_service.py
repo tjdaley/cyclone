@@ -68,6 +68,41 @@ class LLMService:
             raise ValueError(f"No fast model configured for vendor {settings.llm_fast_vendor}")
         return self._dispatch(settings.llm_fast_vendor, model, system_prompt, user_message)
 
+    def complete_with_image(
+        self,
+        system_prompt: str,
+        user_message: str,
+        image_base64: str,
+        image_media_type: str = "image/png",
+    ) -> str:
+        """
+        Dispatch a multimodal completion with an image to the primary LLM vendor.
+
+        Used for OCR of scanned document pages via the LLM's vision capability.
+
+        :param system_prompt: System instructions.
+        :param user_message: Text prompt accompanying the image.
+        :param image_base64: Base64-encoded image data.
+        :param image_media_type: MIME type of the image (e.g. 'image/png').
+        :return: Model response text.
+        :rtype: str
+        """
+        vendor = settings.llm_vendor
+        model = getattr(settings, f"{vendor}_model", None)
+        if not model:
+            raise ValueError("No model configured for vendor %s" % vendor)
+
+        LOGGER.debug("LLMService.complete_with_image: vendor=%s", vendor)
+
+        if vendor == "gemini":
+            return self._call_gemini_vision(model, system_prompt, user_message, image_base64, image_media_type)
+        elif vendor == "anthropic":
+            return self._call_anthropic_vision(model, system_prompt, user_message, image_base64, image_media_type)
+        elif vendor == "openai":
+            return self._call_openai_vision(model, system_prompt, user_message, image_base64, image_media_type)
+        else:
+            raise ValueError("Vision not supported for vendor: %s" % vendor)
+
     def _dispatch(self, vendor: str, model: str, system_prompt: str, user_message: str) -> str:
         """
         Route to the appropriate vendor implementation.
@@ -131,7 +166,7 @@ class LLMService:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
             model=model,
-            max_tokens=2048,
+            max_tokens=16384,
             temperature=settings.llm_temperature,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -247,6 +282,79 @@ class LLMService:
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
+            ],
+        )
+        return response.choices[0].message.content or ""
+
+    # ── Vision implementations ────────────────────────────────────────────
+
+    def _call_gemini_vision(
+        self, model: str, system_prompt: str, user_message: str,
+        image_base64: str, image_media_type: str,
+    ) -> str:
+        from google import genai  # noqa: PLC0415
+        from google.genai import types  # noqa: PLC0415
+        import base64 as b64mod  # noqa: PLC0415
+
+        client = genai.Client(api_key=settings.gemini_api_key)
+        image_bytes = b64mod.b64decode(image_base64)
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type=image_media_type)
+        response = client.models.generate_content(
+            model=model,
+            contents=[user_message, image_part],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.1,
+            ),
+        )
+        return response.text  # type: ignore[attr-defined]
+
+    def _call_anthropic_vision(
+        self, model: str, system_prompt: str, user_message: str,
+        image_base64: str, image_media_type: str,
+    ) -> str:
+        import anthropic  # noqa: PLC0415
+
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image_media_type,
+                            "data": image_base64,
+                        },
+                    },
+                    {"type": "text", "text": user_message},
+                ],
+            }],
+        )
+        return response.content[0].text  # type: ignore[attr-defined]
+
+    def _call_openai_vision(
+        self, model: str, system_prompt: str, user_message: str,
+        image_base64: str, image_media_type: str,
+    ) -> str:
+        from openai import OpenAI  # noqa: PLC0415
+
+        client = OpenAI(api_key=settings.openai_api_key)
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=4096,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": user_message},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{image_media_type};base64,{image_base64}",
+                    }},
+                ]},
             ],
         )
         return response.choices[0].message.content or ""

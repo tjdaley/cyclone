@@ -1,6 +1,6 @@
 services:
   api:
-    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.0
+    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.1
     build: ./app
     expose:
       - "8000"
@@ -14,7 +14,7 @@ services:
       retries: 3
 
   frontend:
-    image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.0
+    image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.1
     build:
       context: ./frontend
       args:

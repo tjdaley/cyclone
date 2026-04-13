@@ -34,6 +34,17 @@ class FullName(BaseModel):
         description="Generational suffix, e.g. Jr., Sr., III, IV",
     )
 
+    def __str__(self) -> str:
+        """Return the full name as a single string."""
+        parts: list[Optional[str]] = [
+            self.courtesy_title,
+            self.first_name,
+            self.middle_name,
+            self.last_name,
+            self.suffix,
+        ]
+        return " ".join(part for part in parts if part)  # type: ignore
+
 
 class BarAdmission(BaseModel):
     """State bar admission record for an attorney."""

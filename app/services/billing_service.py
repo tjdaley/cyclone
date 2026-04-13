@@ -8,6 +8,7 @@ All database writes that require an audit log entry call AuditLogger
 before returning.
 """
 import json
+import re
 from typing import Optional
 
 from db.models.billing_entry import BillingEntry, BillingEntryInDB, EntryType
@@ -293,7 +294,9 @@ class BillingService:
         prompt = _NL_BILLING_SYSTEM_PROMPT.format(today=date_type.today().isoformat())
         response_text = llm_service.complete_fast(prompt, text)
         try:
-            data = json.loads(response_text)
+            cleaned = re.sub(r"^```(?:json)?\s*\n?", "", response_text.strip())
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned).strip()
+            data = json.loads(cleaned)
             return ParsedBillingEntry.from_dict(data)
         except (json.JSONDecodeError, KeyError) as e:
             LOGGER.warning(
