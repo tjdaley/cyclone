@@ -25,6 +25,7 @@ class DiscoveryDocumentResponse(BaseModel):
     request_type: DocumentRequestType
     look_back_date: Optional[date]
     response_served_date: Optional[date]
+    storage_path: Optional[str] = None
 
 
 class DiscoveryDocumentUpdateRequest(BaseModel):

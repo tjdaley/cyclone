@@ -4,8 +4,7 @@ app/db/repositories/client.py - Repository for the Client model.
 from typing import Optional
 
 from db.models.client import ClientInDB, ClientStatus
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -26,7 +25,7 @@ class ClientRepository(BaseRepository[ClientInDB]):
         :return: Matching client record, or ``None``.
         :rtype: Optional[ClientInDB]
         """
-        LOGGER.debug("ClientRepository.get_by_email")
+        LOGGER.debug("ClientRepository.get_by_email: email=%s", email)
         return self.select_one(condition={"email": email})
 
     def get_by_status(self, status: ClientStatus) -> list[ClientInDB]:

@@ -4,8 +4,7 @@ app/db/repositories/fee_agreement.py - Repository for the FeeAgreement model.
 from typing import Optional
 
 from db.models.fee_agreement import FeeAgreementInDB, FeeAgreementStatus
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)

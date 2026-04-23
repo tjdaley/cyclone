@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from db.repositories.staff import StaffRepository
 from db.repositories.user_role import UserRoleRepository
-from db.supabasemanager import SupabaseManager
+from db_handler import SupabaseManager
 from dependencies import get_db_manager
 from services.audit_logger import AuditLogger
 from util.loggerfactory import LoggerFactory

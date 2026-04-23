@@ -6,8 +6,8 @@ user_roles is the auth entry point. All authenticated lookups start here.
 from typing import Optional
 
 from db.models.user_role import UserRoleInDB, UserRoleType
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository
+from db_handler import DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)

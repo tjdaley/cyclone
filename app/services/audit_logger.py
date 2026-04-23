@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from db.models.audit_log import AuditLog
 from db.repositories.audit_log import AuditLogRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)

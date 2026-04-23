@@ -16,6 +16,7 @@ import BillingPage    from './pages/app/BillingPage'
 import MattersPage    from './pages/app/MattersPage'
 import ClientsPage    from './pages/app/ClientsPage'
 import DiscoveryPage  from './pages/app/DiscoveryPage'
+import PleadingsPage  from './pages/app/PleadingsPage'
 import AdminPage      from './pages/app/AdminPage'
 
 export default function App() {
@@ -41,6 +42,7 @@ export default function App() {
               <Route path="/app/matters"   element={<MattersPage />} />
               <Route path="/app/clients"   element={<ClientsPage />} />
               <Route path="/app/discovery" element={<DiscoveryPage />} />
+              <Route path="/app/pleadings" element={<PleadingsPage />} />
               <Route path="/app/admin"     element={<AdminPage />} />
             </Route>
           </Route>

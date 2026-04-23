@@ -5,8 +5,7 @@ Audit log entries are append-only. This repository exposes insert and
 read operations only — never update or delete.
 """
 from db.models.audit_log import AuditLogInDB
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)

@@ -223,6 +223,17 @@ def upload_discovery(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
+    # Store the original PDF
+    try:
+        from services.storage_service import StorageService
+        storage = StorageService(manager)
+        storage_path = storage.upload_discovery(matter_id, doc_record.id, pdf_bytes)
+        doc_repo = DiscoveryDocumentRepository(manager)
+        doc_record = doc_repo.update(doc_record.id, {"storage_path": storage_path})
+    except Exception as e:
+        LOGGER.warning("discovery.upload: PDF storage failed (non-fatal): %s", str(e))
+        warnings.append("Original PDF could not be stored")
+
     return DiscoveryUploadResponse(
         document=DiscoveryDocumentResponse(**doc_record.model_dump()),
         item_count=len(item_records),

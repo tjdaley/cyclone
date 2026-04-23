@@ -8,7 +8,7 @@ from typing import Callable, Union
 
 from fastapi import Depends, HTTPException, Request
 
-from db.supabasemanager import SupabaseManager
+from db_handler import SupabaseManager
 from db.repositories.user_role import UserRoleRepository
 from util.loggerfactory import LoggerFactory
 
@@ -52,7 +52,7 @@ def get_current_user(request: Request) -> dict[str, Union[str, None]]:
     }
 
 
-def require_role(allowed_roles: list[str]) -> Callable:
+def require_role(allowed_roles: list[str]) -> Callable[..., None]:
     """
     FastAPI dependency factory that enforces role-based access control.
 
@@ -72,7 +72,7 @@ def require_role(allowed_roles: list[str]) -> Callable:
     :rtype: Callable
     """
 
-    def _check(request: Request, manager=Depends(get_db_manager)) -> None:
+    def _check(request: Request, manager: SupabaseManager = Depends(get_db_manager)) -> None:
         uid = getattr(request.state, "supabase_uid", None)
         if uid is None:
             raise HTTPException(status_code=401, detail="Not authenticated")

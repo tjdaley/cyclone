@@ -6,7 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from db.models.matter import MatterStatus, MatterType, RateCard
+from db.models.matter import DiscoveryLevel, MatterStatus, MatterType, RateCard
 
 
 class MatterCreateRequest(BaseModel):
@@ -27,6 +27,7 @@ class MatterCreateRequest(BaseModel):
     county: str = Field(..., description="County where the matter is filed")
     court_name: Optional[str] = Field(default=None)
     matter_number: Optional[str] = Field(default=None)
+    discovery_level: Optional[DiscoveryLevel] = Field(default=None)
     notes: Optional[str] = None
 
 
@@ -47,6 +48,7 @@ class MatterUpdateRequest(BaseModel):
     county: Optional[str] = None
     court_name: Optional[str] = None
     matter_number: Optional[str] = None
+    discovery_level: Optional[DiscoveryLevel] = None
     notes: Optional[str] = None
 
 
@@ -70,6 +72,7 @@ class MatterResponse(BaseModel):
     county: str
     court_name: Optional[str]
     matter_number: Optional[str]
+    discovery_level: Optional[DiscoveryLevel]
     notes: Optional[str]
 
 

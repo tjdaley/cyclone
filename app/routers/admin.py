@@ -3,13 +3,16 @@ app/routers/admin.py - Admin-only endpoints: user role management, audit log acc
 
 All routes in this router require the 'admin' role.
 """
+from typing import Any
+
+from db_handler import SupabaseManager
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from db.models.user_role import UserRole, UserRoleType
+from db.models.user_role import UserRole
 from db.repositories.user_role import UserRoleRepository
 from db.repositories.audit_log import AuditLogRepository
-from dependencies import get_db_manager, require_role
-from schemas.common import DeletedResponse, MessageResponse
+from dependencies import get_db_manager, require_role  # type: ignore
+from schemas.common import DeletedResponse
 from services.audit_logger import AuditLogger
 from util.loggerfactory import LoggerFactory
 
@@ -20,11 +23,11 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 # ── User Role Management ───────────────────────────────────────────────────
 
-@router.get("/user-roles", response_model=list[dict])
+@router.get("/user-roles", response_model=list[dict[str, Any]])
 def list_user_roles(
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return all user role assignments."""
     repo = UserRoleRepository(manager)
     records, _ = repo.select_many(condition={}, sort_by="created_at")
@@ -33,11 +36,11 @@ def list_user_roles(
 
 @router.post("/user-roles", status_code=201)
 def assign_role(
-    body: dict,
+    body: dict[str, Any],
     request: Request,
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
-) -> dict:
+) -> dict[str, Any]:
     """
     Assign an application role to a staff or client record.
 
@@ -74,11 +77,11 @@ def assign_role(
 @router.patch("/user-roles/{role_id}")
 def update_role(
     role_id: int,
-    body: dict,
+    body: dict[str, Any],
     request: Request,
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
-) -> dict:
+) -> dict[str, Any]:
     """
     Update a user role assignment. Role changes are written to the audit log.
     """
@@ -111,7 +114,7 @@ def update_role(
 def revoke_role(
     role_id: int,
     request: Request,
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
 ) -> DeletedResponse:
     """Revoke a user role assignment."""
@@ -134,26 +137,26 @@ def revoke_role(
 
 # ── Audit Log ─────────────────────────────────────────────────────────────
 
-@router.get("/audit-log/entity/{entity_type}/{entity_id}", response_model=list[dict])
+@router.get("/audit-log/entity/{entity_type}/{entity_id}", response_model=list[dict[str, Any]])
 def get_audit_log_for_entity(
     entity_type: str,
     entity_id: str,
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return audit log entries for a specific entity."""
     repo = AuditLogRepository(manager)
     records = repo.get_by_entity(entity_type, entity_id)
     return [r.model_dump() for r in records]
 
 
-@router.get("/audit-log/action/{action}", response_model=list[dict])
+@router.get("/audit-log/action/{action}", response_model=list[dict[str, Any]])
 def get_audit_log_by_action(
     action: str,
-    manager=Depends(get_db_manager),
+    manager: SupabaseManager = Depends(get_db_manager),
     _=Depends(require_role(["admin"])),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return audit log entries for a specific action type."""
     repo = AuditLogRepository(manager)
     records = repo.get_by_action(action)
-    return [r.model_dump() for r in records]
+    return [r.model_dump() for r in records]  # type: ignore[list-item]

@@ -50,6 +50,7 @@ export interface Matter {
   county: string
   court_name: string | null
   matter_number: string | null
+  discovery_level: 'level_1' | 'level_2' | 'level_3' | null
   notes: string | null
 }
 

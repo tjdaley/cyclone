@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from db.repositories.client import ClientRepository
 from db.repositories.matter import MatterRepository, OpposingPartyRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -31,7 +31,7 @@ class ConflictHit:
 class ConflictCheckResult:
     """Aggregated result of a conflict check for a prospective client/matter."""
     prospective_name: str
-    hits: list[ConflictHit] = field(default_factory=list)
+    hits: list[ConflictHit] = field(default_factory=list[ConflictHit])
 
     @property
     def has_conflict(self) -> bool:

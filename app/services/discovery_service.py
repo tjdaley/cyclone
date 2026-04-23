@@ -19,7 +19,7 @@ from db.models.discovery import (
 from db.repositories.discovery import DiscoveryDocumentRepository, DiscoveryRequestItemRepository
 from db.repositories.matter import MatterRepository
 from db.repositories.client import ClientRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import DatabaseManager
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 
@@ -193,7 +193,7 @@ class DiscoveryService:
             propounded_date = date.today()
             warnings.append("No service date found in document — using today")
 
-        response_days = meta.get("response_days")
+        response_days = int(meta.get("response_days", 0) or 0)  # Handle null or non-int values gracefully  
         due_date = self.compute_due_date(propounded_date, response_days)
 
         look_back_str = meta.get("look_back_date")

@@ -9,7 +9,7 @@ before returning.
 """
 import json
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from db.models.billing_entry import BillingEntry, BillingEntryInDB, EntryType
 from db.models.billing_cycle import BillingCycleStatus
@@ -18,11 +18,10 @@ from db.repositories.billing_entry import BillingEntryRepository
 from db.repositories.matter import MatterRateOverrideRepository, MatterRepository
 from db.repositories.staff import StaffRepository
 from db.repositories.trust_ledger import TrustLedgerRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import DatabaseManager
 from services.audit_logger import AuditLogger
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
-from util.settings import settings
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -63,7 +62,7 @@ class ParsedBillingEntry:
         self.invoice_date = invoice_date
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ParsedBillingEntry":
+    def from_dict(cls, data: dict[str, Any]) -> "ParsedBillingEntry":
         """Construct from an LLM-returned dict."""
         return cls(
             hours=data.get("hours"),
@@ -211,7 +210,7 @@ class BillingService:
     def update_entry(
         self,
         entry_id: int,
-        updates: dict,
+        updates: dict[str, Any],
         supabase_uid: str,
     ) -> BillingEntryInDB:
         """
@@ -306,7 +305,7 @@ class BillingService:
 
     # ── Balance calculation ────────────────────────────────────────────────
 
-    def get_client_balance(self, matter_id: int) -> dict:
+    def get_client_balance(self, matter_id: int) -> dict[str, Any]:
         """
         Compute the client financial balance for the ClientBalanceWidget.
 

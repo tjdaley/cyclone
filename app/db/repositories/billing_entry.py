@@ -2,8 +2,7 @@
 app/db/repositories/billing_entry.py - Repository for the BillingEntry model.
 """
 from db.models.billing_entry import BillingEntryInDB
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)

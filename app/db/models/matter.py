@@ -17,6 +17,13 @@ class MatterStatus(str, Enum):
     archived = "archived"
 
 
+class DiscoveryLevel(str, Enum):
+    """Texas Rules of Civil Procedure 190 discovery levels."""
+    level_1 = "level_1"
+    level_2 = "level_2"
+    level_3 = "level_3"
+
+
 class MatterType(str, Enum):
     """Broad category of legal matter — drives fee agreement templates."""
     divorce = "divorce"
@@ -198,6 +205,10 @@ class Matter(BaseModel):
     matter_number: Optional[str] = Field(
         default=None,
         description="Court-assigned case/matter number",
+    )
+    discovery_level: Optional[DiscoveryLevel] = Field(
+        default=None,
+        description="Texas TRCP 190 discovery level for this matter",
     )
     notes: Optional[str] = Field(default=None, description="Internal matter notes; not visible to the client")
 

@@ -11,8 +11,7 @@ from db.models.discovery import (
     StandardObjection,
     StandardPrivilege,
 )
-from db.repositories.base_repo import BaseRepository
-from db.supabasemanager import DatabaseManager
+from db_handler import BaseRepository, DatabaseManager, Overlaps
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -86,16 +85,11 @@ class StandardPrivilegeRepository(BaseRepository[StandardPrivilege]):
         return self.select_many(condition={}, sort_by="slug")[0]
 
 
-class StandardObjectionRepository:
-    """
-    Repository for the standard_objections lookup table.
-
-    Uses a direct Supabase query for the ``ov`` (array overlap) operator,
-    which is not supported by BaseRepository.select_many.
-    """
+class StandardObjectionRepository(BaseRepository[StandardObjection]):
+    """Repository for the standard_objections lookup table."""
 
     def __init__(self, manager: DatabaseManager):
-        self._manager = manager
+        super().__init__(manager, "standard_objections", StandardObjection)
 
     def get_by_request_type(self, request_type: str) -> list[StandardObjection]:
         """
@@ -103,12 +97,9 @@ class StandardObjectionRepository:
         request_type or the wildcard ``'*'``.
         """
         LOGGER.debug("StandardObjectionRepository.get_by_request_type: %s", request_type)
-        result = (
-            self._manager.client
-            .table("standard_objections")
-            .select("*")
-            .ov("applies_to", [request_type, "*"])
-            .order("slug")
-            .execute()
+        objections, _  = self.select_many(
+            condition={"applies_to": Overlaps([request_type, "*"])},
+            sort_by="slug",
         )
-        return [StandardObjection(**row) for row in (result.data or [])]
+        
+        return objections

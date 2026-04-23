@@ -61,6 +61,10 @@ class DiscoveryDocument(BaseModel):
         default=None,
         description="Date we served our response, if completed",
     )
+    storage_path: Optional[str] = Field(
+        default=None,
+        description="Supabase Storage path to the original PDF",
+    )
 
 
 class DiscoveryDocumentInDB(DiscoveryDocument):
