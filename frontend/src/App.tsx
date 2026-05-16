@@ -16,8 +16,11 @@ import BillingPage    from './pages/app/BillingPage'
 import MattersPage    from './pages/app/MattersPage'
 import ClientsPage    from './pages/app/ClientsPage'
 import DiscoveryPage  from './pages/app/DiscoveryPage'
-import PleadingsPage  from './pages/app/PleadingsPage'
-import AdminPage      from './pages/app/AdminPage'
+import PleadingsPage    from './pages/app/PleadingsPage'
+import LeadsListPage    from './pages/app/LeadsListPage'
+import LeadDetailPage   from './pages/app/LeadDetailPage'
+import ProfilePage      from './pages/app/ProfilePage'
+import AdminPage        from './pages/app/AdminPage'
 
 export default function App() {
   return (
@@ -43,6 +46,9 @@ export default function App() {
               <Route path="/app/clients"   element={<ClientsPage />} />
               <Route path="/app/discovery" element={<DiscoveryPage />} />
               <Route path="/app/pleadings" element={<PleadingsPage />} />
+              <Route path="/app/leads"                  element={<LeadsListPage />} />
+              <Route path="/app/leads/:sessionUuid"     element={<LeadDetailPage />} />
+              <Route path="/app/profile"   element={<ProfilePage />} />
               <Route path="/app/admin"     element={<AdminPage />} />
             </Route>
           </Route>

@@ -17,10 +17,18 @@ class Settings(BaseSettings):
     db_type: str = "supabase"
 
     # Supabase settings
+    ## CYCLONE DB
     supabase_url: str = ""
     supabase_key: Optional[str] = None
     supabase_service_role_key: str = ""
     supabase_anon_key: str = ""
+    ## LANDING PAGES DB
+    supabase_landing_pages_url: str = ""
+    supabase_landing_pages_key: Optional[str] = None
+    supabase_landing_pages_service_role_key: str = ""
+    supabase_landing_pages_anon_key: str = ""
+
+
     supabase_password: Optional[str] = None
     supabase_max_rows: int = 1000
 

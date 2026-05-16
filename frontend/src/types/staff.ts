@@ -21,4 +21,23 @@ export interface Staff {
   slug: string
   bar_admissions: BarAdmission[]
   default_billing_rate: number | null
+  calendly_url: string | null
+  agent_signature: string | null
+  telegram_id: string | null
+}
+
+/** Mirrors StaffCreateRequest in app/schemas/staff.py */
+export interface StaffCreatePayload {
+  auth_email?: string | null
+  role: StaffRole
+  name: FullName
+  office_id: number
+  email: string
+  telephone: string
+  slug: string
+  bar_admissions?: BarAdmission[]
+  default_billing_rate?: number | null
+  calendly_url?: string | null
+  agent_signature?: string | null
+  telegram_id?: string | null
 }

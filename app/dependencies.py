@@ -11,6 +11,7 @@ from fastapi import Depends, HTTPException, Request
 from db_handler import SupabaseManager
 from db.repositories.user_role import UserRoleRepository
 from util.loggerfactory import LoggerFactory
+from util.settings import settings
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -26,6 +27,28 @@ def get_db_manager() -> SupabaseManager:
     :rtype: SupabaseManager
     """
     return SupabaseManager()
+
+
+def get_landing_pages_db() -> SupabaseManager:
+    """
+    FastAPI dependency that yields a SupabaseManager pointed at the
+    landing-pages project (read-only source of leads + attorneys).
+
+    Construction is explicit so we don't have to monkey with environment
+    variables to switch projects — the same code path is used for cyclone's
+    own DB via get_db_manager(), just with different credentials.
+
+    verify_connection=False skips the get_user() probe because the
+    service-role key does not represent a user session.
+
+    :return: SupabaseManager bound to the landing-pages project.
+    :rtype: SupabaseManager
+    """
+    return SupabaseManager(
+        url=settings.supabase_landing_pages_url,
+        key=settings.supabase_landing_pages_service_role_key,
+        verify_connection=False,
+    )
 
 
 def get_current_user(request: Request) -> dict[str, Union[str, None]]:

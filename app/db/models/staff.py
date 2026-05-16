@@ -98,6 +98,20 @@ class StaffMember(BaseModel):
                     "Null for admin roles that do not bill time. "
                     "Overridden per-matter by MatterRateOverride records.",
     )
+    calendly_url: Optional[str] = Field(
+        default=None,
+        description="Public Calendly URL the CRM agent shares with leads to book consultations",
+    )
+    agent_signature: Optional[str] = Field(
+        default=None,
+        description="Sign-off line the AI agent uses on outbound messages, e.g. 'Best, Tom'",
+    )
+    telegram_id: Optional[str] = Field(
+        default=None,
+        description="Telegram chat ID for this staff member; used by agents to send quick "
+                    "escalations (e.g. a 'B' question from a client that needs a short answer). "
+                    "Stored as text because IDs can exceed int32.",
+    )
 
 
 class StaffMemberInDB(StaffMember):

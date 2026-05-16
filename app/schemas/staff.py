@@ -29,6 +29,9 @@ class StaffCreateRequest(BaseModel):
         ge=0.0,
         description="Default hourly billing rate in USD; null for non-billing roles",
     )
+    calendly_url: Optional[str] = Field(default=None, description="Calendly URL used by the CRM agent")
+    agent_signature: Optional[str] = Field(default=None, description="Sign-off line for AI-generated messages")
+    telegram_id: Optional[str] = Field(default=None, description="Telegram chat ID for agent escalations")
 
 
 class StaffUpdateRequest(BaseModel):
@@ -42,6 +45,9 @@ class StaffUpdateRequest(BaseModel):
     slug: Optional[str] = None
     bar_admissions: Optional[List[BarAdmission]] = None
     default_billing_rate: Optional[float] = Field(default=None, ge=0.0)
+    calendly_url: Optional[str] = None
+    agent_signature: Optional[str] = None
+    telegram_id: Optional[str] = None
 
 
 class StaffResponse(BaseModel):
@@ -57,3 +63,6 @@ class StaffResponse(BaseModel):
     slug: str
     bar_admissions: List[BarAdmission]
     default_billing_rate: Optional[float]
+    calendly_url: Optional[str] = None
+    agent_signature: Optional[str] = None
+    telegram_id: Optional[str] = None
