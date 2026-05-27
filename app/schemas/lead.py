@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from db.models.lead_action import LeadActionDirection, LeadActionType, LeadActorType
-from db.models.lead_workflow import LeadPriority, LeadStatus
+from db.models.lead_workflow import DismissalReason, LeadPriority, LeadStatus
 
 
 # ── Lead list / detail ────────────────────────────────────────────────────
@@ -61,7 +61,8 @@ class LeadDetail(BaseModel):
     priority: LeadPriority
     next_action_at: Optional[datetime]
     next_action_note: Optional[str]
-    dismissal_reason: Optional[str]
+    dismissal_reason: Optional[DismissalReason]
+    dismissal_note: Optional[str]
     converted_to_client_id: Optional[int]
     converted_to_matter_id: Optional[int]
     agent_enabled: bool
@@ -90,7 +91,8 @@ class LeadActionResponse(BaseModel):
 
 class StatusUpdateRequest(BaseModel):
     status: LeadStatus
-    dismissal_reason: Optional[str] = Field(default=None, description="Required when status='disqualified'")
+    dismissal_reason: Optional[DismissalReason] = Field(default=None, description="Required when status='disqualified'")
+    dismissal_note: Optional[str] = Field(default=None, description="Free-text detail, primarily when dismissal_reason='other'")
 
 
 class AssignRequest(BaseModel):

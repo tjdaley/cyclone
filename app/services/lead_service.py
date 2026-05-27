@@ -28,6 +28,7 @@ from db.models.lead_action import (
     LeadActorType,
 )
 from db.models.lead_workflow import (
+    DismissalReason,
     LeadPriority,
     LeadStatus,
     LeadWorkflow,
@@ -207,6 +208,7 @@ class LeadService:
             next_action_at=wf.next_action_at,
             next_action_note=wf.next_action_note,
             dismissal_reason=wf.dismissal_reason,
+            dismissal_note=wf.dismissal_note,
             converted_to_client_id=wf.converted_to_client_id,
             converted_to_matter_id=wf.converted_to_matter_id,
             agent_enabled=wf.agent_enabled,
@@ -255,16 +257,21 @@ class LeadService:
         role: str,
         session_uuid: UUID,
         new_status: LeadStatus,
-        dismissal_reason: Optional[str],
+        dismissal_reason: Optional[DismissalReason],
+        dismissal_note: Optional[str],
     ) -> LeadDetail:
         wf = self._get_or_create_for_mutation(cyclone_db, foreign_db, staff_id, role, session_uuid)
         old_status = wf.status
 
+        # Reason + note only apply to disqualification; clear them otherwise so
+        # a lead moved out of 'disqualified' doesn't carry a stale reason.
         updates: dict[str, object] = {"status": new_status.value}
         if new_status == LeadStatus.disqualified:
-            updates["dismissal_reason"] = dismissal_reason
+            updates["dismissal_reason"] = dismissal_reason.value if dismissal_reason else None
+            updates["dismissal_note"] = dismissal_note
         else:
             updates["dismissal_reason"] = None
+            updates["dismissal_note"] = None
 
         LeadWorkflowRepository(cyclone_db).update(wf.id, updates)
         self._log_action(
@@ -272,7 +279,12 @@ class LeadService:
             session_uuid=session_uuid,
             staff_id=staff_id,
             action_type=LeadActionType.status_change,
-            metadata={"from": old_status.value, "to": new_status.value, "reason": dismissal_reason},
+            metadata={
+                "from": old_status.value,
+                "to": new_status.value,
+                "reason": dismissal_reason.value if dismissal_reason else None,
+                "note": dismissal_note,
+            },
         )
         LOGGER.info("lead_service.update_status: session=%s %s -> %s", session_uuid, old_status.value, new_status.value)
         return self.get_detail(cyclone_db, foreign_db, staff_id, role, session_uuid)

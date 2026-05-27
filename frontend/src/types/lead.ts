@@ -11,6 +11,9 @@ export type LeadStatus =
   | 'lost'
   | 'nurture'
 
+/** Mirrors DismissalReason enum in app/db/models/lead_workflow.py */
+export type DismissalReason = 'subject_matter' | 'income' | 'spam' | 'other'
+
 /** Mirrors LeadPriority enum in app/db/models/lead_workflow.py */
 export type LeadPriority = 'low' | 'normal' | 'high'
 
@@ -83,7 +86,8 @@ export interface LeadDetail {
   priority: LeadPriority
   next_action_at: string | null
   next_action_note: string | null
-  dismissal_reason: string | null
+  dismissal_reason: DismissalReason | null
+  dismissal_note: string | null
   converted_to_client_id: number | null
   converted_to_matter_id: number | null
   agent_enabled: boolean
@@ -108,7 +112,8 @@ export interface LeadAction {
 
 export interface StatusUpdatePayload {
   status: LeadStatus
-  dismissal_reason?: string | null
+  dismissal_reason?: DismissalReason | null
+  dismissal_note?: string | null
 }
 
 export interface AssignPayload {

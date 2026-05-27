@@ -173,6 +173,7 @@ def update_status(
         session_uuid=session_uuid,
         new_status=body.status,
         dismissal_reason=body.dismissal_reason,
+        dismissal_note=body.dismissal_note,
     )
 
 

@@ -1,5 +1,7 @@
 import { useEffect, useState, FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   getLead, getLeadActions,
   updateLeadStatus, assignLead, updateLeadPriority, setLeadFollowUp,
@@ -7,12 +9,27 @@ import {
   getStaff,
 } from '../../lib/api'
 import type {
-  LeadDetail, LeadAction, LeadStatus, LeadPriority, LeadActionType, Staff,
+  LeadDetail, LeadAction, LeadStatus, LeadPriority, LeadActionType, DismissalReason, Staff,
 } from '../../types'
 
 const STATUS_OPTIONS: LeadStatus[] = [
-  'new', 'attempted', 'contacted', 'qualified', 'disqualified',
-  'consultation_scheduled', 'consulted', 'engaged', 'lost', 'nurture',
+  'new',
+  'attempted',
+  'contacted',
+  'qualified',
+  'disqualified',
+  'consultation_scheduled',
+  'consulted',
+  'engaged',
+  'lost',
+  'nurture',
+]
+
+const DISMISSAL_REASONS: { value: DismissalReason; label: string }[] = [
+  { value: 'subject_matter', label: 'Subject matter' },
+  { value: 'income',         label: 'Income' },
+  { value: 'spam',           label: 'Spam' },
+  { value: 'other',          label: 'Other' },
 ]
 
 const PRIORITY_OPTIONS: LeadPriority[] = ['low', 'normal', 'high']
@@ -73,14 +90,19 @@ export default function LeadDetailPage() {
   const [followUpAt, setFollowUpAt]     = useState('')
   const [followUpNote, setFollowUpNote] = useState('')
 
-  // Dismissal reason input (when picking disqualified)
-  const [dismissalReason, setDismissalReason] = useState('')
+  // Dismissal reason + note (when status is 'disqualified')
+  const [dismissalReason, setDismissalReason] = useState<DismissalReason | ''>('')
+  const [dismissalNote, setDismissalNote]     = useState('')
 
   useEffect(() => {
     if (!sessionUuid) return
     setLoading(true); setError(null)
     Promise.all([getLead(sessionUuid), getLeadActions(sessionUuid), getStaff()])
-      .then(([d, a, s]) => { setLead(d); setActions(a); setStaff(s) })
+      .then(([d, a, s]) => {
+        setLead(d); setActions(a); setStaff(s)
+        setDismissalReason(d.dismissal_reason ?? '')
+        setDismissalNote(d.dismissal_note ?? '')
+      })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load'))
       .finally(() => setLoading(false))
   }, [sessionUuid])
@@ -91,14 +113,22 @@ export default function LeadDetailPage() {
     setActions(a)
   }
 
-  async function handleStatusChange(newStatus: LeadStatus) {
-    if (!lead || !sessionUuid) return
+  async function saveStatus(
+    status: LeadStatus,
+    reason: DismissalReason | '' ,
+    note: string,
+  ) {
+    if (!sessionUuid) return
     setBusy(true)
     try {
-      const reason = newStatus === 'disqualified' ? (dismissalReason || null) : null
-      const updated = await updateLeadStatus(sessionUuid, { status: newStatus, dismissal_reason: reason })
+      const isDQ = status === 'disqualified'
+      const updated = await updateLeadStatus(sessionUuid, {
+        status,
+        dismissal_reason: isDQ ? (reason || null) : null,
+        dismissal_note: isDQ ? (note.trim() || null) : null,
+      })
       setLead(updated)
-      if (newStatus !== 'disqualified') setDismissalReason('')
+      if (!isDQ) { setDismissalReason(''); setDismissalNote('') }
       await refreshActions()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update status')
@@ -238,7 +268,9 @@ export default function LeadDetailPage() {
           {lead.conflict_summary && (
             <section className="card p-5">
               <h2 className="font-semibold text-navy mb-3">Lead's summary</h2>
-              <pre className="text-sm text-navy whitespace-pre-wrap font-sans">{lead.conflict_summary}</pre>
+              <div className="prose prose-sm max-w-none prose-headings:text-navy prose-p:text-navy prose-li:text-navy prose-strong:text-navy prose-table:text-sm">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{lead.conflict_summary}</ReactMarkdown>
+              </div>
             </section>
           )}
 
@@ -302,23 +334,43 @@ export default function LeadDetailPage() {
             <select
               className="input"
               value={lead.status}
-              onChange={e => handleStatusChange(e.target.value as LeadStatus)}
+              onChange={e => saveStatus(e.target.value as LeadStatus, dismissalReason, dismissalNote)}
               disabled={busy}
             >
               {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
             </select>
             {lead.status === 'disqualified' && (
-              <input
-                className="input mt-2"
-                placeholder="Dismissal reason"
-                value={dismissalReason || lead.dismissal_reason || ''}
-                onChange={e => setDismissalReason(e.target.value)}
-                onBlur={() => {
-                  if (dismissalReason && dismissalReason !== lead.dismissal_reason) {
-                    handleStatusChange('disqualified')
-                  }
-                }}
-              />
+              <div className="mt-2 space-y-2">
+                <div>
+                  <label className="label">Reason</label>
+                  <select
+                    className="input mt-1"
+                    value={dismissalReason}
+                    disabled={busy}
+                    onChange={e => {
+                      const r = e.target.value as DismissalReason | ''
+                      setDismissalReason(r)
+                      saveStatus('disqualified', r, dismissalNote)
+                    }}
+                  >
+                    <option value="">— select reason —</option>
+                    {DISMISSAL_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                  </select>
+                </div>
+                {dismissalReason === 'other' && (
+                  <div>
+                    <label className="label">Detail</label>
+                    <input
+                      className="input mt-1"
+                      placeholder="What disqualified this lead?"
+                      value={dismissalNote}
+                      disabled={busy}
+                      onChange={e => setDismissalNote(e.target.value)}
+                      onBlur={() => saveStatus('disqualified', dismissalReason, dismissalNote)}
+                    />
+                  </div>
+                )}
+              </div>
             )}
           </section>
 
