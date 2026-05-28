@@ -66,3 +66,18 @@ class StaffResponse(BaseModel):
     calendly_url: Optional[str] = None
     agent_signature: Optional[str] = None
     telegram_id: Optional[str] = None
+    roles: List[str] = Field(
+        default_factory=list,
+        description="Auth roles this staff member holds (from user_roles), sorted",
+    )
+
+
+class StaffRolesResponse(BaseModel):
+    """The set of auth roles a staff member holds (one entry per user_roles row)."""
+    staff_id: int
+    roles: List[str] = Field(default_factory=list, description="Sorted set of role names")
+
+
+class StaffRolesRequest(BaseModel):
+    """Replace the set of auth roles a staff member holds."""
+    roles: List[str] = Field(default_factory=list, description="Full replacement set; allowed: attorney, paralegal, admin")

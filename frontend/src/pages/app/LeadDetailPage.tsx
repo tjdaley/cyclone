@@ -318,7 +318,11 @@ export default function LeadDetailPage() {
                     {a.body && <div className="text-text-secondary mt-1 whitespace-pre-wrap">{a.body}</div>}
                     {a.notes && <div className="text-text-secondary italic mt-1">{a.notes}</div>}
                     <div className="text-xs text-text-secondary mt-1">
-                      {a.actor_type === 'ai_agent' ? 'AI agent' : a.actor_type === 'system' ? 'System' : staffName(staff, a.staff_id)}
+                      {a.direction === 'inbound'
+                        ? (lead.full_name ?? 'Lead')
+                        : a.actor_type === 'ai_agent' ? 'AI agent'
+                        : a.actor_type === 'system' ? 'System'
+                        : staffName(staff, a.staff_id)}
                     </div>
                   </li>
                 ))}

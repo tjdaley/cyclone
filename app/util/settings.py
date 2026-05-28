@@ -77,6 +77,35 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     stripe_publishable_key: str = ""  # safe to expose to frontend via GET /api/config
 
+    # Email — SMTP (outbound) + IMAP (inbound), one shared intake mailbox
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    mail_from_address: str = ""
+    mail_from_name: str = "Cyclone Intake"
+
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_username: str = ""
+    imap_password: str = ""
+    imap_mailbox: str = "INBOX"
+    imap_spam_folder: str = "Spam"
+
+    # Telegram (agent escalations to lead responders)
+    telegram_bot_token: str = ""
+
+    # Redis / Valkey (poller locks + inbound-email idempotency)
+    redis_url: str = "redis://localhost:6379/0"
+
+    # CRM agent poller
+    lead_poll_interval_seconds: int = 60
+    # Only leads created at/after this ISO timestamp are eligible for the
+    # automated welcome — set to the go-live moment so the back catalog of
+    # existing leads is never emailed. Empty disables welcomes entirely.
+    welcome_leads_after: str = ""
+
     class Config:
         env_file = ".env"
         extra = "forbid"  # Pydantic will throw an error if unexpected env vars are present

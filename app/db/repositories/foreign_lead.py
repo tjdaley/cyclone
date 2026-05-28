@@ -59,6 +59,35 @@ class ForeignLeadRepository(BaseRepository[ForeignLead]):
         """Return one lead by its stable cross-DB key."""
         return self.select_one(condition={"session_uuid": str(session_uuid)})
 
+    def list_recent(self, limit: int = 100) -> list[ForeignLead]:
+        """
+        Return the newest leads, most-recent first.
+
+        db_handler's condition dict can't express ``created_at >= x`` (a tuple
+        value becomes an IN clause, not a comparison), so the welcome poller
+        pulls the most recent N and applies the go-live cutoff in Python. At a
+        60s poll cadence, the latest N rows always cover new arrivals.
+        """
+        records, _ = self.select_many(
+            condition={},
+            sort_by="created_at",
+            sort_direction="desc",
+            start=0,
+            end=max(0, limit - 1),
+        )
+        return records
+
+    def get_by_email(self, email: str) -> Optional[ForeignLead]:
+        """Return the most recent lead with this email (inbound reply matching)."""
+        records, _ = self.select_many(
+            condition={"email": email},
+            sort_by="created_at",
+            sort_direction="desc",
+            start=0,
+            end=0,
+        )
+        return records[0] if records else None
+
 
 class ForeignAttorneyRepository(BaseRepository[ForeignAttorney]):
     """Read-only repository for landing-pages.attorneys."""

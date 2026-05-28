@@ -9,6 +9,7 @@ from typing import Callable, Union
 from fastapi import Depends, HTTPException, Request
 
 from db_handler import SupabaseManager
+from db.models.user_role import primary_role
 from db.repositories.user_role import UserRoleRepository
 from util.loggerfactory import LoggerFactory
 from util.settings import settings
@@ -79,20 +80,19 @@ def require_role(allowed_roles: list[str]) -> Callable[..., None]:
     """
     FastAPI dependency factory that enforces role-based access control.
 
-    Resolves the caller's role from the ``user_roles`` table (authoritative
-    source) rather than relying solely on the JWT claim. This prevents
-    privilege escalation if a JWT claim is stale relative to the database.
+    Resolves the caller's roles from the ``user_roles`` table (authoritative
+    source). A user may hold MULTIPLE roles; access is granted if any of them
+    is in ``allowed_roles``. After a successful check:
+
+    - ``request.state.roles`` is set to the sorted list of all the user's roles.
+    - ``request.state.role``  is set to the primary (highest-privilege) role,
+      preserved for code that still wants a single string.
 
     Usage::
 
         @router.get("/secret")
         def secret_route(_=Depends(require_role(["admin"]))):
             ...
-
-    :param allowed_roles: List of role strings that may access the route.
-    :type allowed_roles: list[str]
-    :return: FastAPI dependency callable.
-    :rtype: Callable
     """
 
     def _check(request: Request, manager: SupabaseManager = Depends(get_db_manager)) -> None:
@@ -100,22 +100,23 @@ def require_role(allowed_roles: list[str]) -> Callable[..., None]:
         if uid is None:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Single-query lookup: user_roles WHERE supabase_uid = uid
-        role_repo = UserRoleRepository(manager)
-        role_record = role_repo.get_by_uid(uid)
-        if role_record is None:
+        records = UserRoleRepository(manager).get_by_uid(uid)
+        if not records:
             LOGGER.warning("require_role: no role record found for uid=%s", uid)
             raise HTTPException(status_code=403, detail="No role assigned to this account")
 
-        if role_record.role.value not in allowed_roles:
+        user_roles = sorted({r.role.value for r in records})
+        if not (set(user_roles) & set(allowed_roles)):
             LOGGER.warning(
-                "require_role: access denied role=%s allowed=%s",
-                role_record.role.value,
+                "require_role: access denied roles=%s allowed=%s",
+                user_roles,
                 allowed_roles,
             )
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        # Inject the DB-verified role back into request.state
-        request.state.role = role_record.role.value
+        # Inject DB-verified roles into request.state. role = primary (for
+        # legacy single-role callers); roles = the full set.
+        request.state.role = primary_role(user_roles)
+        request.state.roles = user_roles
 
     return _check

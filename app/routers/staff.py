@@ -12,8 +12,18 @@ from db.repositories.staff_slug_access import StaffSlugAccessRepository
 from db.repositories.user_role import UserRoleRepository
 from dependencies import get_db_manager, require_role
 from schemas.common import DeletedResponse
-from schemas.staff import StaffCreateRequest, StaffResponse, StaffUpdateRequest
+from schemas.staff import (
+    StaffCreateRequest, StaffResponse, StaffRolesRequest, StaffRolesResponse, StaffUpdateRequest,
+)
 from util.loggerfactory import LoggerFactory
+
+# Roles assignable to a STAFF member through the admin UI. 'client' exists as a
+# UserRoleType but is for client-portal users (client_id populated, not staff_id).
+_STAFF_ASSIGNABLE_ROLES: set[str] = {
+    UserRoleType.attorney.value,
+    UserRoleType.paralegal.value,
+    UserRoleType.admin.value,
+}
 
 # Fields a non-admin self-editor is NOT allowed to change on their own record.
 # Role is auth-relevant; slug is the lead-attribution identifier and changing
@@ -31,6 +41,24 @@ LOGGER = LoggerFactory.create_logger(__name__)
 router = APIRouter(prefix="/api/v1/staff", tags=["staff"])
 
 
+def _roles_for_staff_ids(manager, staff_ids: list[int]) -> dict[int, list[str]]:
+    """Return a {staff_id: [role values]} map for the given ids. One query (IN clause)."""
+    if not staff_ids:
+        return {}
+    rows, _ = UserRoleRepository(manager).select_many(condition={"staff_id": staff_ids})
+    out: dict[int, list[str]] = {}
+    for row in rows:
+        if row.staff_id is not None:
+            out.setdefault(row.staff_id, []).append(row.role.value)
+    return {sid: sorted(set(values)) for sid, values in out.items()}
+
+
+def _single_staff_roles(manager, staff_id: int) -> list[str]:
+    """Return sorted role values for one staff member."""
+    rows = UserRoleRepository(manager).get_by_staff(staff_id)
+    return sorted({r.role.value for r in rows})
+
+
 @router.get("", response_model=list[StaffResponse])
 def list_staff(
     manager=Depends(get_db_manager),
@@ -44,7 +72,11 @@ def list_staff(
     """
     repo = StaffRepository(manager)
     records, _ = repo.select_many(condition={}, sort_by="created_at")
-    return [StaffResponse(**r.model_dump()) for r in records]
+    roles_map = _roles_for_staff_ids(manager, [r.id for r in records])
+    return [
+        StaffResponse(**r.model_dump(), roles=roles_map.get(r.id, []))
+        for r in records
+    ]
 
 
 @router.get("/{staff_id}", response_model=StaffResponse)
@@ -66,7 +98,7 @@ def get_staff(
     record = repo.select_one(condition={"id": staff_id})
     if record is None:
         raise HTTPException(status_code=404, detail="Staff member not found")
-    return StaffResponse(**record.model_dump())
+    return StaffResponse(**record.model_dump(), roles=_single_staff_roles(manager, staff_id))
 
 
 @router.post("", response_model=StaffResponse, status_code=201)
@@ -112,7 +144,7 @@ def create_staff(
         access_repo.insert({"staff_id": record.id, "slug": slug})
     LOGGER.info("staff.create: seeded slug_access for staff_id=%s slugs=%s", record.id, DEFAULT_STAFF_SLUG_GRANTS)
 
-    return StaffResponse(**record.model_dump())
+    return StaffResponse(**record.model_dump(), roles=_single_staff_roles(manager, record.id))
 
 
 @router.patch("/{staff_id}", response_model=StaffResponse)
@@ -159,24 +191,113 @@ def update_staff(
     LOGGER.info("staff.update: staff_id=%s by=%s self=%s admin=%s", staff_id, caller_uid, is_self, is_admin)
     record = repo.update(staff_id, updates)
 
-    # Keep user_roles.role aligned with staff.role when an admin changes it.
+    # Best-effort sync: if the staff member has a user_roles row matching the
+    # OLD staff.role value, retitle it to the NEW value so RBAC stays aligned.
+    # Any other roles they hold (e.g. a separate 'admin' grant) are preserved
+    # untouched. No new rows are created — under the multi-role model,
+    # granting/revoking auth roles is managed independently of staff.role.
     if is_admin and "role" in updates and updates["role"] != target.role.value:
         role_repo = UserRoleRepository(manager)
-        existing = role_repo.get_by_staff(staff_id)
-        new_role = UserRoleType(updates["role"])
-        if existing is not None:
-            role_repo.update(existing.id, {"role": new_role.value})
-            LOGGER.info("staff.update: synced user_roles.role staff_id=%s -> %s", staff_id, new_role.value)
-        elif record.auth_email:
-            # Legacy backfill: create the user_roles row if it's missing
-            role_repo.insert(UserRole(
-                auth_email=record.auth_email,
-                role=new_role,
-                staff_id=staff_id,
-            ).model_dump())
-            LOGGER.info("staff.update: backfilled user_roles staff_id=%s role=%s", staff_id, new_role.value)
+        old_role_value = target.role.value
+        new_role_value = updates["role"]
+        synced = 0
+        for row in role_repo.get_by_staff(staff_id):
+            if row.role.value == old_role_value:
+                role_repo.update(row.id, {"role": new_role_value})
+                synced += 1
+        if synced:
+            LOGGER.info(
+                "staff.update: synced %s user_roles row(s) staff_id=%s %s -> %s",
+                synced, staff_id, old_role_value, new_role_value,
+            )
+        else:
+            LOGGER.info(
+                "staff.update: no matching user_roles row for old role; auth roles unchanged staff_id=%s",
+                staff_id,
+            )
 
-    return StaffResponse(**record.model_dump())
+    return StaffResponse(**record.model_dump(), roles=_single_staff_roles(manager, staff_id))
+
+
+@router.get("/{staff_id}/roles", response_model=StaffRolesResponse)
+def get_staff_roles(
+    staff_id: int,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["admin"])),
+) -> StaffRolesResponse:
+    """Return the auth roles assigned to a staff member."""
+    rows = UserRoleRepository(manager).get_by_staff(staff_id)
+    return StaffRolesResponse(
+        staff_id=staff_id,
+        roles=sorted({r.role.value for r in rows}),
+    )
+
+
+@router.put("/{staff_id}/roles", response_model=StaffRolesResponse)
+def set_staff_roles(
+    staff_id: int,
+    body: StaffRolesRequest,
+    request: Request,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["admin"])),
+) -> StaffRolesResponse:
+    """
+    Replace the set of auth roles for a staff member. Diffs against the
+    current set; inserts/deletes only what changed. Self-lockout protected:
+    an admin cannot remove their own 'admin' role.
+    """
+    staff_repo = StaffRepository(manager)
+    target = staff_repo.select_one(condition={"id": staff_id})
+    if target is None:
+        raise HTTPException(status_code=404, detail="Staff member not found")
+
+    requested = {r.strip() for r in body.roles if r.strip()}
+    invalid = requested - _STAFF_ASSIGNABLE_ROLES
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid roles for staff: %s (allowed: %s)" % (sorted(invalid), sorted(_STAFF_ASSIGNABLE_ROLES)),
+        )
+
+    role_repo = UserRoleRepository(manager)
+    current_rows = role_repo.get_by_staff(staff_id)
+    current_by_role: dict[str, int] = {r.role.value: r.id for r in current_rows}
+    current_roles: set[str] = set(current_by_role.keys())
+
+    # Self-lockout guard: the caller cannot remove their own admin role.
+    caller_uid = getattr(request.state, "supabase_uid", None)
+    if (
+        caller_uid is not None
+        and target.supabase_uid == caller_uid
+        and UserRoleType.admin.value in current_roles
+        and UserRoleType.admin.value not in requested
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot remove your own admin role. Have another admin do it.",
+        )
+
+    to_add = requested - current_roles
+    to_remove_ids = [row_id for role, row_id in current_by_role.items() if role not in requested]
+
+    # New rows inherit supabase_uid + auth_email from the target so they're
+    # linked immediately if the staff member has already correlated; otherwise
+    # they sit unlinked and get picked up by correlate-staff on first login.
+    for role in to_add:
+        role_repo.insert(UserRole(
+            supabase_uid=target.supabase_uid,
+            auth_email=target.auth_email,
+            role=UserRoleType(role),
+            staff_id=staff_id,
+        ).model_dump())
+    for row_id in to_remove_ids:
+        role_repo.delete(row_id)
+
+    LOGGER.info(
+        "staff.set_roles: staff_id=%s added=%s removed=%s",
+        staff_id, sorted(to_add), sorted(current_roles - requested),
+    )
+    return StaffRolesResponse(staff_id=staff_id, roles=sorted(requested))
 
 
 @router.delete("/{staff_id}", response_model=DeletedResponse)

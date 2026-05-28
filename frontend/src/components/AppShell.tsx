@@ -108,8 +108,9 @@ export default function AppShell() {
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
+  const userRoles = profile?.roles ?? (profile?.role ? [profile.role] : [])
   const visibleItems = NAV_ITEMS.filter(
-    item => !item.roles || (profile && item.roles.includes(profile.role))
+    item => !item.roles || item.roles.some(r => userRoles.includes(r))
   )
 
   async function handleSignOut() {
@@ -145,7 +146,7 @@ export default function AppShell() {
       {/* User footer */}
       <div className="px-4 py-4 border-t border-border">
         <div className="text-xs text-text-secondary mb-2 uppercase tracking-widest font-semibold">
-          {profile?.role}
+          {userRoles.length > 0 ? userRoles.join(' · ') : profile?.role}
         </div>
         <button
           onClick={handleSignOut}

@@ -10,7 +10,7 @@ metadata, etc.) are omitted to keep the surface small.
 """
 from datetime import datetime
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,7 +32,7 @@ class ForeignLead(BaseModel):
     state: Optional[str] = Field(default=None)
     city: Optional[str] = Field(default=None)
     zip: Optional[str] = Field(default=None)
-    session_uuid: Optional[UUID] = Field(default=None, description="Stable cross-DB identifier; never null")
+    session_uuid: UUID = Field(default_factory=uuid4, description="Stable cross-DB identifier; never null")
     conflict_summary: Optional[str] = Field(default=None, description="Free-form summary of the lead's situation, may be markdown")
     lead_source: Optional[str] = Field(default=None, description="Which landing-page component submitted the lead")
     referrer: Optional[str] = Field(default=None, description="HTTP referrer URL")

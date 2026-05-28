@@ -13,6 +13,18 @@ services:
       timeout: 10s
       retries: 3
 
+  worker:
+    # CRM email-agent poller. Same image as the API, different entrypoint.
+    # Runs on every node; the shared Redis (REDIS_URL) makes polling
+    # fleet-wide single-runner via the crm:poller lock.
+    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.2
+    build: ./app
+    command: ["python", "-u", "crm_worker.py"]   # -u = unbuffered stdout/stderr so logs flush in Docker
+    env_file: .env
+    volumes:
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+
   frontend:
     image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.2
     build:

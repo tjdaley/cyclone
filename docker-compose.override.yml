@@ -9,6 +9,15 @@ services:
       - LOG_LEVEL=DEBUG
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
+  worker:
+    # Dev: mount source so a container restart picks up changes. The poller
+    # does not hot-reload, so `docker compose restart worker` after edits.
+    volumes:
+      - ./app:/app
+    environment:
+      - IS_DEVELOPMENT=true
+      - LOG_LEVEL=DEBUG
+
   frontend:
     ports:
       - "3000:80"

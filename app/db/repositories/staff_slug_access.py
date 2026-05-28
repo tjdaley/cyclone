@@ -24,4 +24,4 @@ class StaffSlugAccessRepository(BaseRepository[StaffSlugAccessInDB]):
 
     def has_wildcard(self, staff_id: int) -> bool:
         """Return True if this staff member has a '*' grant."""
-        return self.exists(condition={"staff_id": staff_id, "slug": WILDCARD_SLUG})
+        return self.select_one(condition={"staff_id": staff_id, "slug": WILDCARD_SLUG}) is not None

@@ -421,6 +421,46 @@ class LeadService:
         )
         return self._action_to_response(action)
 
+    # ── System-actor helpers (used by the CRM agent / worker) ──────────────
+
+    def ensure_workflow_row(
+        self,
+        cyclone_db: DatabaseManager,
+        foreign: ForeignLead,
+    ) -> LeadWorkflowInDB:
+        """
+        Return the workflow row for a lead, creating it (with slug auto-assign)
+        if absent. For non-request contexts like the poller, where there is no
+        staff_id/role to check — access control already happened upstream.
+        """
+        existing = LeadWorkflowRepository(cyclone_db).get_by_session_uuid(foreign.session_uuid)
+        return existing if existing is not None else self._create_workflow_row(cyclone_db, foreign)
+
+    def record_action(
+        self,
+        cyclone_db: DatabaseManager,
+        session_uuid: UUID,
+        action_type: LeadActionType,
+        actor_type: LeadActorType = LeadActorType.system,
+        direction: LeadActionDirection = LeadActionDirection.internal,
+        staff_id: Optional[int] = None,
+        body: Optional[str] = None,
+        notes: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> LeadActionInDB:
+        """Public wrapper around the internal action logger for the agent/worker."""
+        return self._log_action(
+            cyclone_db,
+            session_uuid=session_uuid,
+            staff_id=staff_id,
+            action_type=action_type,
+            actor_type=actor_type,
+            direction=direction,
+            body=body,
+            notes=notes,
+            metadata=metadata,
+        )
+
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _assert_access_for_session(

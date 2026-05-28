@@ -21,34 +21,35 @@ class UserRoleRepository(BaseRepository[UserRoleInDB]):
 
     # ── Auth lookups ──────────────────────────────────────────────────────
 
-    def get_by_uid(self, supabase_uid: str) -> Optional[UserRoleInDB]:
+    def get_by_uid(self, supabase_uid: str) -> list[UserRoleInDB]:
         """
-        Return the role assignment for a Supabase Auth UID, or ``None``.
+        Return ALL role assignments for a Supabase Auth UID.
 
-        This is the primary auth lookup — one query per authenticated request.
+        A user may hold multiple roles (e.g. attorney + admin); each is its own
+        row here. Returns an empty list if the user has no roles assigned.
 
         :param supabase_uid: Supabase Auth UID from the JWT sub claim.
-        :type supabase_uid: str
-        :return: User role record, or ``None`` if the user has no role assigned.
-        :rtype: Optional[UserRoleInDB]
+        :return: List of user role records (possibly empty, often size 1 or 2).
+        :rtype: list[UserRoleInDB]
         """
         LOGGER.debug("UserRoleRepository.get_by_uid")
-        return self.select_one(condition={"supabase_uid": supabase_uid})
+        records, _ = self.select_many(condition={"supabase_uid": supabase_uid})
+        return records
 
-    def get_by_auth_email(self, auth_email: str) -> Optional[UserRoleInDB]:
+    def get_unlinked_by_auth_email(self, auth_email: str) -> list[UserRoleInDB]:
         """
-        Return the unlinked role assignment matching an auth email, or ``None``.
+        Return ALL unlinked role rows (supabase_uid IS NULL) matching an auth email.
 
-        Used during the first-login correlation flow to find the pre-created
-        record before ``supabase_uid`` has been written.
+        Used by the first-login correlation flow. If an admin pre-created the
+        user with multiple roles, all rows are linked together in one pass.
 
         :param auth_email: Email address to match against ``auth_email``.
-        :type auth_email: str
-        :return: User role record, or ``None``.
-        :rtype: Optional[UserRoleInDB]
+        :return: List of unlinked rows (possibly empty).
+        :rtype: list[UserRoleInDB]
         """
-        LOGGER.debug("UserRoleRepository.get_by_auth_email")
-        return self.select_one(condition={"auth_email": auth_email, "supabase_uid": None})
+        LOGGER.debug("UserRoleRepository.get_unlinked_by_auth_email")
+        records, _ = self.select_many(condition={"auth_email": auth_email, "supabase_uid": None})
+        return records
 
     def uid_has_role(self, supabase_uid: str) -> bool:
         """
@@ -63,29 +64,22 @@ class UserRoleRepository(BaseRepository[UserRoleInDB]):
 
     # ── FK lookups ────────────────────────────────────────────────────────
 
-    def get_by_staff(self, staff_id: int) -> Optional[UserRoleInDB]:
+    def get_by_staff(self, staff_id: int) -> list[UserRoleInDB]:
         """
-        Return the role assignment for a staff record, or ``None``.
+        Return all role assignments for a staff record.
 
-        :param staff_id: Primary key of the staff record.
-        :type staff_id: int
-        :return: User role record, or ``None``.
-        :rtype: Optional[UserRoleInDB]
+        A staff member may have multiple roles (attorney + admin, etc.), each
+        as its own row. Returns an empty list if no rows match.
         """
         LOGGER.debug("UserRoleRepository.get_by_staff: staff_id=%s", staff_id)
-        return self.select_one(condition={"staff_id": staff_id})
+        records, _ = self.select_many(condition={"staff_id": staff_id})
+        return records
 
-    def get_by_client(self, client_id: int) -> Optional[UserRoleInDB]:
-        """
-        Return the role assignment for a client record, or ``None``.
-
-        :param client_id: Primary key of the client record.
-        :type client_id: int
-        :return: User role record, or ``None``.
-        :rtype: Optional[UserRoleInDB]
-        """
+    def get_by_client(self, client_id: int) -> list[UserRoleInDB]:
+        """Return all role assignments for a client record."""
         LOGGER.debug("UserRoleRepository.get_by_client: client_id=%s", client_id)
-        return self.select_one(condition={"client_id": client_id})
+        records, _ = self.select_many(condition={"client_id": client_id})
+        return records
 
     def get_by_role(self, role: UserRoleType) -> list[UserRoleInDB]:
         """

@@ -24,7 +24,24 @@ export interface Staff {
   calendly_url: string | null
   agent_signature: string | null
   telegram_id: string | null
+  /** Auth roles from user_roles (sorted). May be empty if the staff has no auth rows yet. */
+  roles: string[]
 }
+
+/** Mirrors ResponderSetResponse in app/routers/attorney_lead_responder.py */
+export interface AttorneyResponderSet {
+  attorney_staff_id: number
+  responder_staff_ids: number[]
+}
+
+/** Mirrors StaffRolesResponse in app/schemas/staff.py */
+export interface StaffRoleSet {
+  staff_id: number
+  roles: string[]
+}
+
+/** Allowed values when editing a staff member's auth roles. */
+export const ASSIGNABLE_STAFF_ROLES: StaffRole[] = ['attorney', 'paralegal', 'admin']
 
 /** Mirrors StaffCreateRequest in app/schemas/staff.py */
 export interface StaffCreatePayload {
