@@ -39,9 +39,9 @@ def _poll_welcomes() -> None:
         if lead.created_at < cutoff:
             continue
         try:
-            crm_agent_service.send_welcome(cyclone_db, lead)
+            crm_agent_service.process_new_lead(cyclone_db, lead)
         except Exception as e:  # noqa: BLE001 — one bad lead must not stop the batch
-            LOGGER.error("crm_worker: welcome failed session=%s err=%s", lead.session_uuid, str(e))
+            LOGGER.error("crm_worker: process_new_lead failed session=%s err=%s", lead.session_uuid, str(e))
 
 
 def _poll_inbound() -> None:
