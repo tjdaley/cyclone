@@ -1,4 +1,4 @@
-import { useEffect, useState, FormEvent } from 'react'
+import { useEffect, useMemo, useState, FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -7,6 +7,7 @@ import {
   updateLeadStatus, assignLead, updateLeadPriority, setLeadFollowUp,
   toggleLeadAgent, addLeadNote, addLeadAction,
   getStaff,
+  sendDraft, rejectDraft,
 } from '../../lib/api'
 import type {
   LeadDetail, LeadAction, LeadStatus, LeadPriority, LeadActionType, DismissalReason, Staff,
@@ -60,6 +61,7 @@ const ACTION_LABELS: Record<LeadActionType, string> = {
   converted: 'Converted to client',
   agent_escalated: 'Agent escalated',
   follow_up_set: 'Follow-up set',
+  draft_pending: 'Draft awaiting approval',
 }
 
 function fmtDateTime(iso: string | null | undefined): string {
@@ -93,6 +95,11 @@ export default function LeadDetailPage() {
   // Dismissal reason + note (when status is 'disqualified')
   const [dismissalReason, setDismissalReason] = useState<DismissalReason | ''>('')
   const [dismissalNote, setDismissalNote]     = useState('')
+
+  // HITL draft state — keyed by run_id; only populated when staff edits a draft.
+  const [draftBodies, setDraftBodies] = useState<Record<number, string>>({})
+  const [draftBusy, setDraftBusy]     = useState<Record<number, boolean>>({})
+  const [draftError, setDraftError]   = useState<Record<number, string>>({})
 
   useEffect(() => {
     if (!sessionUuid) return
@@ -210,6 +217,52 @@ export default function LeadDetailPage() {
     } finally { setBusy(false) }
   }
 
+  // HITL draft handlers
+  async function handleSendDraft(runId: number, body: string) {
+    setDraftBusy(prev => ({ ...prev, [runId]: true }))
+    setDraftError(prev => { const next = { ...prev }; delete next[runId]; return next })
+    try {
+      await sendDraft(runId, body)
+      // Drop the local edit cache for this draft — the server is now authoritative.
+      setDraftBodies(prev => { const next = { ...prev }; delete next[runId]; return next })
+      await refreshActions()
+    } catch (e) {
+      setDraftError(prev => ({ ...prev, [runId]: e instanceof Error ? e.message : 'Failed to send' }))
+    } finally {
+      setDraftBusy(prev => { const next = { ...prev }; delete next[runId]; return next })
+    }
+  }
+
+  async function handleRejectDraft(runId: number) {
+    const reason = window.prompt('Reason for rejecting this draft (optional):') ?? ''
+    setDraftBusy(prev => ({ ...prev, [runId]: true }))
+    setDraftError(prev => { const next = { ...prev }; delete next[runId]; return next })
+    try {
+      await rejectDraft(runId, reason.trim() || undefined)
+      setDraftBodies(prev => { const next = { ...prev }; delete next[runId]; return next })
+      await refreshActions()
+    } catch (e) {
+      setDraftError(prev => ({ ...prev, [runId]: e instanceof Error ? e.message : 'Failed to reject' }))
+    } finally {
+      setDraftBusy(prev => { const next = { ...prev }; delete next[runId]; return next })
+    }
+  }
+
+  // Which draft_pending actions have been resolved (sent/rejected)?
+  // Detected by subsequent actions whose metadata.run_id matches and whose
+  // metadata.kind is 'approved_draft' or 'draft_rejected'.
+  const draftResolutionByRunId = useMemo(() => {
+    const out = new Map<number, 'sent' | 'rejected'>()
+    for (const a of actions) {
+      const m = a.metadata as Record<string, unknown> | undefined
+      const rid = typeof m?.run_id === 'number' ? (m.run_id as number) : null
+      if (rid === null) continue
+      if (m?.kind === 'approved_draft') out.set(rid, 'sent')
+      else if (m?.kind === 'draft_rejected') out.set(rid, 'rejected')
+    }
+    return out
+  }, [actions])
+
   if (loading) {
     return <div className="px-6 py-12 text-center text-text-secondary text-sm">Loading…</div>
   }
@@ -309,23 +362,132 @@ export default function LeadDetailPage() {
             )}
             {actions.length > 0 && (
               <ul className="space-y-3">
-                {actions.map(a => (
-                  <li key={a.id} className="text-sm border-l-2 border-border pl-3">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="font-medium text-navy">{ACTION_LABELS[a.action_type] ?? a.action_type}</span>
-                      <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
-                    </div>
-                    {a.body && <div className="text-text-secondary mt-1 whitespace-pre-wrap">{a.body}</div>}
-                    {a.notes && <div className="text-text-secondary italic mt-1">{a.notes}</div>}
-                    <div className="text-xs text-text-secondary mt-1">
-                      {a.direction === 'inbound'
-                        ? (lead.full_name ?? 'Lead')
-                        : a.actor_type === 'ai_agent' ? 'AI agent'
-                        : a.actor_type === 'system' ? 'System'
-                        : staffName(staff, a.staff_id)}
-                    </div>
-                  </li>
-                ))}
+                {actions.map(a => {
+                  const meta = a.metadata as Record<string, unknown> | undefined
+                  const runId = a.action_type === 'draft_pending' && typeof meta?.run_id === 'number'
+                    ? (meta.run_id as number) : null
+
+                  // ── Email-send failure note — render red so it can't be missed ──
+                  if (a.action_type === 'note' && meta?.kind === 'email_send_failed') {
+                    const stage = typeof meta?.stage === 'string' ? meta.stage : 'send'
+                    const errText = typeof meta?.error === 'string' ? meta.error : (a.notes ?? 'Unknown error')
+                    return (
+                      <li key={a.id} className="text-sm">
+                        <div className="rounded-lg border-2 border-red-300 bg-red-50/40 p-3 space-y-1">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-xs uppercase tracking-widest font-semibold text-red-700">
+                              Email send failed · {stage}
+                            </span>
+                            <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
+                          </div>
+                          <div className="text-sm text-red-900 font-mono text-xs break-words">{errText}</div>
+                          <div className="text-xs text-text-secondary">
+                            {a.actor_type === 'staff' ? staffName(staff, a.staff_id) : 'System'}
+                          </div>
+                        </div>
+                      </li>
+                    )
+                  }
+
+                  // ── Active draft awaiting approval — editable card with Send/Reject ──
+                  if (a.action_type === 'draft_pending' && runId !== null && !draftResolutionByRunId.has(runId)) {
+                    const currentBody = draftBodies[runId] ?? a.body ?? ''
+                    const isEdited = currentBody.trim() !== (a.body ?? '').trim()
+                    const busyDraft = !!draftBusy[runId]
+                    const errDraft = draftError[runId]
+                    return (
+                      <li key={a.id} className="text-sm">
+                        <div className="rounded-lg border-2 border-amber-300 bg-amber-50/40 p-4 space-y-3">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-xs uppercase tracking-widest font-semibold text-amber-800">
+                              Draft awaiting your approval
+                            </span>
+                            <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
+                          </div>
+                          <textarea
+                            className="input font-mono text-xs"
+                            rows={12}
+                            value={currentBody}
+                            disabled={busyDraft}
+                            onChange={e => setDraftBodies(prev => ({ ...prev, [runId]: e.target.value }))}
+                          />
+                          {isEdited && (
+                            <div className="text-xs text-amber-700">
+                              You've edited this draft — Send will mark <code className="font-mono">human_edited=true</code>.
+                            </div>
+                          )}
+                          {a.notes && <div className="text-xs text-text-secondary italic">{a.notes}</div>}
+                          {errDraft && <div className="text-sm text-red-600">{errDraft}</div>}
+                          <div className="flex flex-wrap gap-2 pt-2 border-t border-amber-300/60">
+                            <button
+                              onClick={() => handleSendDraft(runId, currentBody)}
+                              disabled={busyDraft || !currentBody.trim()}
+                              className="btn-primary"
+                            >
+                              {busyDraft ? 'Sending…' : (isEdited ? 'Send edited reply' : 'Send to PNC')}
+                            </button>
+                            <button
+                              onClick={() => handleRejectDraft(runId)}
+                              disabled={busyDraft}
+                              className="btn-secondary"
+                            >
+                              Reject
+                            </button>
+                            {isEdited && (
+                              <button
+                                onClick={() => setDraftBodies(prev => {
+                                  const next = { ...prev }; delete next[runId]; return next
+                                })}
+                                disabled={busyDraft}
+                                className="ml-auto text-xs text-text-secondary hover:text-navy"
+                              >
+                                Revert edits
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    )
+                  }
+
+                  // ── Resolved draft (already sent/rejected) — compact summary ──
+                  if (a.action_type === 'draft_pending' && runId !== null && draftResolutionByRunId.has(runId)) {
+                    const resolution = draftResolutionByRunId.get(runId)
+                    return (
+                      <li key={a.id} className="text-sm border-l-2 border-border pl-3 opacity-60">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-medium text-navy">
+                            AI draft · {resolution === 'sent' ? '✓ approved & sent' : '✗ rejected'}
+                          </span>
+                          <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
+                        </div>
+                        <details className="mt-1">
+                          <summary className="text-xs text-text-secondary cursor-pointer">View draft</summary>
+                          {a.body && <div className="text-text-secondary mt-1 whitespace-pre-wrap text-xs">{a.body}</div>}
+                        </details>
+                      </li>
+                    )
+                  }
+
+                  // ── Default rendering for every other action type ──
+                  return (
+                    <li key={a.id} className="text-sm border-l-2 border-border pl-3">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="font-medium text-navy">{ACTION_LABELS[a.action_type] ?? a.action_type}</span>
+                        <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
+                      </div>
+                      {a.body && <div className="text-text-secondary mt-1 whitespace-pre-wrap">{a.body}</div>}
+                      {a.notes && <div className="text-text-secondary italic mt-1">{a.notes}</div>}
+                      <div className="text-xs text-text-secondary mt-1">
+                        {a.direction === 'inbound'
+                          ? (lead.full_name ?? 'Lead')
+                          : a.actor_type === 'ai_agent' ? 'AI agent'
+                          : a.actor_type === 'system' ? 'System'
+                          : staffName(staff, a.staff_id)}
+                      </div>
+                    </li>
+                  )
+                })}
               </ul>
             )}
           </section>

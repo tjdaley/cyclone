@@ -42,6 +42,7 @@ export type LeadActionType =
   | 'converted'
   | 'agent_escalated'
   | 'follow_up_set'
+  | 'draft_pending'
 
 /** Mirrors LeadListItem in app/schemas/lead.py */
 export interface LeadListItem {

@@ -3,8 +3,9 @@ import {
   createStaff, getStaff, updateStaff,
   getAttorneyResponders, setAttorneyResponders,
   setStaffRoles,
+  getKbArticles, createKbArticle, updateKbArticle, deleteKbArticle,
 } from '../../lib/api'
-import type { Staff, StaffCreatePayload } from '../../types'
+import type { Staff, StaffCreatePayload, KbArticle } from '../../types'
 import { ASSIGNABLE_STAFF_ROLES } from '../../types/staff'
 import StaffForm, {
   EMPTY_STAFF_FORM, StaffFormState,
@@ -52,11 +53,26 @@ export default function AdminPage() {
   const [savingRoles, setSavingRoles]   = useState(false)
   const [rolesError, setRolesError]     = useState<string | null>(null)
 
+  // Knowledge base
+  const [kbArticles, setKbArticles]   = useState<KbArticle[]>([])
+  const [kbLoading, setKbLoading]     = useState(true)
+  const [kbError, setKbError]         = useState<string | null>(null)
+  const [kbEditId, setKbEditId]       = useState<number | 'new' | null>(null)
+  const [kbDraft, setKbDraft]         = useState<{ topic: string; subtopic: string; body_md: string; active: boolean; sort_order: string }>(
+    { topic: '', subtopic: '', body_md: '', active: true, sort_order: '0' }
+  )
+  const [kbSaving, setKbSaving]       = useState(false)
+  const [kbEditError, setKbEditError] = useState<string | null>(null)
+
   useEffect(() => {
     getStaff()
       .then(setStaff)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load staff'))
       .finally(() => setLoading(false))
+    getKbArticles()
+      .then(setKbArticles)
+      .catch(e => setKbError(e instanceof Error ? e.message : 'Failed to load KB articles'))
+      .finally(() => setKbLoading(false))
   }, [])
 
   const linked   = staff.filter(s => s.supabase_uid).length
@@ -162,6 +178,65 @@ export default function AdminPage() {
       setRolesError(e instanceof Error ? e.message : 'Failed to save roles')
     } finally {
       setSavingRoles(false)
+    }
+  }
+
+  function openKbEditor(article: KbArticle | 'new') {
+    setKbEditError(null)
+    if (article === 'new') {
+      if (kbEditId === 'new') { setKbEditId(null); return }
+      setKbEditId('new')
+      setKbDraft({ topic: '', subtopic: '', body_md: '', active: true, sort_order: '0' })
+    } else {
+      if (kbEditId === article.id) { setKbEditId(null); return }
+      setKbEditId(article.id)
+      setKbDraft({
+        topic: article.topic,
+        subtopic: article.subtopic ?? '',
+        body_md: article.body_md,
+        active: article.active,
+        sort_order: String(article.sort_order),
+      })
+    }
+  }
+
+  async function handleSaveKb() {
+    if (!kbDraft.topic.trim() || !kbDraft.body_md.trim()) {
+      setKbEditError('Topic and body are required.')
+      return
+    }
+    setKbSaving(true); setKbEditError(null)
+    try {
+      const payload = {
+        topic: kbDraft.topic.trim(),
+        subtopic: kbDraft.subtopic.trim() || null,
+        body_md: kbDraft.body_md,
+        active: kbDraft.active,
+        sort_order: parseInt(kbDraft.sort_order, 10) || 0,
+      }
+      if (kbEditId === 'new') {
+        const created = await createKbArticle(payload)
+        setKbArticles(prev => [...prev, created])
+      } else if (typeof kbEditId === 'number') {
+        const updated = await updateKbArticle(kbEditId, payload)
+        setKbArticles(prev => prev.map(a => a.id === kbEditId ? updated : a))
+      }
+      setKbEditId(null)
+    } catch (e) {
+      setKbEditError(e instanceof Error ? e.message : 'Failed to save article')
+    } finally {
+      setKbSaving(false)
+    }
+  }
+
+  async function handleDeleteKb(articleId: number) {
+    if (!confirm('Delete this KB article? The agent will stop seeing it on the next invocation.')) return
+    try {
+      await deleteKbArticle(articleId)
+      setKbArticles(prev => prev.filter(a => a.id !== articleId))
+      if (kbEditId === articleId) setKbEditId(null)
+    } catch (e) {
+      setKbEditError(e instanceof Error ? e.message : 'Failed to delete article')
     }
   }
 
@@ -499,6 +574,150 @@ export default function AdminPage() {
           </table>
         )}
       </div>
+
+      {/* Knowledge base */}
+      <div className="card overflow-hidden mt-8">
+        <div className="px-5 py-4 border-b border-border flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-navy">Knowledge base</h2>
+            <p className="text-sm text-text-secondary mt-1">
+              Articles the CRM agent draws on when composing replies to PNCs.
+              Keep entries short and factual (hours, locations, meeting types,
+              fee outlines, practice areas, geography). Markdown is supported.
+              Inactive articles are excluded from the agent's prompt without
+              being deleted.
+            </p>
+          </div>
+          <button className="btn-primary whitespace-nowrap" onClick={() => openKbEditor('new')}>
+            {kbEditId === 'new' ? 'Cancel' : 'New article'}
+          </button>
+        </div>
+
+        {kbEditId === 'new' && (
+          <div className="px-5 py-4 bg-off-white/50 border-b border-border">
+            <h3 className="font-semibold text-navy text-sm mb-3">New KB article</h3>
+            <KbEditorFields draft={kbDraft} setDraft={setKbDraft} />
+            {kbEditError && <p className="text-sm text-red-600 mb-2">{kbEditError}</p>}
+            <div className="flex gap-2 pt-2 border-t border-border">
+              <button onClick={handleSaveKb} disabled={kbSaving} className="btn-primary">
+                {kbSaving ? 'Saving…' : 'Create article'}
+              </button>
+              <button onClick={() => setKbEditId(null)} className="btn-secondary">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {kbLoading && <div className="px-5 py-10 text-center text-text-secondary text-sm">Loading…</div>}
+        {kbError && <div className="px-5 py-10 text-center text-red-600 text-sm">{kbError}</div>}
+        {!kbLoading && !kbError && kbArticles.length === 0 && (
+          <div className="px-5 py-10 text-center text-text-secondary text-sm">
+            No KB articles yet. Click "New article" to add the first one (operating hours, fees, practice areas, etc.).
+          </div>
+        )}
+
+        {!kbLoading && !kbError && kbArticles.length > 0 && (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-off-white">
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide w-12">#</th>
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Topic</th>
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide hidden md:table-cell">Subtopic</th>
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+                <th className="text-right px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {kbArticles.map(a => (
+                <Fragment key={a.id}>
+                  <tr onClick={() => openKbEditor(a)}
+                      className="border-b border-border last:border-0 hover:bg-off-white/60 transition-colors cursor-pointer">
+                    <td className="px-5 py-3 text-text-secondary text-xs">{a.sort_order}</td>
+                    <td className="px-5 py-3 font-medium text-navy">{a.topic}</td>
+                    <td className="px-5 py-3 text-text-secondary hidden md:table-cell">{a.subtopic ?? '—'}</td>
+                    <td className="px-5 py-3">
+                      {a.active
+                        ? <span className="text-xs rounded-full px-2 py-0.5 font-medium bg-green-100 text-green-800">active</span>
+                        : <span className="text-xs rounded-full px-2 py-0.5 font-medium bg-gray-100 text-gray-600">inactive</span>}
+                    </td>
+                    <td className="px-5 py-3 text-right text-xs text-text-secondary">
+                      {kbEditId === a.id ? 'Editing…' : 'Click to edit'}
+                    </td>
+                  </tr>
+                  {kbEditId === a.id && (
+                    <tr>
+                      <td colSpan={5} className="px-5 py-4 bg-off-white/50 border-b border-border">
+                        <div onClick={e => e.stopPropagation()}>
+                          <h3 className="font-semibold text-navy text-sm mb-3">Edit {a.topic}{a.subtopic ? ` › ${a.subtopic}` : ''}</h3>
+                          <KbEditorFields draft={kbDraft} setDraft={setKbDraft} />
+                          {kbEditError && <p className="text-sm text-red-600 mb-2">{kbEditError}</p>}
+                          <div className="flex gap-2 pt-2 border-t border-border">
+                            <button onClick={handleSaveKb} disabled={kbSaving} className="btn-primary">
+                              {kbSaving ? 'Saving…' : 'Save changes'}
+                            </button>
+                            <button onClick={() => setKbEditId(null)} className="btn-secondary">Cancel</button>
+                            <button onClick={() => handleDeleteKb(a.id)}
+                                    className="ml-auto text-sm text-red-600 hover:underline">
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+
+interface KbDraftState {
+  topic: string
+  subtopic: string
+  body_md: string
+  active: boolean
+  sort_order: string
+}
+
+function KbEditorFields({ draft, setDraft }: {
+  draft: KbDraftState
+  setDraft: (next: KbDraftState) => void
+}) {
+  const set = <K extends keyof KbDraftState>(k: K, v: KbDraftState[K]) =>
+    setDraft({ ...draft, [k]: v })
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="md:col-span-2">
+          <label className="label">Topic *</label>
+          <input className="input mt-1" placeholder="e.g. Office, Fees, Practice areas"
+            value={draft.topic} onChange={e => set('topic', e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Sort order</label>
+          <input className="input mt-1" type="number" min="0" value={draft.sort_order}
+            onChange={e => set('sort_order', e.target.value)} />
+        </div>
+      </div>
+      <div>
+        <label className="label">Subtopic</label>
+        <input className="input mt-1" placeholder="optional, e.g. Hours, Locations"
+          value={draft.subtopic} onChange={e => set('subtopic', e.target.value)} />
+      </div>
+      <div>
+        <label className="label">Body (Markdown) *</label>
+        <textarea className="input mt-1 font-mono text-xs" rows={10}
+          value={draft.body_md} onChange={e => set('body_md', e.target.value)}
+          placeholder="**Office hours**&#10;- Mon–Fri 8:30 AM – 5:30 PM Central&#10;- Closed weekends and federal holidays" />
+      </div>
+      <label className="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" checked={draft.active} onChange={e => set('active', e.target.checked)}
+          className="rounded border-border" />
+        <span className="text-navy">Active (included in the agent's prompt)</span>
+      </label>
     </div>
   )
 }

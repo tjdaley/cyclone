@@ -45,6 +45,7 @@ class LeadActionType(str, Enum):
     converted = "converted"
     agent_escalated = "agent_escalated"
     follow_up_set = "follow_up_set"
+    draft_pending = "draft_pending"
 
 
 class LeadAction(BaseModel):
