@@ -1,11 +1,13 @@
 import { useEffect, useState, FormEvent, Fragment } from 'react'
+import { Link } from 'react-router-dom'
 import {
   createStaff, getStaff, updateStaff,
   getAttorneyResponders, setAttorneyResponders,
   setStaffRoles,
   getKbArticles, createKbArticle, updateKbArticle, deleteKbArticle,
+  getEditedRuns,
 } from '../../lib/api'
-import type { Staff, StaffCreatePayload, KbArticle } from '../../types'
+import type { Staff, StaffCreatePayload, KbArticle, EditedRunSummary } from '../../types'
 import { ASSIGNABLE_STAFF_ROLES } from '../../types/staff'
 import StaffForm, {
   EMPTY_STAFF_FORM, StaffFormState,
@@ -57,6 +59,12 @@ export default function AdminPage() {
   const [kbArticles, setKbArticles]   = useState<KbArticle[]>([])
   const [kbLoading, setKbLoading]     = useState(true)
   const [kbError, setKbError]         = useState<string | null>(null)
+
+  // Recent draft edits (HITL tuning signal)
+  const [editedRuns, setEditedRuns]   = useState<EditedRunSummary[]>([])
+  const [editsLoading, setEditsLoading] = useState(true)
+  const [editsError, setEditsError]   = useState<string | null>(null)
+  const [expandedRunId, setExpandedRunId] = useState<number | null>(null)
   const [kbEditId, setKbEditId]       = useState<number | 'new' | null>(null)
   const [kbDraft, setKbDraft]         = useState<{ topic: string; subtopic: string; body_md: string; active: boolean; sort_order: string }>(
     { topic: '', subtopic: '', body_md: '', active: true, sort_order: '0' }
@@ -73,6 +81,10 @@ export default function AdminPage() {
       .then(setKbArticles)
       .catch(e => setKbError(e instanceof Error ? e.message : 'Failed to load KB articles'))
       .finally(() => setKbLoading(false))
+    getEditedRuns(20)
+      .then(setEditedRuns)
+      .catch(e => setEditsError(e instanceof Error ? e.message : 'Failed to load draft edits'))
+      .finally(() => setEditsLoading(false))
   }, [])
 
   const linked   = staff.filter(s => s.supabase_uid).length
@@ -575,6 +587,89 @@ export default function AdminPage() {
         )}
       </div>
 
+      {/* Recent draft edits — autonomy-graduation eval data */}
+      <div className="card overflow-hidden mt-8">
+        <div className="px-5 py-4 border-b border-border">
+          <h2 className="font-semibold text-navy">Recent draft edits</h2>
+          <p className="text-sm text-text-secondary mt-1">
+            Drafts staff edited before sending. The agent's explanation
+            (filled in by a background job) tells you what changed and why
+            it might matter for prompt tuning. Edit rate trending toward
+            zero on a class of message is your signal that the agent can
+            handle it autonomously.
+          </p>
+        </div>
+
+        {editsLoading && <div className="px-5 py-10 text-center text-text-secondary text-sm">Loading…</div>}
+        {editsError && <div className="px-5 py-10 text-center text-red-600 text-sm">{editsError}</div>}
+        {!editsLoading && !editsError && editedRuns.length === 0 && (
+          <div className="px-5 py-10 text-center text-text-secondary text-sm">
+            No edited drafts yet. When staff edits a draft before sending, it'll show up here within a poll cycle.
+          </div>
+        )}
+
+        {!editsLoading && !editsError && editedRuns.length > 0 && (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-off-white">
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Lead</th>
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Edited</th>
+                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Explanation</th>
+                <th className="text-right px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {editedRuns.map(r => (
+                <Fragment key={r.id}>
+                  <tr className="border-b border-border last:border-0 hover:bg-off-white/60 transition-colors">
+                    <td className="px-5 py-3">
+                      <Link to={`/app/leads/${r.foreign_session_uuid}`} className="font-medium text-navy hover:underline">
+                        {r.lead_name ?? '(unnamed)'}
+                      </Link>
+                      {r.lead_email && <div className="text-xs text-text-secondary">{r.lead_email}</div>}
+                    </td>
+                    <td className="px-5 py-3 text-text-secondary whitespace-nowrap">{fmtDate(r.updated_at)}</td>
+                    <td className="px-5 py-3 text-text-secondary">
+                      {r.edit_explanation ?? (
+                        <span className="text-xs italic text-text-secondary/60">explanation pending…</span>
+                      )}
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <button
+                        onClick={() => setExpandedRunId(expandedRunId === r.id ? null : r.id)}
+                        className="text-xs text-navy hover:underline"
+                      >
+                        {expandedRunId === r.id ? 'Hide diff' : 'View diff'}
+                      </button>
+                    </td>
+                  </tr>
+                  {expandedRunId === r.id && (
+                    <tr>
+                      <td colSpan={4} className="px-5 py-4 bg-off-white/50 border-b border-border">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <h4 className="text-xs uppercase tracking-widest font-semibold text-text-secondary mb-2">AI draft</h4>
+                            <div className="rounded border border-border bg-white p-3 text-xs whitespace-pre-wrap font-mono text-text-primary max-h-80 overflow-y-auto">
+                              {r.draft_body || '(empty)'}
+                            </div>
+                          </div>
+                          <div>
+                            <h4 className="text-xs uppercase tracking-widest font-semibold text-text-secondary mb-2">What actually went out</h4>
+                            <div className="rounded border border-green-200 bg-green-50/30 p-3 text-xs whitespace-pre-wrap font-mono text-text-primary max-h-80 overflow-y-auto">
+                              {r.sent_body || '(empty)'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
       {/* Knowledge base */}
       <div className="card overflow-hidden mt-8">
         <div className="px-5 py-4 border-b border-border flex items-start justify-between gap-3">
@@ -720,4 +815,10 @@ function KbEditorFields({ draft, setDraft }: {
       </label>
     </div>
   )
+}
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }

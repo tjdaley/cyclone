@@ -25,7 +25,7 @@ from db.repositories.lead_agent_run import LeadAgentRunRepository
 from db.repositories.lead_workflow import LeadWorkflowRepository
 from db.repositories.staff import StaffRepository
 from dependencies import get_db_manager, get_landing_pages_db, require_role
-from schemas.lead_agent_run import LeadAgentRunResponse, RejectDraftRequest, SendDraftRequest
+from schemas.lead_agent_run import EditedRunSummary, LeadAgentRunResponse, RejectDraftRequest, SendDraftRequest
 from services.email_service import email_service
 from services.lead_service import LeadAccessDeniedError, lead_service
 from util.loggerfactory import LoggerFactory
@@ -98,6 +98,36 @@ def _find_parent_message_id(cyclone_db, foreign_session_uuid, run_id: int) -> Op
             parent = a.metadata.get("parent_message_id")
             return parent if isinstance(parent, str) else None
     return None
+
+
+# ── Recent edits (admin review for autonomy-graduation eval data) ────────
+
+@router.get("/edited", response_model=list[EditedRunSummary])
+def list_edited_runs(
+    limit: int = 20,
+    cyclone_db=Depends(get_db_manager),
+    foreign_db=Depends(get_landing_pages_db),
+    _=Depends(require_role(["admin"])),
+) -> list[EditedRunSummary]:
+    """Recent runs where a staff member edited the AI draft. Enriched with the
+    lead's full_name + email from the foreign DB so the admin UI can show
+    who/what was edited."""
+    runs = LeadAgentRunRepository(cyclone_db).list_recent_edited(limit=limit)
+    foreign_repo = ForeignLeadRepository(foreign_db)
+    out: list[EditedRunSummary] = []
+    for run in runs:
+        foreign = foreign_repo.get_by_session_uuid(run.foreign_session_uuid)
+        out.append(EditedRunSummary(
+            id=run.id,
+            foreign_session_uuid=run.foreign_session_uuid,
+            lead_name=foreign.full_name if foreign else None,
+            lead_email=foreign.email if foreign else None,
+            draft_body=run.draft_body or "",
+            sent_body=run.sent_body or "",
+            edit_explanation=run.edit_explanation,
+            updated_at=run.updated_at,
+        ))
+    return out
 
 
 # ── Send ──────────────────────────────────────────────────────────────────

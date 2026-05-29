@@ -17,6 +17,35 @@ class LeadAgentRunRepository(BaseRepository[LeadAgentRunInDB]):
     def __init__(self, manager: DatabaseManager):
         super().__init__(manager, "lead_agent_runs", LeadAgentRunInDB)
 
+    def list_pending_explanations(self, limit: int = 5) -> list[LeadAgentRunInDB]:
+        """Return runs where the staff edited the draft but no explanation has
+        been generated yet. Oldest-first so the backlog drains in order.
+        """
+        records, _ = self.select_many(
+            condition={
+                "human_edited": True,
+                "edit_explanation": None,
+                "final_action": "sent",
+            },
+            sort_by="updated_at",
+            sort_direction="asc",
+            start=0,
+            end=max(0, limit - 1),
+        )
+        return records
+
+    def list_recent_edited(self, limit: int = 20) -> list[LeadAgentRunInDB]:
+        """Return recently-edited runs (regardless of whether explanation is filled)
+        so the admin UI can review tuning signals."""
+        records, _ = self.select_many(
+            condition={"human_edited": True, "final_action": "sent"},
+            sort_by="updated_at",
+            sort_direction="desc",
+            start=0,
+            end=max(0, min(limit, 100) - 1),
+        )
+        return records
+
     def welcome_exists(self, session_uuid: UUID) -> bool:
         """Return True if a welcome run has already been recorded for this lead.
 

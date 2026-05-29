@@ -14,8 +14,10 @@ import time
 
 from dependencies import get_db_manager, get_landing_pages_db
 from services.crm_agent_service import crm_agent_service
+from services.diff_explainer_service import diff_explainer_service
 from services.email_service import email_service
 from db.repositories.foreign_lead import ForeignLeadRepository
+from db.repositories.lead_agent_run import LeadAgentRunRepository
 from util.loggerfactory import LoggerFactory
 from util.redis_client import lock
 from util.settings import settings
@@ -58,6 +60,30 @@ def _poll_inbound() -> None:
             LOGGER.error("crm_worker: inbound ingest failed message_id=%s err=%s", inbound.message_id, str(e))
 
 
+def _run_diff_explainer() -> None:
+    """Fill ``edit_explanation`` for runs where staff edited the AI draft.
+
+    Capped at 5 per tick so a backlog of edited drafts can't blow up the LLM
+    budget; on a typical tick this finds 0–1 rows and is a no-op.
+    """
+    cyclone_db = get_db_manager()
+    runs_repo = LeadAgentRunRepository(cyclone_db)
+    pending = runs_repo.list_pending_explanations(limit=5)
+    if not pending:
+        return
+    LOGGER.info("diff_explainer: %s pending explanation(s)", len(pending))
+    for run in pending:
+        try:
+            explanation = diff_explainer_service.explain_diff(
+                run.draft_body or "",
+                run.sent_body or "",
+            )
+            runs_repo.update(run.id, {"edit_explanation": explanation})
+            LOGGER.info("diff_explainer: explained run_id=%s", run.id)
+        except Exception as e:  # noqa: BLE001 — one bad run must not stop the batch
+            LOGGER.error("diff_explainer: failed run_id=%s err=%s", run.id, str(e))
+
+
 def _tick() -> None:
     # TTL covers a few cycles so the holder keeps the lock across one tick's
     # work, but frees within minutes if the node dies (failover).
@@ -67,6 +93,7 @@ def _tick() -> None:
             return
         _poll_welcomes()
         _poll_inbound()
+        _run_diff_explainer()
 
 
 def main() -> None:

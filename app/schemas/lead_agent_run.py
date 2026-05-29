@@ -39,3 +39,15 @@ class LeadAgentRunResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: Optional[datetime]
+
+
+class EditedRunSummary(BaseModel):
+    """Run + lead-name pair for the 'recent draft edits' admin review."""
+    id: int
+    foreign_session_uuid: UUID
+    lead_name: Optional[str]
+    lead_email: Optional[str]
+    draft_body: str
+    sent_body: str
+    edit_explanation: Optional[str]
+    updated_at: Optional[datetime]
