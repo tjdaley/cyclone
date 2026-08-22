@@ -18,6 +18,8 @@ from schemas.matter import (
     MatterRateOverrideResponse,
     MatterResponse,
     MatterStaffRequest,
+    MatterStaffResponse,
+    MatterStaffUpdateRequest,
     MatterUpdateRequest,
     OpposingPartyRequest,
     OpposingPartyResponse,
@@ -27,6 +29,34 @@ from util.loggerfactory import LoggerFactory
 LOGGER = LoggerFactory.create_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/matters", tags=["matters"])
+
+_VALID_STAFF_ROLES = ("originating", "billing_reviewer", "assigned")
+
+
+def _staff_write(action, matter_id: int):
+    """
+    Run a matter_staff write, translating the origination-split trigger.
+
+    ``trg_matter_staff_originating_split`` rejects any write that pushes the
+    originating percentages for a matter over 100. That arrives as a database
+    error; without this it would surface as a 500 with a Postgres message.
+
+    :param action: Zero-arg callable performing the write.
+    :param matter_id: Matter being written, for the error message.
+    :type matter_id: int
+    :return: Whatever ``action`` returns.
+    :raises HTTPException: 422 when the split constraint is violated.
+    """
+    try:
+        return action()
+    except Exception as e:  # noqa: BLE001 — re-raised unless it is the split trigger
+        if "exceeding 100" in str(e) or "originating split" in str(e).lower():
+            LOGGER.warning("matters: originating split rejected for matter_id=%s", matter_id)
+            raise HTTPException(
+                status_code=422,
+                detail="Originating split percentages for this matter would exceed 100%",
+            ) from e
+        raise
 
 
 @router.get("", response_model=list[MatterResponse])
@@ -150,18 +180,90 @@ def delete_rate_override(
 
 # ── Matter Staff ────────────────────────────────────────────────────────────
 
-@router.post("/{matter_id}/staff", status_code=201)
+@router.get("/{matter_id}/staff", response_model=list[MatterStaffResponse])
+def list_matter_staff(
+    matter_id: int,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
+) -> list[MatterStaffResponse]:
+    """List the staff assigned to a matter."""
+    repo = MatterStaffRepository(manager)
+    records = repo.get_by_matter(matter_id)
+    return [MatterStaffResponse(**r.model_dump()) for r in records]
+
+
+@router.post("/{matter_id}/staff", response_model=MatterStaffResponse, status_code=201)
 def add_matter_staff(
     matter_id: int,
     body: MatterStaffRequest,
     manager=Depends(get_db_manager),
     _=Depends(require_role(["attorney", "admin"])),
-) -> dict:
-    """Assign a staff member to a matter."""
+) -> MatterStaffResponse:
+    """
+    Assign a staff member to a matter.
+
+    Returns 409 if that person already holds the same role here — the table
+    is unique on (matter_id, staff_id, role) — and 422 if the assignment
+    would push originating splits past 100%.
+    """
+    if body.role not in _VALID_STAFF_ROLES:
+        raise HTTPException(status_code=422, detail="role must be one of %s" % ", ".join(_VALID_STAFF_ROLES))
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
     repo = MatterStaffRepository(manager)
-    LOGGER.info("matters.add_staff: matter_id=%s staff_id=%s", matter_id, body.staff_id)
-    record = repo.insert({"matter_id": matter_id, **body.model_dump()})
-    return record.model_dump()
+    duplicate = repo.select_one(
+        condition={"matter_id": matter_id, "staff_id": body.staff_id, "role": body.role},
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="That staff member already holds this role on the matter")
+
+    LOGGER.info("matters.add_staff: matter_id=%s staff_id=%s role=%s", matter_id, body.staff_id, body.role)
+    record = _staff_write(lambda: repo.insert({"matter_id": matter_id, **body.model_dump()}), matter_id)
+    return MatterStaffResponse(**record.model_dump())
+
+
+@router.patch("/{matter_id}/staff/{row_id}", response_model=MatterStaffResponse)
+def update_matter_staff(
+    matter_id: int,
+    row_id: int,
+    body: MatterStaffUpdateRequest,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["attorney", "admin"])),
+) -> MatterStaffResponse:
+    """Change a staff member's role or origination split on a matter."""
+    repo = MatterStaffRepository(manager)
+    record = repo.select_one(condition={"id": row_id})
+    if record is None or record.matter_id != matter_id:
+        raise HTTPException(status_code=404, detail="Staff assignment not found on this matter")
+    if body.role is not None and body.role not in _VALID_STAFF_ROLES:
+        raise HTTPException(status_code=422, detail="role must be one of %s" % ", ".join(_VALID_STAFF_ROLES))
+
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields provided for update")
+
+    LOGGER.info("matters.update_staff: matter_id=%s row_id=%s fields=%s", matter_id, row_id, list(updates))
+    updated = _staff_write(lambda: repo.update(row_id, updates), matter_id)
+    return MatterStaffResponse(**updated.model_dump())
+
+
+@router.delete("/{matter_id}/staff/{row_id}", response_model=DeletedResponse)
+def delete_matter_staff(
+    matter_id: int,
+    row_id: int,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["attorney", "admin"])),
+) -> DeletedResponse:
+    """Remove a staff member from a matter."""
+    repo = MatterStaffRepository(manager)
+    record = repo.select_one(condition={"id": row_id})
+    if record is None or record.matter_id != matter_id:
+        raise HTTPException(status_code=404, detail="Staff assignment not found on this matter")
+
+    LOGGER.info("matters.delete_staff: matter_id=%s row_id=%s", matter_id, row_id)
+    _staff_write(lambda: repo.delete(row_id), matter_id)
+    return DeletedResponse(id=row_id)
 
 
 # ── Opposing Parties ────────────────────────────────────────────────────────

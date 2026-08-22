@@ -97,6 +97,29 @@ class MatterStaffRequest(BaseModel):
     split_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
 
+class MatterStaffUpdateRequest(BaseModel):
+    """
+    Body for PATCH /api/v1/matters/{id}/staff/{row_id}.
+
+    ``staff_id`` is not updatable — reassigning a matter to a different person
+    is a delete plus an add, so the audit trail shows both.
+    """
+    role: Optional[str] = Field(
+        default=None,
+        description="'originating' | 'billing_reviewer' | 'assigned'",
+    )
+    split_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+
+
+class MatterStaffResponse(BaseModel):
+    """Response for a matter-staff association."""
+    id: int
+    matter_id: int
+    staff_id: int
+    role: str
+    split_pct: Optional[float]
+
+
 class OpposingPartyRequest(BaseModel):
     """Body for POST /api/v1/matters/{id}/opposing-parties."""
     full_name: str = Field(..., description="Full name of the opposing party")

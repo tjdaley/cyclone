@@ -1,6 +1,7 @@
 """
 app/db/repositories/pleading.py - Repositories for pleadings, claims, children, and opposing counsel.
 """
+from datetime import date
 from typing import Optional
 
 from db.models.pleading import (
@@ -56,6 +57,18 @@ class MatterOpposingCounselRepository(BaseRepository[MatterOpposingCounselInDB])
         return len(rows) > 0
 
 
+def _pleading_order(pleading: MatterPleadingInDB) -> tuple:
+    """
+    Chronological sort key: filed date, then served date, then id.
+
+    A pleading missing both dates sorts last rather than first — an undated row
+    is usually one still being worked out, not the oldest thing on the matter.
+    The id tie-breaks so the order is stable across calls.
+    """
+    far_future = date.max
+    return (pleading.filed_date or far_future, pleading.served_date or far_future, pleading.id)
+
+
 class MatterPleadingRepository(BaseRepository[MatterPleadingInDB]):
     """CRUD for the ``matter_pleadings`` table."""
 
@@ -63,7 +76,16 @@ class MatterPleadingRepository(BaseRepository[MatterPleadingInDB]):
         super().__init__(manager, "matter_pleadings", MatterPleadingInDB)
 
     def get_by_matter(self, matter_id: int) -> list[MatterPleadingInDB]:
-        return self.select_many(condition={"matter_id": matter_id}, sort_by="filed_date")[0]
+        """
+        Return a matter's pleadings in chronological order.
+
+        Sorted here rather than in the query because the manager applies a
+        single ORDER BY column, and the order is on (filed_date, served_date).
+        A matter holds a handful of pleadings, so this is not worth a
+        round-trip's worth of complexity to push into PostgREST.
+        """
+        rows = self.select_many(condition={"matter_id": matter_id})[0]
+        return sorted(rows, key=_pleading_order)
 
 
 class MatterClaimRepository(BaseRepository[MatterClaimInDB]):

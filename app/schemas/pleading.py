@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from db.models.pleading import ChildSex, ClaimKind, CounselRole
+from db.models.pleading import ChildSex, ClaimKind, CounselRole, PleadingStatus
 from db.models.staff import FullName
 
 
@@ -20,6 +20,14 @@ class MatterChildRequest(BaseModel):
     needs_support_after_majority: bool = False
 
 
+class MatterChildUpdateRequest(BaseModel):
+    """Partial update of a child. Omitted fields are left as-is."""
+    name: Optional[FullName] = None
+    date_of_birth: Optional[date] = None
+    sex: Optional[ChildSex] = None
+    needs_support_after_majority: Optional[bool] = None
+
+
 class MatterChildResponse(BaseModel):
     id: int
     matter_id: int
@@ -30,6 +38,25 @@ class MatterChildResponse(BaseModel):
 
 
 # ── Opposing Counsel ──────────────────────────────────────────────────────────
+
+# ── Opposing Parties ─────────────────────────────────────────────────────────
+
+class OpposingPartyPreview(BaseModel):
+    """An adverse party extracted by the LLM, not yet committed."""
+    existing_id: Optional[int] = Field(
+        default=None,
+        description="Set when this party is already on the matter; the commit reuses that row",
+    )
+    full_name: str = Field(..., description="Party name as written in the pleading")
+    relationship: Optional[str] = Field(default=None, description="Relationship to our client, e.g. 'spouse'")
+
+
+class OpposingPartyCommitEntry(BaseModel):
+    """An adverse party to create, or to reuse when ``existing_id`` is set."""
+    existing_id: Optional[int] = None
+    full_name: str
+    relationship: Optional[str] = None
+
 
 class OpposingCounselRequest(BaseModel):
     name: FullName
@@ -81,6 +108,31 @@ class OpposingCounselResponse(BaseModel):
     email_ccs: list[str]
 
 
+class MatterOpposingCounselLinkRequest(BaseModel):
+    """Attach an existing opposing counsel record to a matter."""
+    opposing_counsel_id: int = Field(..., description="FK to an existing opposing_counsel row")
+    opposing_party_id: Optional[int] = Field(
+        default=None,
+        description="Which opposing party this counsel represents on this matter",
+    )
+    role: CounselRole = Field(default=CounselRole.lead, description="Counsel's role on this matter")
+    started_date: Optional[date] = Field(default=None, description="When counsel appeared")
+    ended_date: Optional[date] = Field(default=None, description="When counsel withdrew, if applicable")
+
+
+class MatterOpposingCounselUpdateRequest(BaseModel):
+    """
+    Partial update of the matter↔counsel association only.
+
+    The counsel's own contact details are edited through
+    PATCH /opposing-counsel/{oc_id}, since that record is shared across matters.
+    """
+    opposing_party_id: Optional[int] = None
+    role: Optional[CounselRole] = None
+    started_date: Optional[date] = None
+    ended_date: Optional[date] = None
+
+
 class MatterOpposingCounselResponse(BaseModel):
     id: int
     matter_id: int
@@ -102,8 +154,15 @@ class MatterPleadingResponse(BaseModel):
     served_date: Optional[date]
     amends_pleading_id: Optional[int]
     is_supplement: bool
+    status: PleadingStatus
     storage_path: Optional[str]
     ingested_by_staff_id: int
+
+
+class SignedUrlResponse(BaseModel):
+    """A short-lived URL for a stored file."""
+    url: str = Field(..., description="Signed URL; the signature is the authorization")
+    expires_in: int = Field(..., description="Seconds the URL remains valid")
 
 
 class MatterPleadingUpdateRequest(BaseModel):
@@ -112,10 +171,32 @@ class MatterPleadingUpdateRequest(BaseModel):
     served_date: Optional[date] = None
     amends_pleading_id: Optional[int] = None
     is_supplement: Optional[bool] = None
+    status: Optional[PleadingStatus] = Field(
+        default=None,
+        description="live | superseded | withdrawn | inactive",
+    )
     opposing_party_id: Optional[int] = None
 
 
 # ── Matter Claims ─────────────────────────────────────────────────────────────
+
+class MatterClaimCreateRequest(BaseModel):
+    """
+    Add a claim to a matter by hand.
+
+    ``matter_pleading_id`` is required because every claim is pleaded
+    somewhere — it must name a pleading already on this matter.
+    """
+    matter_pleading_id: int = Field(..., description="Pleading this claim appears in; must belong to the matter")
+    kind: ClaimKind = Field(..., description="Type of legal position")
+    label: str = Field(..., description="Short descriptive label, e.g. 'Fault: adultery'")
+    narrative: str = Field(..., description="Full text of the claim as pleaded")
+    statute_rule_cited: Optional[str] = Field(default=None, description="Statute or rule cited in support")
+    opposing_party_id: Optional[int] = Field(
+        default=None,
+        description="Whose claim this is. Null means our client's.",
+    )
+
 
 class MatterClaimResponse(BaseModel):
     id: int
@@ -214,6 +295,7 @@ class PleadingIngestPreviewResponse(BaseModel):
     raw_text: str  # Echoed back so frontend can include it in commit
     pleading: PleadingPreview
     matter_field_updates: dict[str, FieldDiff] = Field(default_factory=dict)
+    opposing_parties: list[OpposingPartyPreview] = Field(default_factory=list)
     new_children: list[ChildPreview] = Field(default_factory=list)
     opposing_counsel_matches: list[OCMatchPreview] = Field(default_factory=list)
     new_opposing_counsel: list[OCPreview] = Field(default_factory=list)
@@ -256,6 +338,11 @@ class OCCommitEntry(BaseModel):
     email_ccs: list[str] = Field(default_factory=list)
     # Matter-level association
     opposing_party_id: Optional[int] = None
+    represents: Optional[str] = Field(
+        default=None,
+        description="Party name this attorney represents. Used to resolve opposing_party_id "
+                    "when the party is being created by this same commit and has no id yet.",
+    )
     role: CounselRole = CounselRole.lead
 
 
@@ -286,13 +373,19 @@ class PleadingCommitRequest(BaseModel):
     filed_date: Optional[date] = None
     served_date: Optional[date] = None
     opposing_party_id: Optional[int] = None  # null = our client's pleading
+    opposing_party_name: Optional[str] = Field(
+        default=None,
+        description="Filing party by name, for a party created by this same commit and so "
+                    "having no id yet. Ignored when opposing_party_id is set.",
+    )
     is_supplement: bool = False
     amends_pleading_id: Optional[int] = None  # resolved FK, selected by attorney
 
     # Matter field updates to apply (only the accepted ones)
     matter_field_updates: dict[str, Any] = Field(default_factory=dict)
 
-    # Children, OC, and claims — all already reviewed
+    # Parties, children, OC, and claims — all already reviewed
+    opposing_parties: list[OpposingPartyCommitEntry] = Field(default_factory=list)
     children: list[ChildCommitEntry] = Field(default_factory=list)
     opposing_counsel: list[OCCommitEntry] = Field(default_factory=list)
     claims: list[ClaimCommitEntry] = Field(default_factory=list)
@@ -301,6 +394,7 @@ class PleadingCommitRequest(BaseModel):
 class PleadingCommitResponse(BaseModel):
     """Response from POST /api/v1/pleadings/commit — records created."""
     pleading: MatterPleadingResponse
+    opposing_parties_created: int
     children_created: int
     opposing_counsel_linked: int
     claims_created: int

@@ -22,9 +22,32 @@ class ChildSex(str, Enum):
 
 
 class CounselRole(str, Enum):
+    """
+    An opposing attorney's role on a matter. Values match the
+    matter_opposing_counsel CHECK constraint.
+
+    ``prior_counsel`` is an attorney who has since substituted out. They stay on
+    the matter — their filings are part of the record — but sort to the bottom
+    of the list, below whoever is currently handling the case.
+    """
     lead = "lead"
     co_counsel = "co_counsel"
     local_counsel = "local_counsel"
+    prior_counsel = "prior_counsel"
+
+
+class PleadingStatus(str, Enum):
+    """
+    Lifecycle state of a pleading. Values match the matter_pleadings CHECK
+    constraint (db/migrations/015_pleading_status.sql).
+
+    A supplement is ``live`` — it adds to the live pleading rather than
+    replacing it. Only an amendment supersedes.
+    """
+    live = "live"                # Operative
+    superseded = "superseded"    # Replaced by an amended pleading
+    withdrawn = "withdrawn"      # Withdrawn by the filing party
+    inactive = "inactive"        # Otherwise no longer operative
 
 
 class ClaimKind(str, Enum):
@@ -117,8 +140,9 @@ class MatterPleading(BaseModel):
     """
     A single pleading filed in a matter.
 
-    A pleading is "live" until it is superseded by an amendment. Supplements
-    add to (but do not supersede) the live pleading they are based on.
+    A pleading is "live" until it is superseded by an amendment, withdrawn, or
+    marked inactive — see ``status``. Supplements add to (but do not supersede)
+    the live pleading they are based on, so a supplement is itself live.
     """
     matter_id: int = Field(..., description="FK to matters table")
     opposing_party_id: Optional[int] = Field(
@@ -135,6 +159,10 @@ class MatterPleading(BaseModel):
     is_supplement: bool = Field(
         default=False,
         description="True for supplements (which add to but do not supersede prior pleadings)",
+    )
+    status: PleadingStatus = Field(
+        default=PleadingStatus.live,
+        description="Lifecycle state; set to 'superseded' automatically when another pleading amends this one",
     )
     storage_path: Optional[str] = Field(default=None, description="Supabase Storage path to the PDF")
     raw_text: Optional[str] = Field(default=None, description="Extracted text, for re-processing later")

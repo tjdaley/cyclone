@@ -1,4 +1,5 @@
 import { useEffect, useState, FormEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import {
   getMatters, createMatter, updateMatter, getClients, getStaff,
@@ -35,6 +36,7 @@ function sortMatters(a: Matter, b: Matter) {
 
 export default function MattersPage() {
   const { profile } = useAuth()
+  const navigate = useNavigate()
   const [matters, setMatters]   = useState<Matter[]>([])
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState<string | null>(null)
@@ -347,6 +349,7 @@ export default function MattersPage() {
                 <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Matter</th>
                 <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide hidden md:table-cell">Type</th>
                 <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+                <th className="px-5 py-3 w-16"><span className="sr-only">Edit</span></th>
               </tr>
             </thead>
             <tbody>
@@ -356,7 +359,7 @@ export default function MattersPage() {
                   <>
                     <tr
                       key={m.id}
-                      onClick={() => { openEdit(m); setShowCreate(false) }}
+                      onClick={() => navigate(`/app/matters/${m.id}`)}
                       className={`border-b border-border last:border-0 hover:bg-off-white/60 transition-colors cursor-pointer ${closed ? 'opacity-50' : ''}`}
                     >
                       <td className={`px-5 py-3 font-medium ${closed ? 'text-text-secondary' : 'text-navy'}`}>
@@ -369,12 +372,26 @@ export default function MattersPage() {
                           {m.status.replace(/_/g, ' ')}
                         </span>
                       </td>
+                      {/* Row opens the matter; editing the record itself stays here. */}
+                      <td className="px-5 py-3 text-right">
+                        <button
+                          type="button"
+                          className="text-xs text-navy underline"
+                          onClick={e => {
+                            e.stopPropagation()
+                            if (editId === m.id) { setEditId(null); return }
+                            openEdit(m); setShowCreate(false)
+                          }}
+                        >
+                          {editId === m.id ? 'Close' : 'Edit'}
+                        </button>
+                      </td>
                     </tr>
 
                     {/* Edit + rate overrides panel */}
                     {editId === m.id && (
                       <tr key={`edit-${m.id}`}>
-                        <td colSpan={3} className="px-5 py-4 bg-off-white/50 border-b border-border">
+                        <td colSpan={4} className="px-5 py-4 bg-off-white/50 border-b border-border">
                           <div className="space-y-6" onClick={e => e.stopPropagation()}>
                             {/* Edit form */}
                             <form onSubmit={handleSaveEdit} className="space-y-3 max-w-3xl">

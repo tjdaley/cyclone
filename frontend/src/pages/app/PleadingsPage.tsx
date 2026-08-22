@@ -1,14 +1,23 @@
 import { useEffect, useRef, useState, DragEvent } from 'react'
 import {
   getMatters, previewPleading, commitPleading,
-  getMatterPleadings, getMatterClaims,
+  getMatterPleadings, getMatterClaims, updatePleading,
+  uploadPleadingPdf, openPleadingPdf,
 } from '../../lib/api'
 import type {
-  Matter, MatterPleading, MatterClaim,
+  Matter, MatterPleading, MatterClaim, PleadingStatus,
   PleadingIngestPreview, PleadingCommitRequest,
-  ChildCommitEntry, OCCommitEntry, ClaimCommitEntry,
+  ChildCommitEntry, OCCommitEntry, ClaimCommitEntry, OpposingPartyCommitEntry,
   ChildSex, ClaimKind, CounselRole, FullName,
 } from '../../types'
+
+const PLEADING_STATUSES: PleadingStatus[] = ['live', 'superseded', 'withdrawn', 'inactive']
+const PLEADING_STATUS_COLOR: Record<PleadingStatus, string> = {
+  live:       'bg-green-100 text-green-800',
+  superseded: 'bg-gray-100 text-gray-600',
+  withdrawn:  'bg-amber-100 text-amber-800',
+  inactive:   'bg-gray-100 text-gray-600',
+}
 
 const CLAIM_KINDS: ClaimKind[] = ['claim', 'defense', 'affirmative_defense', 'counterclaim']
 const CLAIM_KIND_LABEL: Record<ClaimKind, string> = {
@@ -46,6 +55,8 @@ export default function PleadingsPage() {
   const [edIsOurClient, setEdIsOurClient]     = useState(false)
   const [edAmendsId, setEdAmendsId]           = useState<number | ''>('')
   const [edAcceptedFields, setEdAcceptedFields] = useState<Record<string, boolean>>({})
+  const [edParties, setEdParties]             = useState<OpposingPartyCommitEntry[]>([])
+  const [edFilingParty, setEdFilingParty]     = useState('')
   const [edChildren, setEdChildren]           = useState<ChildCommitEntry[]>([])
   const [edOCs, setEdOCs]                     = useState<OCCommitEntry[]>([])
   const [edClaims, setEdClaims]               = useState<ClaimCommitEntry[]>([])
@@ -57,6 +68,23 @@ export default function PleadingsPage() {
   // Existing pleadings/claims for the matter
   const [pleadings, setPleadings] = useState<MatterPleading[]>([])
   const [claims, setClaims]       = useState<MatterClaim[]>([])
+  const [savingStatus, setSavingStatus]   = useState<number | null>(null)
+  const [statusError, setStatusError]     = useState<string | null>(null)
+  const [pendingPdf, setPendingPdf]       = useState<File | null>(null)
+  const [showAllClaims, setShowAllClaims] = useState(false)
+
+  async function handleStatusChange(pleading: MatterPleading, status: PleadingStatus) {
+    setSavingStatus(pleading.id)
+    setStatusError(null)
+    try {
+      const updated = await updatePleading(pleading.id, { status })
+      setPleadings(prev => prev.map(p => p.id === pleading.id ? updated : p))
+    } catch (e) {
+      setStatusError(e instanceof Error ? e.message : 'Could not update status')
+    } finally {
+      setSavingStatus(null)
+    }
+  }
 
   useEffect(() => {
     getMatters()
@@ -85,6 +113,15 @@ export default function PleadingsPage() {
     const accepted: Record<string, boolean> = {}
     Object.keys(preview.matter_field_updates).forEach(k => { accepted[k] = true })
     setEdAcceptedFields(accepted)
+
+    setEdParties(preview.opposing_parties.map(p => ({
+      existing_id: p.existing_id,
+      full_name: p.full_name,
+      relationship: p.relationship,
+    })))
+    // A pleading filed against us was filed by an adverse party; default to the
+    // first one extracted so the attorney confirms rather than types.
+    setEdFilingParty(preview.opposing_parties[0]?.full_name ?? '')
 
     setEdChildren(preview.new_children.map(c => ({
       existing_id: c.existing_id,
@@ -162,6 +199,8 @@ export default function PleadingsPage() {
     setUploading(true); setUploadError(null); setPreview(null); setCommitSuccess(null)
     try {
       const result = await previewPleading(matterId, file)
+      // Held so it can be stored against the pleading once commit gives it an id.
+      setPendingPdf(file)
       setPreview(result)
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Preview failed')
@@ -233,10 +272,15 @@ export default function PleadingsPage() {
       title: edTitle.trim(),
       filed_date: edFiledDate || null,
       served_date: edServedDate || null,
-      opposing_party_id: edIsOurClient ? null : null,  // TODO: pick specific OP if multi-party
+      // Our client's own pleading has no adverse filing party. Otherwise send the
+      // name — the party may be created by this very commit, so it has no id yet
+      // and the backend resolves it once the parties exist.
+      opposing_party_id: null,
+      opposing_party_name: edIsOurClient ? null : (edFilingParty || null),
       is_supplement: edIsSupplement,
       amends_pleading_id: edAmendsId === '' ? null : Number(edAmendsId),
       matter_field_updates: fieldUpdates,
+      opposing_parties: edParties.filter(p => p.full_name.trim()),
       children: edChildren.filter(c => c.name.first_name && c.name.last_name && c.date_of_birth),
       opposing_counsel: edOCs.filter(o => o.bar_state && o.bar_number && o.name.last_name),
       claims: edClaims.filter(c => c.label && c.narrative),
@@ -244,7 +288,26 @@ export default function PleadingsPage() {
 
     try {
       const result = await commitPleading(payload)
-      setCommitSuccess(`Pleading committed: ${result.children_created} children, ${result.opposing_counsel_linked} counsel, ${result.claims_created} claims`)
+
+      // Store the original PDF now that the pleading has an id. A failure here
+      // is not fatal — the pleading is already committed — so it is reported
+      // separately rather than turning the commit into an error.
+      let pdfNote = ''
+      if (pendingPdf) {
+        try {
+          await uploadPleadingPdf(result.pleading.id, pendingPdf)
+          pdfNote = ', PDF stored'
+        } catch {
+          pdfNote = ' — PDF could not be stored; the record was still saved'
+        }
+      }
+      setPendingPdf(null)
+
+      setCommitSuccess(
+        `Pleading committed: ${result.opposing_parties_created} parties, ` +
+        `${result.children_created} children, ${result.opposing_counsel_linked} counsel, ` +
+        `${result.claims_created} claims${pdfNote}`,
+      )
       setPreview(null)
     } catch (err) {
       setCommitError(err instanceof Error ? err.message : 'Commit failed')
@@ -303,7 +366,10 @@ export default function PleadingsPage() {
 
           {/* Existing pleadings */}
           <div className="card overflow-hidden mb-6">
-            <div className="px-5 py-4 border-b border-border"><h2 className="font-semibold text-navy">Pleadings on file</h2></div>
+            <div className="px-5 py-4 border-b border-border">
+              <h2 className="font-semibold text-navy">Pleadings on file</h2>
+              {statusError && <p className="text-xs text-red-600 mt-1">{statusError}</p>}
+            </div>
             {pleadings.length === 0 && <div className="px-5 py-10 text-center text-text-secondary text-sm">No pleadings yet.</div>}
             {pleadings.length > 0 && (
               <table className="w-full text-sm">
@@ -312,46 +378,110 @@ export default function PleadingsPage() {
                     <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Title</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Filed</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Served</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Live?</th>
+                    <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+                    <th className="px-5 py-3 w-24"><span className="sr-only">PDF</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {pleadings.map(p => {
-                    const isSuperseded = pleadings.some(x => x.amends_pleading_id === p.id)
-                    const isLive = !isSuperseded && !p.is_supplement
-                    return (
-                      <tr key={p.id} className="border-b border-border last:border-0 hover:bg-off-white/60">
-                        <td className="px-5 py-3 font-medium text-navy">{p.title}</td>
-                        <td className="px-5 py-3 text-text-secondary">{formatDate(p.filed_date)}</td>
-                        <td className="px-5 py-3 text-text-secondary">{formatDate(p.served_date)}</td>
-                        <td className="px-5 py-3">
-                          {isLive && <span className="text-xs rounded-full px-2.5 py-1 font-medium bg-green-100 text-green-800">Live</span>}
-                          {isSuperseded && <span className="text-xs rounded-full px-2.5 py-1 font-medium bg-gray-100 text-gray-600">Superseded</span>}
-                          {p.is_supplement && <span className="text-xs rounded-full px-2.5 py-1 font-medium bg-blue-100 text-blue-800">Supplement</span>}
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  {pleadings.map(p => (
+                    <tr key={p.id} className={`border-b border-border last:border-0 hover:bg-off-white/60 ${p.status === 'live' ? '' : 'opacity-60'}`}>
+                      <td className="px-5 py-3 font-medium text-navy">
+                        {p.title}
+                        {p.is_supplement && (
+                          <span className="ml-2 text-xs rounded-full px-2 py-0.5 font-medium bg-blue-100 text-blue-800">
+                            supplement
+                          </span>
+                        )}
+                        {p.amends_pleading_id && (
+                          <span className="ml-2 text-xs text-text-secondary">
+                            amends {pleadings.find(x => x.id === p.amends_pleading_id)?.title ?? `#${p.amends_pleading_id}`}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3 text-text-secondary">{formatDate(p.filed_date)}</td>
+                      <td className="px-5 py-3 text-text-secondary">{formatDate(p.served_date)}</td>
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs rounded-full px-2.5 py-1 font-medium capitalize ${PLEADING_STATUS_COLOR[p.status]}`}>
+                            {p.status}
+                          </span>
+                          <select
+                            className="input text-xs py-1 w-32"
+                            value={p.status}
+                            disabled={savingStatus === p.id}
+                            onChange={e => handleStatusChange(p, e.target.value as PleadingStatus)}
+                          >
+                            {PLEADING_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        {p.storage_path ? (
+                          <button type="button" className="text-xs text-navy underline"
+                            onClick={() => openPleadingPdf(p.id).catch(e =>
+                              setStatusError(e instanceof Error ? e.message : 'Could not open the PDF'))}>
+                            View PDF
+                          </button>
+                        ) : (
+                          <span className="text-xs text-text-secondary" title="No PDF was stored for this pleading">
+                            no PDF
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             )}
           </div>
 
-          {/* Claims summary */}
-          {claims.length > 0 && (
-            <div className="card p-5 mb-6">
-              <h2 className="font-semibold text-navy mb-3">Claims, defenses, and counterclaims</h2>
-              <div className="space-y-2">
-                {claims.map(c => (
-                  <div key={c.id} className="text-sm border-l-2 border-navy/20 pl-3">
-                    <span className="text-xs font-semibold text-text-secondary uppercase mr-2">{CLAIM_KIND_LABEL[c.kind]}</span>
-                    <span className="font-medium text-navy">{c.label}</span>
-                    <p className="text-text-secondary mt-0.5">{c.narrative}</p>
+          {/* Claims summary — only what is still operative. A claim pleaded in a
+              superseded or withdrawn pleading is history, not the live case. */}
+          {claims.length > 0 && (() => {
+            const liveIds = new Set(pleadings.filter(p => p.status === 'live').map(p => p.id))
+            const liveClaims = claims.filter(c => liveIds.has(c.matter_pleading_id))
+            const hiddenCount = claims.length - liveClaims.length
+            const shown = showAllClaims ? claims : liveClaims
+            return (
+              <div className="card p-5 mb-6">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+                  <h2 className="font-semibold text-navy">Claims, defenses, and counterclaims</h2>
+                  {hiddenCount > 0 && (
+                    <button type="button" className="text-xs text-navy underline"
+                      onClick={() => setShowAllClaims(v => !v)}>
+                      {showAllClaims
+                        ? `Hide ${hiddenCount} from non-live pleadings`
+                        : `Show ${hiddenCount} from non-live pleadings`}
+                    </button>
+                  )}
+                </div>
+                {shown.length === 0 ? (
+                  <p className="text-sm text-text-secondary">
+                    No claims on live pleadings{hiddenCount > 0 ? ` (${hiddenCount} on non-live pleadings)` : ''}.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {shown.map(c => {
+                      const source = pleadings.find(p => p.id === c.matter_pleading_id)
+                      const isLive = source?.status === 'live'
+                      return (
+                        <div key={c.id} className={`text-sm border-l-2 pl-3 ${isLive ? 'border-navy/20' : 'border-gray-300 opacity-60'}`}>
+                          <span className="text-xs font-semibold text-text-secondary uppercase mr-2">{CLAIM_KIND_LABEL[c.kind]}</span>
+                          <span className="font-medium text-navy">{c.label}</span>
+                          {!isLive && source && (
+                            <span className="ml-2 text-xs text-text-secondary">
+                              from {source.status} pleading
+                            </span>
+                          )}
+                          <p className="text-text-secondary mt-0.5">{c.narrative}</p>
+                        </div>
+                      )
+                    })}
                   </div>
-                ))}
+                )}
               </div>
-            </div>
-          )}
+            )
+          })()}
         </>
       )}
 
@@ -398,6 +528,21 @@ export default function PleadingsPage() {
                 <span className="text-sm text-navy">Supplement</span>
               </label>
             </div>
+            {!edIsOurClient && (
+              <div>
+                <label className="label">Filed by</label>
+                <select className="input mt-1" value={edFilingParty}
+                  onChange={e => setEdFilingParty(e.target.value)}>
+                  <option value="">— unassigned —</option>
+                  {edParties.filter(p => p.full_name.trim()).map(p => (
+                    <option key={p.full_name} value={p.full_name}>{p.full_name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-text-secondary mt-1">
+                  Which adverse party filed this. Choices come from the parties below.
+                </p>
+              </div>
+            )}
             {pleadings.length > 0 && (
               <div>
                 <label className="label">Amends (supersedes) — optional</label>
@@ -412,6 +557,48 @@ export default function PleadingsPage() {
                 LLM hint: this appears to amend "{preview.pleading.amends_pleading_title}" — pick from the dropdown above.
               </p>
             )}
+          </div>
+
+          {/* Opposing parties — everything else that names a party points at these */}
+          <div className="card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-navy">Opposing parties</h3>
+              <button type="button" className="text-xs text-navy underline"
+                onClick={() => setEdParties(prev => [...prev, { existing_id: null, full_name: '', relationship: null }])}>
+                + Add party
+              </button>
+            </div>
+            {edParties.length === 0 && (
+              <p className="text-sm text-text-secondary">
+                None extracted. Add the adverse party here — counsel and claims can only be
+                assigned to a party that exists.
+              </p>
+            )}
+            <div className="space-y-2">
+              {edParties.map((p, idx) => (
+                <div key={idx} className="border border-border rounded p-3">
+                  {p.existing_id && (
+                    <p className="text-xs text-green-700 mb-2">
+                      Already on this matter — will be reused, not added again
+                    </p>
+                  )}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <input className="input text-sm md:col-span-2" placeholder="Full name"
+                      value={p.full_name}
+                      onChange={e => setEdParties(prev => prev.map((x, i) =>
+                        i === idx ? { ...x, full_name: e.target.value } : x))} />
+                    <input className="input text-sm" placeholder="Relationship (e.g. spouse)"
+                      value={p.relationship ?? ''}
+                      onChange={e => setEdParties(prev => prev.map((x, i) =>
+                        i === idx ? { ...x, relationship: e.target.value || null } : x))} />
+                  </div>
+                  <button type="button" className="text-red-500 text-xs mt-2"
+                    onClick={() => setEdParties(prev => prev.filter((_, i) => i !== idx))}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Matter field updates */}

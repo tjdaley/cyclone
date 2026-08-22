@@ -11,9 +11,9 @@ version back to commit_ingest() which performs the actual writes.
 """
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
-from db.models.matter import MatterInDB
+from db.models.matter import MatterInDB, OpposingParty
 from db.models.pleading import (
     ChildSex,
     ClaimKind,
@@ -23,9 +23,10 @@ from db.models.pleading import (
     MatterOpposingCounsel,
     MatterPleading,
     OpposingCounsel,
+    PleadingStatus,
 )
 from db.repositories.client import ClientRepository
-from db.repositories.matter import MatterRepository
+from db.repositories.matter import MatterRepository, OpposingPartyRepository
 from db.repositories.pleading import (
     MatterChildRepository,
     MatterClaimRepository,
@@ -43,6 +44,7 @@ from schemas.pleading import (
     OCCommitEntry,  # type: ignore
     OCMatchPreview,
     OCPreview,
+    OpposingPartyPreview,
     PleadingCommitRequest,
     PleadingIngestPreviewResponse,
     PleadingPreview,
@@ -152,6 +154,12 @@ Extract case metadata and return ONLY a valid JSON object with these fields:
   - name: {first_name, last_name, middle_name, courtesy_title, suffix}
   - date_of_birth: "YYYY-MM-DD" or null
   - sex: "male" | "female" | "other" or null
+- opposing_parties: array of objects. Every PARTY to this suit who is adverse to our_client —
+  the other spouse, the other parent, a respondent, an intervenor. Never our_client, and never
+  a child of the marriage (children are listed above, not here). Use the party's name exactly
+  as the document writes it. Each object has:
+  - full_name: string
+  - relationship: string or null — relationship to our_client, e.g. "spouse", "father of the child"
 - opposing_counsel: array of objects. Include EVERY attorney of record who represents a party
   ADVERSE to our_client. NEVER include our_client's own attorney, even when the document names
   them: a certificate of service, or a "service may be had by serving X" paragraph, names the
@@ -245,6 +253,41 @@ class PleadingService:
             LOGGER.warning("pleading_service.extract_claims: parse failure: %s", str(e))
             return []  # Claims extraction failure is non-fatal; attorney can add them manually
 
+    # ── Children ──────────────────────────────────────────────────────────
+
+    def find_matching_child(
+        self,
+        manager: DatabaseManager,
+        matter_id: int,
+        name: Any,
+        date_of_birth: Any,
+        ignore_id: int | None = None,
+    ) -> Any:
+        """
+        Find a child already on the matter that matches name + date of birth.
+
+        Shared by pleading ingestion and the children CRUD endpoints so both
+        apply the same duplicate rule. See ``_same_child`` for the comparison.
+
+        :param manager: Database manager for this request.
+        :type manager: DatabaseManager
+        :param matter_id: Matter to search within.
+        :type matter_id: int
+        :param name: FullName of the child being added or edited.
+        :param date_of_birth: Date of birth of that child, or None.
+        :param ignore_id: Row to exclude — the child being edited, which
+            must not match itself.
+        :type ignore_id: int | None
+        :return: The matching MatterChildInDB, or None.
+        """
+        repo = MatterChildRepository(manager)
+        for existing in repo.get_by_matter(matter_id):
+            if ignore_id is not None and existing.id == ignore_id:
+                continue
+            if _same_child(name, date_of_birth, existing.name, existing.date_of_birth):
+                return existing
+        return None
+
     # ── Preview ───────────────────────────────────────────────────────────
 
     def preview_ingest(
@@ -300,6 +343,35 @@ class PleadingService:
                 current_val = current.value if hasattr(current, "value") else current
                 if current_val != proposed:
                     matter_field_updates[field] = FieldDiff(current=current_val, proposed=proposed)
+
+        # Opposing parties — every counsel link, claim, and pleading points at one
+        # of these, so they have to exist before any of that can be assigned.
+        party_repo = OpposingPartyRepository(manager)
+        existing_parties = party_repo.get_by_matter(matter_id)
+
+        party_previews: list[OpposingPartyPreview] = []
+        for party_data in (meta.get("opposing_parties") or []):
+            try:
+                preview_party = OpposingPartyPreview.model_validate(party_data)
+            except Exception as e:
+                warnings.append("Could not parse an opposing party entry: %s" % str(e))
+                continue
+
+            # The same trap as opposing counsel: from the filer's perspective our
+            # client is the adverse party, so drop them if the LLM lists them.
+            if _same_party(preview_party.full_name, client_name):
+                warnings.append(
+                    "Ignored an opposing party entry naming our own client (%s)" % preview_party.full_name
+                )
+                continue
+
+            match = next(
+                (p for p in existing_parties if _same_party(preview_party.full_name, p.full_name)),
+                None,
+            )
+            if match is not None:
+                preview_party.existing_id = match.id
+            party_previews.append(preview_party)
 
         # Children previews — matched against the children already on the matter
         # so a later pleading restating them does not create duplicates.
@@ -409,6 +481,7 @@ class PleadingService:
             raw_text=raw_text,
             pleading=pleading_preview,
             matter_field_updates=matter_field_updates,
+            opposing_parties=party_previews,
             new_children=new_children,
             opposing_counsel_matches=oc_matches,
             new_opposing_counsel=new_ocs,
@@ -424,14 +497,14 @@ class PleadingService:
         staff_id: int,
         request: PleadingCommitRequest,
         pdf_bytes: bytes | None = None,
-    ) -> tuple[Any, int, int, int]:
+    ) -> tuple[Any, int, int, int, int]:
         """
         Commit the attorney-reviewed preview.
 
-        Writes: pleading row, matter field updates, children, OC (new + updated),
-        matter_opposing_counsel links, and claims.
+        Writes: opposing parties, pleading row, matter field updates, children,
+        OC (new + updated), matter_opposing_counsel links, and claims.
 
-        Returns (pleading_record, children_count, oc_count, claims_count).
+        Returns (pleading_record, parties_created, children_count, oc_count, claims_count).
         """
         matter_id = request.matter_id
 
@@ -442,11 +515,44 @@ class PleadingService:
             LOGGER.info("pleading_service.commit: applied matter field updates for matter %s: %s",
                         matter_id, list(request.matter_field_updates))
 
-        # 2. Create the pleading row
+        # 2. Create opposing parties FIRST — the pleading row, the counsel links,
+        # and the claims below all reference them by id.
+        party_repo = OpposingPartyRepository(manager)
+        known_parties = party_repo.get_by_matter(matter_id)
+        parties_created = 0
+        for party_entry in request.opposing_parties:
+            match_id = party_entry.existing_id
+            if match_id is None:
+                match = next(
+                    (p for p in known_parties if _same_party(party_entry.full_name, p.full_name)),
+                    None,
+                )
+                match_id = match.id if match else None
+            if match_id is not None:
+                continue  # Already on the matter — nothing to create
+
+            created_party = party_repo.insert(OpposingParty(
+                matter_id=matter_id,
+                full_name=party_entry.full_name,
+                relationship=party_entry.relationship,
+            ).model_dump())
+            known_parties.append(created_party)
+            parties_created += 1
+        LOGGER.info("pleading_service.commit: created %s opposing parties for matter %s",
+                    parties_created, matter_id)
+
+        def resolve_party(name: Optional[str]) -> Optional[int]:
+            """Map a party name from the review form to an id now that parties exist."""
+            if not name:
+                return None
+            match = next((p for p in known_parties if _same_party(name, p.full_name)), None)
+            return match.id if match else None
+
+        # 3. Create the pleading row
         pleading_repo = MatterPleadingRepository(manager)
         pleading = MatterPleading(
             matter_id=matter_id,
-            opposing_party_id=request.opposing_party_id,
+            opposing_party_id=request.opposing_party_id or resolve_party(request.opposing_party_name),
             title=request.title,
             filed_date=request.filed_date,
             served_date=request.served_date,
@@ -459,7 +565,21 @@ class PleadingService:
         pleading_record = pleading_repo.insert(pleading.model_dump())
         LOGGER.info("pleading_service.commit: created pleading id=%s", pleading_record.id)
 
-        # 3. Upload PDF to storage (if provided) and update the row
+        # An amendment supersedes what it amends. A supplement does not — it adds
+        # to the live pleading, so the amended-pleading pointer is what matters.
+        if request.amends_pleading_id and not request.is_supplement:
+            amended = pleading_repo.select_one(condition={"id": request.amends_pleading_id})
+            if amended is None:
+                LOGGER.warning(
+                    "pleading_service.commit: amends_pleading_id=%s not found; nothing superseded",
+                    request.amends_pleading_id,
+                )
+            elif amended.status != PleadingStatus.superseded:
+                pleading_repo.update(request.amends_pleading_id, {"status": PleadingStatus.superseded.value})
+                LOGGER.info("pleading_service.commit: pleading id=%s marked superseded by id=%s",
+                            request.amends_pleading_id, pleading_record.id)
+
+        # 4. Upload PDF to storage (if provided) and update the row
         if pdf_bytes:
             storage = StorageService(manager)
             try:
@@ -517,15 +637,21 @@ class PleadingService:
         LOGGER.info("pleading_service.commit: created %s children (%s submitted)",
                     children_created, len(request.children))
 
-        # 5. Create/update opposing counsel and link to matter
+        # 6. Create/update opposing counsel and link to matter
         oc_repo = OpposingCounselRepository(manager)
         m_oc_repo = MatterOpposingCounselRepository(manager)
         oc_count = 0
         for oc_entry in request.opposing_counsel:
             if oc_entry.existing_id:
-                # Update existing OC row with any changed fields
+                # Update existing OC row with any changed fields. Everything
+                # excluded here is either an identifier or belongs to the
+                # matter↔counsel link rather than the counsel row itself —
+                # 'represents' has no column on opposing_counsel.
                 update_fields = oc_entry.model_dump(
-                    exclude={"existing_id", "opposing_party_id", "role", "bar_state", "bar_number"},
+                    exclude={
+                        "existing_id", "opposing_party_id", "represents",
+                        "role", "bar_state", "bar_number",
+                    },
                     exclude_none=True,
                 )
                 if update_fields:
@@ -551,18 +677,21 @@ class PleadingService:
                 created = oc_repo.insert(new_oc.model_dump())
                 oc_id = created.id
 
-            # Link to matter if not already linked
+            # Link to matter if not already linked. The party is taken from the
+            # reviewed id when present, otherwise resolved from the name the
+            # extraction reported — that party may have been created moments ago
+            # by this same commit, so it had no id at review time.
             if not m_oc_repo.exists_for_matter(matter_id, oc_id):
                 link = MatterOpposingCounsel(
                     matter_id=matter_id,
                     opposing_counsel_id=oc_id,
-                    opposing_party_id=oc_entry.opposing_party_id,
+                    opposing_party_id=oc_entry.opposing_party_id or resolve_party(oc_entry.represents),
                     role=oc_entry.role,
                 )
                 m_oc_repo.insert(link.model_dump())
             oc_count += 1
 
-        # 6. Create claims
+        # 7. Create claims
         claim_repo = MatterClaimRepository(manager)
         for claim_entry in request.claims:
             claim = MatterClaim(
@@ -577,7 +706,7 @@ class PleadingService:
             claim_repo.insert(claim.model_dump())
         LOGGER.info("pleading_service.commit: created %s claims", len(request.claims))
 
-        return pleading_record, children_created, oc_count, len(request.claims)
+        return pleading_record, parties_created, children_created, oc_count, len(request.claims)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

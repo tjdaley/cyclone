@@ -82,3 +82,36 @@ export interface RateOverride {
   staff_id: number
   rate: number
 }
+
+/** Roles a staff member can hold on a matter — matches the matter_staff CHECK constraint. */
+export type MatterStaffRole = 'originating' | 'billing_reviewer' | 'assigned'
+
+/** Mirrors MatterStaffResponse in app/schemas/matter.py */
+export interface MatterStaff {
+  id: number
+  matter_id: number
+  staff_id: number
+  role: MatterStaffRole
+  split_pct: number | null
+}
+
+/** Mirrors MatterStaffRequest in app/schemas/matter.py */
+export interface MatterStaffPayload {
+  staff_id: number
+  role: MatterStaffRole
+  split_pct?: number | null
+}
+
+/** Mirrors MatterStaffUpdateRequest — staff_id is not updatable. */
+export interface MatterStaffUpdatePayload {
+  role?: MatterStaffRole
+  split_pct?: number | null
+}
+
+/** Mirrors OpposingPartyResponse in app/schemas/matter.py */
+export interface OpposingParty {
+  id: number
+  matter_id: number
+  full_name: string
+  relationship: string | null
+}
