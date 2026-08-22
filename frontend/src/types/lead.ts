@@ -5,6 +5,7 @@ export type LeadStatus =
   | 'contacted'
   | 'qualified'
   | 'disqualified'
+  | 'conflicted'
   | 'consultation_scheduled'
   | 'consulted'
   | 'engaged'

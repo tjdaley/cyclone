@@ -19,6 +19,7 @@ const STATUS_OPTIONS: LeadStatus[] = [
   'contacted',
   'qualified',
   'disqualified',
+  'conflicted',
   'consultation_scheduled',
   'consulted',
   'engaged',
