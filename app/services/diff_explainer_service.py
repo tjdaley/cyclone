@@ -44,7 +44,7 @@ class DiffExplainerService:
             "STAFF-EDITED REPLY (what actually went out):\n"
             "----- begin -----\n%s\n----- end -----"
         ) % (draft or "(empty)", sent or "(empty)")
-        return llm_service.complete_fast(_DIFF_EXPLAINER_SYSTEM, user_msg).strip()
+        return llm_service.complete(_DIFF_EXPLAINER_SYSTEM, user_msg, profile="explain_message_edit").strip()
 
 
 diff_explainer_service = DiffExplainerService()

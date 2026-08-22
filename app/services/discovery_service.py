@@ -84,7 +84,11 @@ class DiscoveryService:
         :raises ValueError: If the LLM response is not valid JSON.
         """
         # Send first ~8000 chars to avoid token overrun — metadata is in the header/preamble
-        response = llm_service.complete(_DOC_CLASSIFY_SYSTEM, f"client_name: {client_name}\nraw_text: {raw_text[:8000]}")
+        response = llm_service.complete(
+            _DOC_CLASSIFY_SYSTEM,
+            f"client_name: {client_name}\nraw_text: {raw_text[:8000]}",
+            profile="classify_discovery_document",
+        )
         try:
             return json.loads(_strip_markdown_fences(response))
         except json.JSONDecodeError as e:
@@ -99,7 +103,7 @@ class DiscoveryService:
         :return: List of dicts with request_number and source_text.
         :raises ValueError: If the LLM response cannot be parsed.
         """
-        response = llm_service.complete(_ITEM_EXTRACT_SYSTEM, raw_text)
+        response = llm_service.complete(_ITEM_EXTRACT_SYSTEM, raw_text, profile="extract_discovery_items")
         try:
             items: list[dict[str, str]] = json.loads(_strip_markdown_fences(response))
             if not isinstance(items, list):  # type: ignore

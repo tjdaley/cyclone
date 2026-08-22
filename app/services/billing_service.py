@@ -291,7 +291,7 @@ class BillingService:
         from datetime import date as date_type
         LOGGER.info("BillingService.parse_natural_language: parsing entry")
         prompt = _NL_BILLING_SYSTEM_PROMPT.format(today=date_type.today().isoformat())
-        response_text = llm_service.complete_fast(prompt, text)
+        response_text = llm_service.complete(prompt, text, profile="parse_billing_entry")
         try:
             cleaned = re.sub(r"^```(?:json)?\s*\n?", "", response_text.strip())
             cleaned = re.sub(r"\n?```\s*$", "", cleaned).strip()

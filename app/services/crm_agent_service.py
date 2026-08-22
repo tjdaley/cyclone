@@ -23,7 +23,7 @@ from db_handler import DatabaseManager
 
 from db.models.foreign_lead import ForeignLead
 from db.models.lead_action import LeadActionDirection, LeadActionType, LeadActorType
-from db.models.lead_agent_run import LeadAgentRun, LeadAgentRunInDB, LeadAgentTrigger
+from db.models.lead_agent_run import LeadAgentRun, LeadAgentTrigger
 from db.models.lead_workflow import DismissalReason, LeadStatus
 from db.models.processed_inbound_email import ProcessedInboundEmail
 from db.repositories.attorney_lead_responder import AttorneyLeadResponderRepository
@@ -241,7 +241,7 @@ def _llm_compose_welcome(foreign_lead: ForeignLead, firm: str) -> Optional[str]:
         firm,
     )
     try:
-        body = llm_service.complete_fast(_WELCOME_SYSTEM, user_msg).strip()
+        body = llm_service.complete(_WELCOME_SYSTEM, user_msg, profile="compose_welcome_email").strip()
     except Exception as e:  # noqa: BLE001 — fail-safe to template
         LOGGER.warning("warm welcome LLM call failed: %s", str(e))
         return None
@@ -615,7 +615,7 @@ class CrmAgentService:
         false negatives on real legal questions are not.
         """
         user_msg = self._format_triage_input(foreign_lead, message_text, kind)
-        response = llm_service.complete_fast(_TRIAGE_SYSTEM, user_msg)
+        response = llm_service.complete(_TRIAGE_SYSTEM, user_msg, profile="triage_lead_message")
         return _parse_triage(response)
 
     @staticmethod
@@ -873,11 +873,11 @@ class CrmAgentService:
             message_text or "(empty)",
         )
         try:
-            response = llm_service.complete_fast(_EXTRACT_SYSTEM, user_msg)
+            response = llm_service.complete(_EXTRACT_SYSTEM, user_msg, profile="extract_lead_issues")
             items: Any = json.loads(_strip_markdown_fences(response))
             if not isinstance(items, list):
                 return []
-            return [str(i).strip() for i in items if str(i).strip()][:6]
+            return [str(i).strip() for i in items if str(i).strip()][:6]  # type: ignore[no-any-return]
         except (json.JSONDecodeError, Exception) as e:  # noqa: BLE001 — non-fatal
             LOGGER.warning("crm_agent.extract_issues: failed err=%s", str(e))
             return []
@@ -923,7 +923,7 @@ class CrmAgentService:
             unanswerable_block,
             calendly_block,
         )
-        return llm_service.complete(_COMPOSE_SYSTEM, user_msg).strip()
+        return llm_service.complete(_COMPOSE_SYSTEM, user_msg, profile="compose_lead_reply").strip()
 
     def guardrail(self, draft: str, original_message: str) -> tuple[bool, str]:
         """Safety check on a drafted reply. Returns (passed, reason).
@@ -936,7 +936,7 @@ class CrmAgentService:
         ) % (original_message or "(empty)", draft or "(empty)")
 
         try:
-            response = llm_service.complete_fast(_GUARDRAIL_SYSTEM, user_msg)
+            response = llm_service.complete(_GUARDRAIL_SYSTEM, user_msg, profile="response_guardrail")
             obj = json.loads(_strip_markdown_fences(response))
         except (json.JSONDecodeError, Exception) as e:  # noqa: BLE001
             LOGGER.warning("crm_agent.guardrail: parse/LLM error err=%s", str(e))

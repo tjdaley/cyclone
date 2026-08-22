@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pydantic_settings, sys; print\\(sys.version\\); print\\(pydantic_settings.__version__ if hasattr\\(pydantic_settings,'__version__'\\) else 'v?'\\)\")",
+      "Bash(LOG_LEVEL=INFO ./venv/Scripts/python.exe \"C:/Users/tdale/AppData/Local/Temp/claude/d--Local-Projects-cyclone/e3926681-cfbe-4660-8901-83b2bb1ad7f6/scratchpad/test_profiles.py\")",
+      "Bash(git check-ignore *)",
+      "Bash(grep -v \"^ID=\" \"d:/Local Projects/cyclone/.env\")",
+      "Bash(\"d:/Local Projects/cyclone/venv/Scripts/python.exe\" test_profiles.py)",
+      "Bash('d:/Local Projects/cyclone/venv/Scripts/python.exe' -c ' *)",
+      "Bash(./venv/Scripts/python.exe -m py_compile app/main.py app/util/settings.py app/services/llm_service.py)",
+      "Bash(./venv/Scripts/python.exe -c \"import imapclient\")",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(echo \"TSC EXIT: $?\")",
+      "Bash(npm run *)"
+    ]
+  }
+}

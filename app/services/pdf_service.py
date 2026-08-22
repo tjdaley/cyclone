@@ -7,6 +7,8 @@ image and uses the LLM's multimodal vision capability for OCR.
 """
 import base64
 import io
+from PIL import ImageFile, Image
+import pymupdf
 
 from util.loggerfactory import LoggerFactory
 
@@ -40,29 +42,32 @@ class PDFService:
         :rtype: str
         :raises ValueError: If the PDF cannot be opened.
         """
-        import fitz  # PyMuPDF  # noqa: PLC0415
+        import pymupdf
 
         try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
             LOGGER.error("pdf_service.extract_text: failed to open PDF: %s", str(e))
             raise ValueError("Could not open PDF — file may be corrupted or password-protected") from e
 
         pages: list[str] = []
-        for page_num, page in enumerate(doc):
-            text = page.get_text().strip()
-            if len(text) >= _MIN_TEXT_LENGTH:
-                LOGGER.debug("pdf_service: page %s text extraction ok (%s chars)", page_num, len(text))
-                pages.append(text)
+        page_num = 0
+        page: pymupdf.Page
+        for page in doc:
+            page_num += 1
+            text = page.get_text().strip()  # type: ignore[union-attr]
+            if len(text) >= _MIN_TEXT_LENGTH:  # type: ignore[union-attr]
+                LOGGER.debug("pdf_service: page %s text extraction ok (%s chars)", page_num, len(text))  # type: ignore[union-attr]
+                pages.append(text)  # type: ignore[union-attr]
             else:
-                LOGGER.debug("pdf_service: page %s text too short (%s chars), using LLM vision", page_num, len(text))
+                LOGGER.debug("pdf_service: page %s text too short (%s chars), using LLM vision", page_num, len(text))  # type: ignore[union-attr]
                 ocr_text = self._vision_extract(page)
                 pages.append(ocr_text)
 
         doc.close()
         return "\n\n".join(pages)
 
-    def _vision_extract(self, page) -> str:
+    def _vision_extract(self, page: pymupdf.Page) -> str:
         """
         Render a page to an enhanced image and use LLM vision to extract text.
 
@@ -70,20 +75,20 @@ class PDFService:
         :return: Extracted text from the LLM vision call.
         :rtype: str
         """
-        from PIL import Image, ImageEnhance  # noqa: PLC0415
+        from PIL import Image
         from services.llm_service import llm_service  # noqa: PLC0415
 
         # Render page at 300 DPI
-        pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
-        image = Image.open(io.BytesIO(img_bytes))
+        pix = page.get_pixmap(dpi=300)  # type: ignore[union-attr]
+        img_bytes = pix.tobytes("png")  # type: ignore[union-attr]
+        image = Image.open(io.BytesIO(img_bytes))  # type: ignore[union-attr]
 
         # Enhance for better LLM processing
-        image = self._enhance_image(image)
+        image = self._enhance_image(image)  # type: ignore[union-attr]
 
         # Encode as base64 PNG for the LLM
         buf = io.BytesIO()
-        image.save(buf, format="PNG")
+        image.save(buf, format="PNG")  # type: ignore[union-attr]
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
         # Use the LLM's vision capability
@@ -93,13 +98,14 @@ class PDFService:
                 user_message=_VISION_OCR_PROMPT,
                 image_base64=b64,
                 image_media_type="image/png",
+                profile="ocr_document_page",
             )
             return text.strip()
         except Exception as e:
             LOGGER.warning("pdf_service._vision_extract: LLM vision failed: %s", str(e))
             return ""
 
-    def _enhance_image(self, image) -> "Image.Image":
+    def _enhance_image(self, image: ImageFile.ImageFile) -> "Image.Image":
         """
         Enhance an image for better LLM vision processing.
 
@@ -107,12 +113,12 @@ class PDFService:
         """
         from PIL import ImageEnhance  # noqa: PLC0415
 
-        image = image.convert("L")
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0)
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(1.5)
-        return image
+        _image: Image.Image = image.convert("L")
+        enhancer = ImageEnhance.Contrast(_image)
+        _image = enhancer.enhance(2.0)
+        enhancer = ImageEnhance.Sharpness(_image)
+        _image = enhancer.enhance(1.5)
+        return _image
 
 
 pdf_service = PDFService()

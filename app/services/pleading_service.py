@@ -135,7 +135,7 @@ class PleadingService:
         tail = raw_text[-4000:] if len(raw_text) > 10000 else ""
         prompt_text = f"{head}\n\n[END OF DOCUMENT OR TAIL]\n{tail}" if tail else head
 
-        response = llm_service.complete(_METADATA_SYSTEM, prompt_text)
+        response = llm_service.complete(_METADATA_SYSTEM, prompt_text, profile="analyze_pleading")
         try:
             return json.loads(_strip_markdown_fences(response))
         except json.JSONDecodeError as e:
@@ -144,7 +144,7 @@ class PleadingService:
 
     def extract_claims(self, raw_text: str) -> list[dict[str, Any]]:
         """Second LLM call: extract claims, defenses, counterclaims."""
-        response = llm_service.complete(_CLAIMS_SYSTEM, raw_text)
+        response = llm_service.complete(_CLAIMS_SYSTEM, raw_text, profile="extract_pleading_claims")
         try:
             items: list[dict[str, Any]] = json.loads(_strip_markdown_fences(response))
             if not isinstance(items, list):  # type: ignore - Extra sanity check since this is free-form LLM output

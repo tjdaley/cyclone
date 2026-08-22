@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from middleware.auth_middleware import AuthMiddleware
 from routers import admin, attorney_lead_responder, auth_flow, billing, clients, discovery, health, kb, lead_agent_run, leads, matters, pleading, staff
+from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 from util.settings import settings
 
@@ -25,11 +26,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Code before ``yield`` runs at startup; code after runs at shutdown.
     """
     LOGGER.info(
-        "Cyclone API started | env=%s llm_vendor=%s log_level=%s",
+        "Cyclone API started | env=%s log_level=%s llm_profiles: %s",
         "development" if settings.is_development else "production",
-        settings.llm_vendor,
         settings.log_level,
+        llm_service.describe_profiles(),
     )
+    for problem in llm_service.validate_profiles():
+        LOGGER.warning("LLM profile configuration: %s", problem)
     yield
     # Shutdown logic (connection pool cleanup, etc.) goes here if needed.
 

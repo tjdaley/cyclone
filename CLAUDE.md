@@ -27,8 +27,11 @@ cyclone/
 │   ├── dependencies.py            # get_db_manager, get_current_user, require_role
 │   ├── Dockerfile                 # Python 3.11-slim
 │   ├── requirements.txt           # pip dependencies
+│   ├── config/
+│   │   └── llm_profiles.json      # Task-named LLM profile catalog — see §11
 │   ├── util/
 │   │   ├── settings.py            # Settings(BaseSettings) singleton — see §5
+│   │   ├── llm_profiles.py        # Loads/resolves the profile catalog — see §11
 │   │   └── loggerfactory.py       # LoggerFactory — see §6
 │   ├── middleware/
 │   │   └── auth_middleware.py     # JWT validation via JWKS (ES256); injects uid/role/email
@@ -163,6 +166,7 @@ from app.util.settings import settings
 | Field | Type | Purpose |
 | ----- | ---- | ------- |
 | `version` | `str` | API version string |
+| `id` | `str` | Deployment identity — which server instance answered (e.g. `DEV`, `ec2-54-84-177-70`) |
 | `host_url` | `str` | CORS and URL generation |
 | `is_development` | `bool` | Gates debug behavior and docs endpoints |
 | `firm_name` | `str` | Displayed in config endpoint |
@@ -170,10 +174,9 @@ from app.util.settings import settings
 | `supabase_service_role_key` | `str` | Used by backend only — never expose to frontend |
 | `supabase_jwt_secret` | `str` | **Currently unused** — auth middleware uses JWKS/ES256 instead |
 | `supabase_anon_key` | `str` | Used by frontend Supabase JS client |
-| `llm_vendor` | `str` | Active LLM vendor: `anthropic`, `gemini`, `openai`, `groq`, `deepseek` |
-| `llm_fast_vendor` | `str` | Vendor for latency-sensitive calls |
-| `llm_temperature`, `llm_top_p` | `float` | LLM sampling parameters |
-| `{vendor}_api_key`, `{vendor}_model` | `str` | Per-vendor configuration |
+| `llm_profiles_file` | `str` | Path to the task-profile catalog; relative paths resolve against `app/` (see §11) |
+| `llm_temperature`, `llm_top_p`, `llm_max_tokens` | `float`/`int` | Global sampling defaults; profiles and candidates may override |
+| `{vendor}_api_key`, `{vendor}_base_url` | `str` | Per-vendor credentials only — no model names |
 | `referral_types` | `list[str]` | Client intake referral type dropdown values |
 | `time_increment_options` | `list[float]` | Valid billing time increments |
 | `default_refresh_trigger_pct` | `float` | Default retainer refresh threshold |
@@ -331,11 +334,32 @@ class MyEntityInDB(MyEntity):
 
 All business logic, LLM calls, PDF extraction, Word generation, and Supabase Storage access live in services — never in route handlers.
 
-### LLM Service (`llm_service.py`)
+### LLM Service (`llm_service.py`) + Profile Catalog (`util/llm_profiles.py`)
 
-- `complete(system_prompt, user_message)` → dispatches to `settings.llm_vendor`
-- `complete_fast(system_prompt, user_message)` → dispatches to `settings.llm_fast_vendor`
-- `complete_with_image(system_prompt, user_message, image_base64, image_media_type)` → multimodal call for OCR of scanned document pages
+**Call sites name a task, never a vendor or a model.** Which models serve a task is config, not code.
+
+```python
+llm_service.complete(_METADATA_SYSTEM, prompt_text, profile="analyze_pleading")
+llm_service.complete_with_image(system, msg, b64, mime, profile="ocr_document_page")
+```
+
+The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_file`, resolved against the `app/` package so the same relative path works in Docker and locally). An entry takes one of three forms:
+
+```jsonc
+"fast": [ {"vendor": "gemini", "model": "gemini-3.1-flash-lite-preview"} ],   // chain
+"explain_message_edit": "fast",                                              // alias
+"response_guardrail": { "extends": "fast", "temperature": 0.0,               // object
+                        "description": "Safety check on a drafted reply" }
+```
+
+- Object keys: `description`, `extends`, `chain`, `temperature`, `top_p`, `max_tokens`, `vision`. Unknown keys are rejected at load. Top-level keys starting with `_` are ignored — that's how you comment in JSON.
+- **Convention:** `default`, `fast`, and `vision` are the physical model chains; every task profile `extends` one of them. Retune a task by changing what it extends.
+- **Failover:** the first candidate is tried; on *any* failure — network, quota, auth, API error, or an empty response — the service logs a `WARNING` and moves to the next candidate. No same-candidate retry. Chain exhausted → `LLMUnavailableError` (a `RuntimeError`).
+- **An unknown profile name raises `LLMUnavailableError`** listing the known names. Profile names are config; a typo must not silently run on some other model.
+- Candidates whose vendor has no API key, or that can't serve the call type (vision), are **skipped without being called**.
+- Sampling resolves **candidate → profile → global `llm_*` setting**.
+- The catalog loads at import. A missing or malformed file raises `LLMProfileCatalogError` and the process does not start. When `is_development`, the file's mtime is checked per lookup and edits reload without a restart; a reload failure keeps the previous catalog.
+- `describe_profiles()` / `validate_profiles()` run at startup to log resolved chains and warn about unknown vendors, missing keys, and non-vision vendors in a vision profile.
 - Supported vendors: `anthropic`, `gemini`, `openai`, `groq`, `deepseek`. Vision supported on Anthropic, Gemini, and OpenAI.
 - Lazy imports per vendor (avoids loading unused SDKs)
 - Log at `DEBUG` before and after LLM calls — format string `"%.*s"` truncates to `_MAX_LOG_CHARS`
@@ -386,11 +410,12 @@ Stateless preview/commit pattern for pleading ingestion:
 
 | Feature | Endpoint | Notes |
 | --------- | ---------- | ------- |
-| Natural language billing entry | `POST /api/v1/billing/parse` | Returns preview with resolved rate + amount; not committed until attorney confirms |
-| Discovery request ingestion | `POST /api/v1/discovery/upload` | Multipart PDF upload; classifies + extracts items verbatim |
-| Pleading ingestion — metadata | `POST /api/v1/pleadings/preview` | Extracts case metadata, children, opposing counsel, claims |
-| Pleading ingestion — claims | (same call) | Second LLM call inside preview_ingest |
-| PDF vision OCR | (internal to pdf_service) | For scanned pages with no text layer |
+| Natural language billing entry | `POST /api/v1/billing/parse` | `parse_billing_entry` — preview with resolved rate + amount; not committed until attorney confirms |
+| Discovery request ingestion | `POST /api/v1/discovery/upload` | `classify_discovery_document`, then `extract_discovery_items` |
+| Pleading ingestion — metadata | `POST /api/v1/pleadings/preview` | `analyze_pleading` — case metadata, children, opposing counsel |
+| Pleading ingestion — claims | (same call) | `extract_pleading_claims` — second LLM call inside preview_ingest |
+| PDF vision OCR | (internal to pdf_service) | `ocr_document_page` — for scanned pages with no text layer |
+| CRM lead agent | (internal to crm_agent_service) | `compose_welcome_email`, `triage_lead_message`, `extract_lead_issues`, `select_kb_articles`, `compose_lead_reply`, `response_guardrail`, `explain_message_edit` |
 
 ---
 
@@ -522,7 +547,7 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 1. Pydantic validates all `Settings` fields — raises `ValidationError` before accepting requests
 2. `SupabaseManager.__init__` raises `ValueError` if `supabase_url` or `supabase_service_role_key` are empty
 3. `AuthMiddleware` fetches JWKS from `{supabase_url}/auth/v1/.well-known/jwks.json` at module load
-4. Logs at `INFO`: `"Cyclone API started | env=%s llm_vendor=%s log_level=%s"`
+4. Logs at `INFO`: `"Cyclone API started | env=%s log_level=%s llm_profiles: %s"`, then logs a `WARNING` per problem found by `llm_service.validate_profiles()`
 
 ---
 
@@ -557,15 +582,16 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 | Variable | Used By | Notes |
 | ---------- | --------- | ------- |
 | `FIRM_NAME` | Backend | Displayed in `/api/config` |
+| `ID` | Backend | Deployment identity — which server instance answered |
 | `IS_DEVELOPMENT` | Backend | Gates debug behavior and docs |
 | `HOST_URL` | Backend | CORS allowed origin |
 | `SUPABASE_URL` | Backend + Frontend | Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend only | Never expose to frontend |
 | `SUPABASE_ANON_KEY` | Frontend only | Used by Supabase JS client |
 | `SUPABASE_JWT_SECRET` | — | **Currently unused** — middleware uses JWKS/ES256 |
-| `LLM_VENDOR` | Backend | Active vendor: gemini, openai, anthropic, groq, deepseek |
-| `LLM_FAST_VENDOR` | Backend | Vendor for latency-sensitive calls |
-| `{VENDOR}_API_KEY`, `{VENDOR}_MODEL` | Backend | Per-vendor configuration |
+| `LLM_PROFILES_FILE` | Backend | Task-profile catalog path (default `config/llm_profiles.json`) |
+| `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_MAX_TOKENS` | Backend | Global sampling defaults |
+| `{VENDOR}_API_KEY`, `{VENDOR}_BASE_URL` | Backend | Per-vendor credentials only |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Backend | Never expose to frontend |
 | `STRIPE_PUBLISHABLE_KEY` | Backend → `/api/config` → Frontend | |
 | `LOG_LEVEL` | Backend | Default: WARNING |
@@ -592,6 +618,9 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 | Use `orm_mode = True` | Use `ConfigDict(from_attributes=True)` |
 | Log PII (names, amounts, case facts) | Log entity IDs only |
 | Import LLM SDKs outside `llm_service.py` | Call `llm_service.complete(...)` |
+| Add `{VENDOR}_MODEL` / `{VENDOR}_FAST_MODEL` env keys | Add the model to a chain in `app/config/llm_profiles.json` |
+| Read a vendor id or model name outside `llm_service.py` | Name the task: `complete(..., profile="analyze_pleading")` |
+| Call `complete()` with no `profile` for real work | Name the task; bare `complete()` means the generic `default` chain |
 | Import `fitz` / `PIL` outside `pdf_service.py` | Call `pdf_service.extract_text(...)` |
 | Hardcode environment-specific values | Use `settings.*` |
 | Use `supabase.from(...)` in frontend components | Use typed wrappers from `src/lib/api.ts` |

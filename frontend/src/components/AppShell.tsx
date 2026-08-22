@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { getConfig } from '../lib/api'
+import type { AppConfig } from '../types'
 
 interface NavItem {
   to: string
@@ -107,6 +109,13 @@ export default function AppShell() {
   const { profile, signOut } = useAuth()
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [config, setConfig] = useState<AppConfig | null>(null)
+
+  // Which server answered — surfaced in the sidebar footer. A failure here is
+  // cosmetic only, so the footer simply omits the line.
+  useEffect(() => {
+    getConfig().then(setConfig).catch(() => setConfig(null))
+  }, [])
 
   const userRoles = profile?.roles ?? (profile?.role ? [profile.role] : [])
   const visibleItems = NAV_ITEMS.filter(
@@ -159,6 +168,16 @@ export default function AppShell() {
           </svg>
           Sign out
         </button>
+
+        {config && (
+          <div
+            className="mt-3 pt-3 border-t border-border font-mono text-[10px]
+                       text-text-secondary/70 truncate"
+            title={`Served by ${config.id} · API v${config.version}`}
+          >
+            {config.id} · v{config.version}
+          </div>
+        )}
       </div>
     </aside>
   )

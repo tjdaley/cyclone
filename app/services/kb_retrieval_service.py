@@ -21,6 +21,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.db.models.kb_article import KbArticleInDB
 from db.repositories.kb_article import KbArticleRepository
 from db_handler import DatabaseManager
 from services.llm_service import llm_service
@@ -75,7 +76,7 @@ def _strip_markdown_fences(text: str) -> str:
     return stripped.strip()
 
 
-def _build_kb_block(articles) -> str:
+def _build_kb_block(articles: list[KbArticleInDB]) -> str:
     """Concatenate active KB articles into a single retrieval-prompt block."""
     if not articles:
         return "(no KB articles configured)"
@@ -117,7 +118,7 @@ class KbRetrievalService:
         ) % (message_text or "(empty)", issues_block, kb_block)
 
         try:
-            response = llm_service.complete_fast(_RETRIEVAL_SYSTEM, user_msg)
+            response = llm_service.complete(_RETRIEVAL_SYSTEM, user_msg, profile="select_kb_articles")
         except Exception as e:  # noqa: BLE001 — never let an LLM error break the pipeline
             LOGGER.error("kb_retrieval: LLM call failed err=%s", str(e))
             return KbRetrievalResult(
@@ -138,8 +139,8 @@ class KbRetrievalService:
 
         return KbRetrievalResult(
             answerable=bool(obj.get("answerable")),
-            fragments=[str(f) for f in (obj.get("fragments") or [])],
-            unanswerable_issues=[str(i) for i in (obj.get("unanswerable_issues") or [])],
+            fragments=[str(f) for f in (obj.get("fragments") or [])],  # type: ignore[no-any-return]
+            unanswerable_issues=[str(i) for i in (obj.get("unanswerable_issues") or [])],  # type: ignore[no-any-return]
             notes=obj.get("notes"),
         )
 

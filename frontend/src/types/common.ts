@@ -1,4 +1,16 @@
 /**
+ * Public configuration served by GET /api/config (unauthenticated).
+ * `id` identifies which server instance answered the request.
+ */
+export interface AppConfig {
+  id: string
+  firm_name: string
+  version: string
+  stripe_publishable_key: string
+  time_increment_options: number[]
+}
+
+/**
  * Shared name structure used by clients and staff.
  * Mirrors backend FullName from db/models/staff.py.
  */

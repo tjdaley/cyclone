@@ -23,12 +23,13 @@ def health_check() -> MessageResponse:
 
 
 @router.get("/api/config")
-def public_config() -> dict:
+def public_config() -> dict[str, str | list[float]]:
     """
     Return public configuration values safe to expose to the frontend.
 
     The Stripe publishable key is fetched here rather than baked into the
-    frontend build so it can be rotated without a redeploy.
+    frontend build so it can be rotated without a redeploy. ``id`` identifies
+    which server instance answered, so the UI can display it.
 
     :return: Dict of safe-to-expose config values.
     :rtype: dict
@@ -38,4 +39,5 @@ def public_config() -> dict:
         "firm_name": settings.firm_name,
         "time_increment_options": settings.time_increment_options,
         "version": settings.version,
+        "id": settings.id,
     }

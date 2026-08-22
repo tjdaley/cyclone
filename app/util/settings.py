@@ -6,9 +6,13 @@ Rf. https://docs.pydantic.dev/latest/concepts/pydantic_settings/
 from typing import Optional
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     # Version for pinging the API
     version: str = "2026.04.05"  # Version of the application
+    # Deployment identity — which server instance answered a request. Surfaced
+    # in the UI, Telegram messages, etc. e.g. "DEV", "ec2-54-84-177-70".
+    id: str = "local"
     host_url: str = "http://localhost:8000"
     is_development: bool = False
     firm_name: str = "Your Law Firm - Override in .env"
@@ -36,34 +40,29 @@ class Settings(BaseSettings):
     log_format: str = "%(asctime)s - %(name)-15s - %(levelname)-8s - %(message)s"
     log_level: str = "WARNING"  # Default log level for API
 
-    # AI Settings
-    llm_vendor: str = "gemini"  # Options: 'gemini', 'openai', 'anthropic', 'groq'
-    llm_fast_vendor: str = "gemini"  # Vendor for fast models
+    # ── AI / LLM ──────────────────────────────────────────────────────────
+    # Global sampling defaults. Any candidate in a profile may override them.
     llm_temperature: float = 0.1
     llm_top_p: float = 0.1
+    llm_max_tokens: int = 16384
 
-    # LLM settings
+    # Task-named profiles live in a JSON catalog, not in .env — see
+    # util/llm_profiles.py. Relative paths resolve against the app package.
+    llm_profiles_file: str = "config/llm_profiles.json"
+
+    # Vendor credentials — one block per vendor, independent of the profiles
+    # that reference it.
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3-flash-preview"
-    gemini_fast_model: str = "gemini-2.0-flash"
 
     openai_api_key: str = ""
-    openai_model: str = ""
-    openai_fast_model: str = ""
 
     anthropic_api_key: str = ""
-    anthropic_model: str = ""
-    anthropic_fast_model: str = ""
 
     groq_api_key: str = ""
-    groq_model: str = "groq/compound"
-    groq_fast_model: str = "groq/fast"
-    groq_base_url: str = "https://api.groq.ai/v1/"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
 
     deepseek_api_key: str = ""
-    deepseek_model: str = "deepseek-reasoner"
-    deepseek_fast_model: str = "deepseek-reasoner-fast"
-    deepseek_base_url: str = "https://api.deepseekr.com/v1/"
+    deepseek_base_url: str = "https://api.deepseek.com"
 
     # Client intake settings
     referral_types: list[str] = ["attorney", "former client", "search", "ai", "other"]
@@ -109,6 +108,23 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         extra = "forbid"  # Pydantic will throw an error if unexpected env vars are present
+
+    def llm_api_key(self, vendor: str) -> str:
+        """
+        Return the configured API key for a vendor ("" when unconfigured).
+
+        :param vendor: Vendor id as used in an LLMCandidate.
+        :type vendor: str
+        :return: API key, or empty string if the vendor is unknown/unconfigured.
+        :rtype: str
+        """
+        return {
+            "gemini": self.gemini_api_key,
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "groq": self.groq_api_key,
+            "deepseek": self.deepseek_api_key,
+        }.get(vendor, "")
 
     def getattr(self, item: str, default: Optional[str] = None):
         """Get an attribute from the settings"""
