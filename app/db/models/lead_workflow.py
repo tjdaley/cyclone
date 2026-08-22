@@ -23,6 +23,7 @@ class LeadStatus(str, Enum):
     contacted = "contacted"
     qualified = "qualified"
     disqualified = "disqualified"
+    conflicted = "conflicted"
     consultation_scheduled = "consultation_scheduled"
     consulted = "consulted"
     engaged = "engaged"
