@@ -21,7 +21,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from app.db.models.kb_article import KbArticleInDB
+from db.models.kb_article import KbArticleInDB
 from db.repositories.kb_article import KbArticleRepository
 from db_handler import DatabaseManager
 from services.llm_service import llm_service

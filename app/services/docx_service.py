@@ -18,16 +18,39 @@ def _slug_to_title(slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
+_NUMBERED_ITEM = re.compile(r"^\s*(\d+)\.\s+(.*)")
+_BULLET_ITEM = re.compile(r"^\s*[-*]\s+(.*)")
+
+_BLOCK_SPACING_PT = 10  # Vertical space between paragraphs (none within one)
+
+
+def _is_list_item(line: str) -> bool:
+    """
+    :param line: A raw line of markdown.
+    :type line: str
+    :return: True if the line opens a numbered or bulleted list item.
+    :rtype: bool
+    """
+    return bool(_NUMBERED_ITEM.match(line) or _BULLET_ITEM.match(line))
+
+
 def _add_markdown_text(doc, text: str) -> None:
     """
     Parse markdown text and add it to the document as formatted paragraphs.
 
-    Supports:
-    - **bold** and *italic*
-    - Numbered lists (1. 2. 3.)
-    - Bulleted lists (- or *)
-    - Blank lines as paragraph breaks
+    Line handling follows standard markdown block rules, which is what lets a
+    witness block stay tight while blocks stay separated:
+
+    - A single newline is a soft break *inside* the paragraph — the lines are
+      single-spaced against each other (Word ``<w:br/>``, not a new ``<w:p>``).
+    - A blank line ends the paragraph; the next one starts after
+      ``_BLOCK_SPACING_PT`` of space.
+
+    Also supports **bold**/*italic* and numbered/bulleted lists. A list item
+    always begins its own paragraph, so a list directly under a line of text
+    is not swallowed into that paragraph.
     """
+    from docx.enum.text import WD_BREAK  # noqa: PLC0415
     from docx.shared import Pt  # noqa: PLC0415
 
     lines = text.split("\n")
@@ -36,31 +59,39 @@ def _add_markdown_text(doc, text: str) -> None:
         line = lines[i]
         stripped = line.strip()
 
-        # Skip blank lines (they act as paragraph separators)
+        # Blank lines separate paragraphs; the spacing comes from space_after.
         if not stripped:
             i += 1
             continue
 
-        # Numbered list item: "1. text" or "  1. text"
-        num_match = re.match(r"^\s*(\d+)\.\s+(.*)", line)
+        num_match = _NUMBERED_ITEM.match(line)
         if num_match:
             p = doc.add_paragraph(style="List Number")
             _add_inline_formatting(p, num_match.group(2))
             i += 1
             continue
 
-        # Bulleted list item: "- text" or "* text"
-        bullet_match = re.match(r"^\s*[-*]\s+(.*)", line)
+        bullet_match = _BULLET_ITEM.match(line)
         if bullet_match:
             p = doc.add_paragraph(style="List Bullet")
             _add_inline_formatting(p, bullet_match.group(1))
             i += 1
             continue
 
-        # Regular paragraph — one line = one paragraph to preserve hard line breaks
-        p = doc.add_paragraph()
-        _add_inline_formatting(p, stripped)
+        # Gather every following line up to the next blank line or list item —
+        # they belong to this same paragraph, separated by soft line breaks.
+        block = [stripped]
         i += 1
+        while i < len(lines) and lines[i].strip() and not _is_list_item(lines[i]):
+            block.append(lines[i].strip())
+            i += 1
+
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(_BLOCK_SPACING_PT)
+        for position, part in enumerate(block):
+            if position:
+                p.add_run().add_break(WD_BREAK.LINE)
+            _add_inline_formatting(p, part)
 
 
 def _add_inline_formatting(paragraph, text: str) -> None:

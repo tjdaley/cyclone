@@ -24,6 +24,7 @@ from db.models.pleading import (
     MatterPleading,
     OpposingCounsel,
 )
+from db.repositories.client import ClientRepository
 from db.repositories.matter import MatterRepository
 from db.repositories.pleading import (
     MatterChildRepository,
@@ -49,6 +50,7 @@ from schemas.pleading import (
 from services.llm_service import llm_service
 from services.storage_service import StorageService
 from util.loggerfactory import LoggerFactory
+from util.settings import settings
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -59,10 +61,75 @@ def _strip_markdown_fences(text: str) -> str:
     return stripped.strip()
 
 
+def _same_child(name_a: Any, dob_a: Any, name_b: Any, dob_b: Any) -> bool:
+    """
+    Decide whether two child records describe the same child.
+
+    A later pleading restates the children already pleaded, so this is what
+    keeps a counterpetition from re-adding them. Date of birth alone is not
+    enough (twins) and the name alone is not enough (a parent and child sharing
+    a name), so both must agree. Names are compared loosely — a pleading may
+    write "Selah L. Salmons" where the first one wrote "Selah Lynndon Salmons".
+
+    This is deliberately enforced here rather than by a unique index on
+    matter_children: siblings can legitimately share a first name and birthday
+    (half-siblings from different relationships, reused family names), and an
+    attorney can resolve that in the review form. A database constraint would
+    reject the commit outright.
+
+    :param name_a: FullName of the first child.
+    :param dob_a: Date of birth of the first child, or None.
+    :param name_b: FullName of the second child.
+    :param dob_b: Date of birth of the second child, or None.
+    :return: True when both records appear to be the same child.
+    :rtype: bool
+    """
+    first_a = (getattr(name_a, "first_name", "") or "").strip().lower()
+    last_a = (getattr(name_a, "last_name", "") or "").strip().lower()
+    first_b = (getattr(name_b, "first_name", "") or "").strip().lower()
+    last_b = (getattr(name_b, "last_name", "") or "").strip().lower()
+
+    if not first_a or not last_a or first_b != first_a or last_b != last_a:
+        return False
+    # Both dates known: they must agree. If either is missing, the matching
+    # first and last name on the same matter is taken as sufficient.
+    if dob_a and dob_b:
+        return dob_a == dob_b
+    return True
+
+
+def _same_party(a: str, b: str) -> bool:
+    """
+    Loose name comparison for "is this the party we represent?".
+
+    Case- and punctuation-insensitive, and tolerant of a partial name: the
+    document may say "Kaci Salmons" where the matter says
+    "Kaci Lynndon Salmons". Every word of the shorter name must appear in
+    the longer one.
+
+    :param a: First party name.
+    :type a: str
+    :param b: Second party name.
+    :type b: str
+    :return: True when the names plausibly refer to the same party.
+    :rtype: bool
+    """
+    words_a = set(re.findall(r"[a-z]+", a.lower()))
+    words_b = set(re.findall(r"[a-z]+", b.lower()))
+    if not words_a or not words_b:
+        return False
+    shorter, longer = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    return shorter <= longer
+
+
 # ── LLM Prompts ───────────────────────────────────────────────────────────────
 
 _METADATA_SYSTEM = """\
 You are a legal expert analyzing a pleading filed in a Texas family law case.
+
+The user message begins with our_client and our_firm — the party WE represent and the
+firm doing the analyzing. "Opposing" always means adverse to our_client, never adverse
+to whoever filed the document.
 
 Extract case metadata and return ONLY a valid JSON object with these fields:
 
@@ -85,7 +152,13 @@ Extract case metadata and return ONLY a valid JSON object with these fields:
   - name: {first_name, last_name, middle_name, courtesy_title, suffix}
   - date_of_birth: "YYYY-MM-DD" or null
   - sex: "male" | "female" | "other" or null
-- opposing_counsel: array of objects (from the signature block, empty if not present):
+- opposing_counsel: array of objects. Include EVERY attorney of record who represents a party
+  ADVERSE to our_client. NEVER include our_client's own attorney, even when the document names
+  them: a certificate of service, or a "service may be had by serving X" paragraph, names the
+  attorney being SERVED, who is usually OUR attorney rather than opposing counsel. The attorney
+  in the signature block is opposing counsel whenever the filing party is adverse to our_client.
+  Return an empty array if the only attorneys named represent our_client. Each object has:
+  - represents: string — the party this attorney represents, exactly as named in the document
   - name: {first_name, last_name, middle_name, courtesy_title, suffix}
   - firm_name: string or null
   - street_address: string or null
@@ -127,13 +200,31 @@ class PleadingService:
 
     # ── LLM calls ─────────────────────────────────────────────────────────
 
-    def classify_and_extract(self, raw_text: str) -> dict[str, Any]:
-        """First LLM call: extract pleading metadata, case info, children, OC."""
+    def classify_and_extract(self, raw_text: str, client_name: str, firm_name: str) -> dict[str, Any]:
+        """
+        First LLM call: extract pleading metadata, case info, children, OC.
+
+        ``client_name`` is required, not optional: without it the model cannot
+        tell which attorney is *opposing*. A pleading filed against us names our
+        own attorney in its service paragraph, and with no client context the
+        model reasonably reads that attorney as the opposing one.
+
+        :param raw_text: Full extracted text of the pleading.
+        :type raw_text: str
+        :param client_name: The party we represent on this matter.
+        :type client_name: str
+        :param firm_name: Our firm's name.
+        :type firm_name: str
+        :return: Parsed metadata dict.
+        :rtype: dict[str, Any]
+        :raises ValueError: If the LLM response is not valid JSON.
+        """
         # Send first ~12000 chars — metadata + signature block live at top and bottom
         # so we also append the tail
         head = raw_text[:10000]
         tail = raw_text[-4000:] if len(raw_text) > 10000 else ""
-        prompt_text = f"{head}\n\n[END OF DOCUMENT OR TAIL]\n{tail}" if tail else head
+        body = f"{head}\n\n[END OF DOCUMENT OR TAIL]\n{tail}" if tail else head
+        prompt_text = f"our_client: {client_name}\nour_firm: {firm_name}\n\npleading_text:\n{body}"
 
         response = llm_service.complete(_METADATA_SYSTEM, prompt_text, profile="analyze_pleading")
         try:
@@ -175,9 +266,17 @@ class PleadingService:
         if matter is None:
             raise ValueError("Matter not found: id=%s" % matter_id)
 
+        # Our client's name tells the LLM which side is "opposing" — see
+        # classify_and_extract. Without it, our own attorney gets extracted.
+        client_repo = ClientRepository(manager)
+        client = client_repo.select_one(condition={"id": matter.client_id})
+        if client is None:
+            raise ValueError("Client not found: id=%s" % matter.client_id)
+        client_name = str(client.name)
+
         # Step 1: Metadata + case info + children + OC
         try:
-            meta = self.classify_and_extract(raw_text)
+            meta = self.classify_and_extract(raw_text, client_name, settings.firm_name)
         except ValueError as e:
             raise ValueError(str(e)) from e
 
@@ -202,20 +301,39 @@ class PleadingService:
                 if current_val != proposed:
                     matter_field_updates[field] = FieldDiff(current=current_val, proposed=proposed)
 
-        # Children previews
+        # Children previews — matched against the children already on the matter
+        # so a later pleading restating them does not create duplicates.
+        child_repo = MatterChildRepository(manager)
+        existing_children = child_repo.get_by_matter(matter_id)
+
         new_children: list[ChildPreview] = []
         children_raw: list[dict[str, Any]] = meta.get("children") or []
         for child_data in children_raw:
             try:
                 # Coerce LLM date/enum strings that might be malformed — bad values
                 # become None rather than failing validation and dropping the child.
-                new_children.append(ChildPreview.model_validate({
+                preview_child = ChildPreview.model_validate({
                     **child_data,
                     "date_of_birth": self._parse_date(child_data.get("date_of_birth")),
                     "sex": self._parse_sex(child_data.get("sex")),
-                }))
+                })
             except Exception as e:
                 warnings.append("Could not parse a child entry: %s" % str(e))
+                continue
+
+            match = next(
+                (
+                    existing for existing in existing_children
+                    if _same_child(
+                        preview_child.name, preview_child.date_of_birth,
+                        existing.name, existing.date_of_birth,
+                    )
+                ),
+                None,
+            )
+            if match is not None:
+                preview_child.existing_id = match.id
+            new_children.append(preview_child)
 
         # Opposing counsel — match by bar number
         oc_repo = OpposingCounselRepository(manager)
@@ -228,6 +346,16 @@ class PleadingService:
                 preview = OCPreview.model_validate(oc_data)
             except Exception as e:
                 warnings.append("Could not parse opposing counsel entry: %s" % str(e))
+                continue
+
+            # Deterministic backstop for the failure the prompt guards against:
+            # an attorney the LLM says represents our own client is not opposing
+            # counsel, whatever the document's own perspective calls them.
+            if preview.represents and _same_party(preview.represents, client_name):
+                warnings.append(
+                    "Ignored an attorney extracted as opposing counsel who represents our client (%s)"
+                    % preview.represents
+                )
                 continue
             bar_state = preview.bar_state
             bar_number = preview.bar_number
@@ -341,9 +469,41 @@ class PleadingService:
                 LOGGER.error("pleading_service.commit: PDF upload failed: %s", str(e))
                 # Non-fatal — the row exists, just without the stored PDF
 
-        # 4. Create children
+        # 4. Create or update children. The matter is re-read here rather than
+        # trusting the preview: a preview can be stale, and the same pleading
+        # can be committed twice. Only genuinely new children are inserted.
         child_repo = MatterChildRepository(manager)
+        existing_children = child_repo.get_by_matter(matter_id)
+        children_created = 0
         for child_entry in request.children:
+            match_id = child_entry.existing_id
+            if match_id is None:
+                match = next(
+                    (
+                        existing for existing in existing_children
+                        if _same_child(
+                            child_entry.name, child_entry.date_of_birth,
+                            existing.name, existing.date_of_birth,
+                        )
+                    ),
+                    None,
+                )
+                match_id = match.id if match else None
+
+            fields = {
+                "name": child_entry.name.model_dump(),
+                "date_of_birth": child_entry.date_of_birth,
+                "sex": child_entry.sex,
+                "needs_support_after_majority": child_entry.needs_support_after_majority,
+            }
+            if match_id is not None:
+                child_repo.update(match_id, fields)
+                LOGGER.info(
+                    "pleading_service.commit: child already on matter %s — updated id=%s instead of inserting",
+                    matter_id, match_id,
+                )
+                continue
+
             child = MatterChild(
                 matter_id=matter_id,
                 name=child_entry.name,
@@ -351,8 +511,11 @@ class PleadingService:
                 sex=child_entry.sex,
                 needs_support_after_majority=child_entry.needs_support_after_majority,
             )
-            child_repo.insert(child.model_dump())
-        LOGGER.info("pleading_service.commit: created %s children", len(request.children))
+            created_child = child_repo.insert(child.model_dump())
+            existing_children.append(created_child)  # Guards duplicates within one payload
+            children_created += 1
+        LOGGER.info("pleading_service.commit: created %s children (%s submitted)",
+                    children_created, len(request.children))
 
         # 5. Create/update opposing counsel and link to matter
         oc_repo = OpposingCounselRepository(manager)
@@ -414,7 +577,7 @@ class PleadingService:
             claim_repo.insert(claim.model_dump())
         LOGGER.info("pleading_service.commit: created %s claims", len(request.claims))
 
-        return pleading_record, len(request.children), oc_count, len(request.claims)
+        return pleading_record, children_created, oc_count, len(request.claims)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

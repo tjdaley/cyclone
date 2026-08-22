@@ -10,6 +10,7 @@ const STATUS_LABELS: Record<LeadStatus, string> = {
   contacted: 'Contacted',
   qualified: 'Qualified',
   disqualified: 'Disqualified',
+  conflicted: 'Conflicted',
   consultation_scheduled: 'Consult scheduled',
   consulted: 'Consulted',
   engaged: 'Engaged',
@@ -23,6 +24,7 @@ const STATUS_COLOR: Record<LeadStatus, string> = {
   contacted: 'bg-indigo-100 text-indigo-800',
   qualified: 'bg-teal-100 text-teal-800',
   disqualified: 'bg-gray-100 text-gray-600',
+  conflicted: 'bg-red-100 text-red-800',
   consultation_scheduled: 'bg-purple-100 text-purple-800',
   consulted: 'bg-purple-200 text-purple-900',
   engaged: 'bg-green-100 text-green-800',
@@ -30,7 +32,8 @@ const STATUS_COLOR: Record<LeadStatus, string> = {
   nurture: 'bg-yellow-100 text-yellow-800',
 }
 
-const CLOSED_STATUSES: LeadStatus[] = ['engaged', 'lost', 'disqualified']
+// Terminal dispositions — these drop out of the "Open" filter and cannot be claimed.
+const CLOSED_STATUSES: LeadStatus[] = ['engaged', 'lost', 'disqualified', 'conflicted']
 
 function isClosed(s: LeadStatus) {
   return CLOSED_STATUSES.includes(s)

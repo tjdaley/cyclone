@@ -146,6 +146,11 @@ class FieldDiff(BaseModel):
 
 class ChildPreview(BaseModel):
     """A child extracted by the LLM, not yet committed."""
+    existing_id: Optional[int] = Field(
+        default=None,
+        description="Set when this child is already on the matter (matched by name + date of "
+                    "birth). The commit updates that row instead of inserting a second one.",
+    )
     name: FullName
     date_of_birth: Optional[date] = None
     sex: Optional[ChildSex] = None
@@ -154,6 +159,12 @@ class ChildPreview(BaseModel):
 
 class OCPreview(BaseModel):
     """An opposing counsel extracted by the LLM."""
+    represents: Optional[str] = Field(
+        default=None,
+        description="Party this attorney represents, as named in the pleading. Review-only — "
+                    "it is how the attorney confirms the right lawyer was picked up, and is "
+                    "not persisted on the opposing_counsel row.",
+    )
     name: FullName
     firm_name: Optional[str] = None
     street_address: Optional[str] = None
@@ -249,7 +260,11 @@ class OCCommitEntry(BaseModel):
 
 
 class ChildCommitEntry(BaseModel):
-    """A child to create."""
+    """A child to create, or to update when ``existing_id`` is set."""
+    existing_id: Optional[int] = Field(
+        default=None,
+        description="Existing matter_children.id this entry refers to; None creates a new row",
+    )
     name: FullName
     date_of_birth: date
     sex: ChildSex

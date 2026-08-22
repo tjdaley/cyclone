@@ -72,6 +72,8 @@ export interface FieldDiff {
 }
 
 export interface ChildPreview {
+  /** Set when this child is already on the matter; the commit updates that row. */
+  existing_id: number | null
   name: FullName
   date_of_birth: string | null
   sex: ChildSex | null
@@ -79,6 +81,8 @@ export interface ChildPreview {
 }
 
 export interface OCPreview {
+  /** Party this attorney represents, per the pleading. Review-only — not persisted. */
+  represents: string | null
   name: FullName
   firm_name: string | null
   street_address: string | null
@@ -133,6 +137,8 @@ export interface PleadingIngestPreview {
 // ── Commit payload ───────────────────────────────────────────────────────────
 
 export interface ChildCommitEntry {
+  /** Existing matter_children.id, or null to create a new row. */
+  existing_id: number | null
   name: FullName
   date_of_birth: string
   sex: ChildSex
@@ -141,6 +147,8 @@ export interface ChildCommitEntry {
 
 export interface OCCommitEntry {
   existing_id: number | null
+  /** Carried through the review form for display only; the backend ignores it. */
+  represents?: string | null
   name: FullName
   firm_name: string | null
   street_address: string | null

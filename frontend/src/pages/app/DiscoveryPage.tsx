@@ -1,4 +1,7 @@
 import { useEffect, useState, useRef, DragEvent } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
 import {
   getMatters, getDiscoveryDocuments, getDiscoveryItems, uploadDiscoveryPDF,
   updateDiscoveryItem, getStandardPrivileges, getStandardObjections,
@@ -392,11 +395,34 @@ export default function DiscoveryPage() {
                           </div>
                         </div>
 
-                        {/* Response */}
+                        {/* Response — editor left, live preview right. The preview
+                            uses the same line rules as the Word export: one Enter
+                            keeps lines tight, a blank line starts a new paragraph. */}
                         <div>
-                          <label className="label mb-1 block">Attorney response (markdown)</label>
-                          <textarea className="input w-full h-36 text-sm resize-y" placeholder="Draft the formal response here..."
-                            value={response} onChange={e => patchDraft(item.id, { response: e.target.value })} />
+                          <div className="flex items-baseline justify-between mb-1">
+                            <label className="label">Attorney response (markdown)</label>
+                            <span className="text-xs text-text-secondary">
+                              Enter = new line · blank line = new paragraph
+                            </span>
+                          </div>
+                          <div className="grid md:grid-cols-2 gap-3">
+                            <textarea className="input w-full h-36 text-sm resize-y font-mono"
+                              placeholder="Draft the formal response here..."
+                              value={response} onChange={e => patchDraft(item.id, { response: e.target.value })} />
+                            <div className="rounded-md border border-border bg-off-white px-3 py-2 h-36 overflow-y-auto">
+                              {response.trim() ? (
+                                <div className="prose prose-sm max-w-none prose-p:my-0 prose-p:mb-3 last:prose-p:mb-0">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+                                    {response}
+                                  </ReactMarkdown>
+                                </div>
+                              ) : (
+                                <p className="text-sm text-text-secondary italic">
+                                  Preview of the response as it will appear in the Word export.
+                                </p>
+                              )}
+                            </div>
+                          </div>
                         </div>
 
                         {/* Save bar */}

@@ -87,6 +87,7 @@ export default function PleadingsPage() {
     setEdAcceptedFields(accepted)
 
     setEdChildren(preview.new_children.map(c => ({
+      existing_id: c.existing_id,
       name: c.name,
       date_of_birth: c.date_of_birth ?? '',
       sex: (c.sex ?? 'other') as ChildSex,
@@ -96,6 +97,7 @@ export default function PleadingsPage() {
     const oc: OCCommitEntry[] = [
       ...preview.opposing_counsel_matches.map(m => ({
         existing_id: m.existing_id,
+        represents: m.proposed.represents,
         name: m.proposed.name,
         firm_name: m.proposed.firm_name ?? m.existing.firm_name,
         street_address: m.proposed.street_address ?? m.existing.street_address,
@@ -113,8 +115,13 @@ export default function PleadingsPage() {
         opposing_party_id: null,
         role: 'lead' as CounselRole,
       })),
-      ...preview.new_opposing_counsel.filter(o => o.bar_state && o.bar_number).map(o => ({
+      // Show every extracted attorney, even one with no bar number. The bar
+      // pair is required to save (it is the dedup key), so an entry missing it
+      // is flagged in the form for the attorney to complete — silently dropping
+      // it here made extraction look like it had failed.
+      ...preview.new_opposing_counsel.map(o => ({
         existing_id: null,
+        represents: o.represents,
         name: o.name,
         firm_name: o.firm_name,
         street_address: o.street_address,
@@ -126,8 +133,8 @@ export default function PleadingsPage() {
         cell_phone: o.cell_phone,
         telephone: o.telephone,
         fax: o.fax,
-        bar_state: o.bar_state!,
-        bar_number: o.bar_number!,
+        bar_state: o.bar_state ?? '',
+        bar_number: o.bar_number ?? '',
         email_ccs: o.email_ccs,
         opposing_party_id: null,
         role: 'lead' as CounselRole,
@@ -171,6 +178,7 @@ export default function PleadingsPage() {
 
   function addChild() {
     setEdChildren(prev => [...prev, {
+      existing_id: null,
       name: blankName(), date_of_birth: '', sex: 'other', needs_support_after_majority: false,
     }])
   }
@@ -441,6 +449,11 @@ export default function PleadingsPage() {
             <div className="space-y-3">
               {edChildren.map((c, idx) => (
                 <div key={idx} className="border border-border rounded p-3">
+                  {c.existing_id && (
+                    <p className="text-xs text-green-700 mb-2">
+                      Already on this matter — will be updated, not added again
+                    </p>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                     <input className="input text-sm" placeholder="First name" value={c.name.first_name}
                       onChange={e => updateChild(idx, { name: { ...c.name, first_name: e.target.value } })} />
@@ -481,6 +494,18 @@ export default function PleadingsPage() {
                 <div key={idx} className="border border-border rounded p-3">
                   {o.existing_id && (
                     <p className="text-xs text-green-700 mb-2">Matched existing counsel (bar #{o.bar_state}:{o.bar_number})</p>
+                  )}
+                  {o.represents && (
+                    <p className="text-xs text-text-secondary mb-2">
+                      Represents <span className="font-medium text-text-primary">{o.represents}</span> —
+                      confirm this is not our client
+                    </p>
+                  )}
+                  {(!o.bar_state || !o.bar_number) && (
+                    <p className="text-xs text-amber-700 mb-2">
+                      Bar state and number are required to save this attorney — add them below or
+                      this entry will be discarded on commit.
+                    </p>
                   )}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                     <input className="input text-sm" placeholder="First name" value={o.name.first_name}
