@@ -146,3 +146,26 @@ export interface AddActionPayload {
   notes?: string | null
   metadata?: Record<string, unknown>
 }
+
+// ── Conversion: lead → client + matter ───────────────────────────────────────
+
+/**
+ * Body for POST /api/v1/leads/{session_uuid}/promote.
+ *
+ * `intake` is the same payload the matters-page pleading drop sends. Omit
+ * `case` inside it to open a file with no pleading in hand.
+ */
+export interface LeadPromotePayload {
+  intake: import('./intake').MatterIntakeCommitRequest
+}
+
+export interface LeadPromoteResponse {
+  lead: LeadDetail
+  result: import('./intake').MatterIntakeCommitResponse
+}
+
+/** Body for POST /api/v1/leads/{session_uuid}/link-client — creates nothing. */
+export interface LeadLinkClientPayload {
+  client_id: number
+  matter_id?: number | null
+}

@@ -63,6 +63,36 @@ def _strip_markdown_fences(text: str) -> str:
     return stripped.strip()
 
 
+# How much of a document goes to a metadata extraction call. Generous on
+# purpose: a petition with a standing order attached runs well past ten pages,
+# and the signature block — the only place counsel's bar number appears — sits
+# at the end of the pleading proper, not at the end of the file. A narrow
+# window drops it into the gap between head and tail. This is roughly 12k
+# tokens, which every model in the chains handles comfortably.
+_METADATA_HEAD_CHARS = 40_000
+_METADATA_TAIL_CHARS = 10_000
+
+
+def clip_for_metadata(raw_text: str) -> str:
+    """
+    Trim a document to what a metadata extraction call needs.
+
+    Keeps the front (caption, parties, case style) and the back (signature
+    block, certificate of service), dropping the middle only when the document
+    is long enough to need it.
+
+    :param raw_text: Full extracted text.
+    :type raw_text: str
+    :return: The text to send, with a marker where the middle was removed.
+    :rtype: str
+    """
+    if len(raw_text) <= _METADATA_HEAD_CHARS + _METADATA_TAIL_CHARS:
+        return raw_text
+    head = raw_text[:_METADATA_HEAD_CHARS]
+    tail = raw_text[-_METADATA_TAIL_CHARS:]
+    return f"{head}\n\n[MIDDLE OF DOCUMENT OMITTED]\n{tail}"
+
+
 def _same_child(name_a: Any, dob_a: Any, name_b: Any, dob_b: Any) -> bool:
     """
     Decide whether two child records describe the same child.
@@ -227,11 +257,7 @@ class PleadingService:
         :rtype: dict[str, Any]
         :raises ValueError: If the LLM response is not valid JSON.
         """
-        # Send first ~12000 chars — metadata + signature block live at top and bottom
-        # so we also append the tail
-        head = raw_text[:10000]
-        tail = raw_text[-4000:] if len(raw_text) > 10000 else ""
-        body = f"{head}\n\n[END OF DOCUMENT OR TAIL]\n{tail}" if tail else head
+        body = clip_for_metadata(raw_text)
         prompt_text = f"our_client: {client_name}\nour_firm: {firm_name}\n\npleading_text:\n{body}"
 
         response = llm_service.complete(_METADATA_SYSTEM, prompt_text, profile="analyze_pleading")

@@ -10,9 +10,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from middleware.auth_middleware import AuthMiddleware
-from routers import admin, attorney_lead_responder, auth_flow, billing, clients, discovery, health, kb, lead_agent_run, leads, matters, pleading, staff
+from routers import admin, attorney_lead_responder, auth_flow, billing, clients, discovery, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
+from util.schema_check import check_schema
 from util.settings import settings
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -33,6 +34,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     for problem in llm_service.validate_profiles():
         LOGGER.warning("LLM profile configuration: %s", problem)
+
+    # A model field with no column is a 500 waiting for the right request, so
+    # it belongs in the deploy log rather than in a stack trace during real
+    # work. ERROR, not warning: these requests cannot succeed.
+    for problem in check_schema():
+        LOGGER.error("Database schema: %s", problem)
     yield
     # Shutdown logic (connection pool cleanup, etc.) goes here if needed.
 
@@ -76,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_flow.router)    # /api/v1/auth/me, /api/v1/auth/correlate-staff
     app.include_router(staff.router)        # /api/v1/staff
     app.include_router(clients.router)      # /api/v1/clients
+    app.include_router(intake.router)       # /api/v1/matters/intake (before matters — more specific path)
     app.include_router(matters.router)      # /api/v1/matters
     app.include_router(billing.router)      # /api/v1/billing
     app.include_router(discovery.router)    # /api/v1/discovery

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from db.models.lead_action import LeadActionDirection, LeadActionType, LeadActorType
 from db.models.lead_workflow import DismissalReason, LeadPriority, LeadStatus
+from schemas.intake import MatterIntakeCommitRequest, MatterIntakeCommitResponse
 
 
 # ── Lead list / detail ────────────────────────────────────────────────────
@@ -35,6 +36,10 @@ class LeadListItem(BaseModel):
     priority: LeadPriority = LeadPriority.normal
     next_action_at: Optional[datetime] = None
     has_workflow_row: bool = Field(..., description="False until cyclone has interacted with this lead")
+    converted_to_client_id: Optional[int] = Field(
+        default=None,
+        description="Client this lead became, if it has already been promoted",
+    )
 
 
 class LeadDetail(BaseModel):
@@ -123,6 +128,39 @@ class AddActionRequest(BaseModel):
     body: Optional[str] = None
     notes: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Conversion: lead → client + matter ────────────────────────────────────
+
+class LeadPromoteRequest(BaseModel):
+    """
+    Body for POST /api/v1/leads/{session_uuid}/promote.
+
+    The lead has already cleared the conflict check, so promotion is the
+    ordinary way a client is born. ``intake`` is the same payload the
+    matters-page pleading drop sends — with a pleading when one was uploaded
+    on the promote form, without one when the file is being opened from the
+    phone call alone.
+    """
+    intake: MatterIntakeCommitRequest
+
+
+class LeadPromoteResponse(BaseModel):
+    """The refreshed lead plus what promotion created."""
+    lead: LeadDetail
+    result: MatterIntakeCommitResponse
+
+
+class LeadLinkClientRequest(BaseModel):
+    """
+    Body for POST /api/v1/leads/{session_uuid}/link-client.
+
+    For the retroactive case: an emergency intake taken by phone, where the
+    client and matter were opened before anyone created the lead record.
+    Creates nothing — it points the lead at what already exists.
+    """
+    client_id: int = Field(..., description="Existing client this lead became")
+    matter_id: Optional[int] = Field(default=None, description="Matter opened for them, if known")
 
 
 # ── Admin: staff_slug_access ──────────────────────────────────────────────

@@ -16,6 +16,7 @@ from dependencies import get_db_manager, get_landing_pages_db
 from services.crm_agent_service import crm_agent_service
 from services.diff_explainer_service import diff_explainer_service
 from services.email_service import email_service
+from services.job_service import job_service
 from db.repositories.foreign_lead import ForeignLeadRepository
 from db.repositories.lead_agent_run import LeadAgentRunRepository
 from util.loggerfactory import LoggerFactory
@@ -84,6 +85,22 @@ def _run_diff_explainer() -> None:
             LOGGER.error("diff_explainer: failed run_id=%s err=%s", run.id, str(e))
 
 
+def _run_jobs() -> None:
+    """
+    Run queued background jobs — currently matter intake extraction.
+
+    Deliberately outside the ``crm:poller`` lock. That lock makes CRM polling
+    fleet-wide single-runner, which is right for scanning a shared mailbox but
+    wrong here: jobs are claimed individually, so every node should take work.
+    """
+    try:
+        done = job_service.run_pending(get_db_manager(), limit=3)
+        if done:
+            LOGGER.info("crm_worker: completed %s background job(s)", done)
+    except Exception as e:  # noqa: BLE001 — a bad job must not stop the loop
+        LOGGER.error("crm_worker: job run failed err=%s", str(e))
+
+
 def _tick() -> None:
     # TTL covers a few cycles so the holder keeps the lock across one tick's
     # work, but frees within minutes if the node dies (failover).
@@ -97,14 +114,31 @@ def _tick() -> None:
 
 
 def main() -> None:
-    interval = settings.lead_poll_interval_seconds
-    LOGGER.info("CRM worker started | interval=%ss redis=%s", interval, settings.redis_url)
+    """
+    Two cadences in one loop.
+
+    Jobs are picked up every ``job_poll_interval_seconds`` because somebody is
+    watching a spinner while they wait. The CRM polls stay on their own, much
+    slower schedule — running them every few seconds would hammer the mailbox
+    and the landing-pages DB for no benefit.
+    """
+    job_interval = max(1, settings.job_poll_interval_seconds)
+    crm_interval = settings.lead_poll_interval_seconds
+    LOGGER.info(
+        "CRM worker started | jobs every %ss, CRM every %ss, redis=%s",
+        job_interval, crm_interval, settings.redis_url,
+    )
+    next_crm_run = 0.0
     while True:
-        try:
-            _tick()
-        except Exception as e:  # noqa: BLE001 — never let the loop die
-            LOGGER.error("crm_worker: tick failed err=%s", str(e))
-        time.sleep(interval)
+        _run_jobs()
+        now = time.monotonic()
+        if now >= next_crm_run:
+            next_crm_run = now + crm_interval
+            try:
+                _tick()
+            except Exception as e:  # noqa: BLE001 — never let the loop die
+                LOGGER.error("crm_worker: tick failed err=%s", str(e))
+        time.sleep(job_interval)
 
 
 if __name__ == "__main__":

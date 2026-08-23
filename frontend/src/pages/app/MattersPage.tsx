@@ -1,11 +1,14 @@
-import { useEffect, useState, FormEvent } from 'react'
+import { useEffect, useRef, useState, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import {
   getMatters, createMatter, updateMatter, getClients, getStaff,
-  getRateOverrides, setRateOverride, deleteRateOverride,
+  getRateOverrides, setRateOverride, deleteRateOverride, previewMatterIntake,
 } from '../../lib/api'
-import type { Matter, MatterCreatePayload, RateOverride, Client, Staff } from '../../types'
+import type {
+  Matter, MatterCreatePayload, RateOverride, Client, Staff, MatterIntakePreview,
+} from '../../types'
+import MatterIntakePanel from './MatterIntakePanel'
 
 const MATTER_TYPES = [
   'divorce', 'child_custody', 'modification', 'enforcement',
@@ -37,6 +40,39 @@ function sortMatters(a: Matter, b: Matter) {
 export default function MattersPage() {
   const { profile } = useAuth()
   const navigate = useNavigate()
+
+  // Matter intake from a dropped pleading
+  const [intakePreview, setIntakePreview] = useState<MatterIntakePreview | null>(null)
+  const [intakeBusy, setIntakeBusy]       = useState(false)
+  const [intakeError, setIntakeError]     = useState<string | null>(null)
+  const [intakeStatus, setIntakeStatus]   = useState('')
+  const [dragOver, setDragOver]           = useState(false)
+  const intakeInputRef = useRef<HTMLInputElement>(null)
+
+  async function handleIntakeFile(file: File) {
+    if (file.type !== 'application/pdf') {
+      setIntakeError('Only PDF files are accepted')
+      return
+    }
+    setIntakeBusy(true); setIntakeError(null); setIntakeStatus('Uploading…')
+    try {
+      // Extraction runs in the worker; this reports progress while it does.
+      const preview = await previewMatterIntake(file, (status, seconds) => {
+        setIntakeStatus(
+          status === 'queued' ? 'Queued for extraction…'
+          : status === 'running' ? `Reading the pleading… ${seconds}s`
+          : status === 'succeeded' ? 'Done'
+          : 'Extraction failed',
+        )
+      })
+      setIntakePreview(preview)
+    } catch (e) {
+      setIntakeError(e instanceof Error ? e.message : 'Could not read that pleading')
+    } finally {
+      setIntakeBusy(false); setIntakeStatus('')
+    }
+  }
+
   const [matters, setMatters]   = useState<Matter[]>([])
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState<string | null>(null)
@@ -232,6 +268,16 @@ export default function MattersPage() {
     return s ? `${s.name.first_name} ${s.name.last_name}` : `Staff #${staffId}`
   }
 
+  // Intake takes over the page: reviewing a case style has nothing to do with
+  // browsing the list, and the two side by side would be noise.
+  if (intakePreview) {
+    return (
+      <div className="px-6 py-8 max-w-5xl mx-auto">
+        <MatterIntakePanel preview={intakePreview} onCancel={() => setIntakePreview(null)} />
+      </div>
+    )
+  }
+
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
@@ -245,6 +291,39 @@ export default function MattersPage() {
           </button>
         )}
       </div>
+
+      {/* Open a matter by dropping a pleading. The button matters as much as the
+          drop zone — dragging is not available on a tablet. */}
+      {canCreate && (
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={e => { e.preventDefault(); setDragOver(false) }}
+          onDrop={e => {
+            e.preventDefault(); setDragOver(false)
+            const f = e.dataTransfer.files[0]
+            if (f) handleIntakeFile(f)
+          }}
+          className={`card mb-6 border-2 border-dashed text-center py-6 px-4 transition-colors ${
+            dragOver ? 'border-navy bg-navy/5' : 'border-border'}`}
+        >
+          {intakeBusy ? (
+            <p className="text-sm text-text-secondary">{intakeStatus || 'Reading the pleading…'}</p>
+          ) : (
+            <>
+              <p className="text-sm text-text-secondary">
+                Drop a filed pleading here to open a new matter from it
+              </p>
+              <button type="button" className="text-sm text-navy underline mt-1"
+                onClick={() => intakeInputRef.current?.click()}>
+                or choose a PDF
+              </button>
+              <input ref={intakeInputRef} type="file" accept="application/pdf" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleIntakeFile(f); e.target.value = '' }} />
+            </>
+          )}
+          {intakeError && <p className="text-sm text-red-600 mt-2">{intakeError}</p>}
+        </div>
+      )}
 
       {/* Create matter form */}
       {showCreate && (

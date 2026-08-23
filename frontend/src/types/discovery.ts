@@ -27,6 +27,8 @@ export interface DiscoveryRequestItem {
   objections: { objection_name: string; text: string }[]
   client_response_needed: boolean
   response: string | null
+  /** Internal work product — what the client should gather. Never served or exported. */
+  instructions_to_client: string | null
 }
 
 /** Mirrors DiscoveryUploadResponse in app/schemas/discovery.py */
@@ -45,6 +47,7 @@ export interface DiscoveryRequestItemUpdatePayload {
   privileges?: { privilege_name: string; text: string }[]
   objections?: { objection_name: string; text: string }[]
   response?: string | null
+  instructions_to_client?: string | null
 }
 
 export interface StandardPrivilege {

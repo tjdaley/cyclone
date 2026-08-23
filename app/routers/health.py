@@ -23,7 +23,7 @@ def health_check() -> MessageResponse:
 
 
 @router.get("/api/config")
-def public_config() -> dict[str, str | list[float]]:
+def public_config() -> dict[str, str | list[float] | list[str]]:
     """
     Return public configuration values safe to expose to the frontend.
 
@@ -38,6 +38,7 @@ def public_config() -> dict[str, str | list[float]]:
         "stripe_publishable_key": settings.stripe_publishable_key,
         "firm_name": settings.firm_name,
         "time_increment_options": settings.time_increment_options,
+        "referral_types": settings.referral_types,  # Client intake dropdown values
         "version": settings.version,
         "id": settings.id,
     }

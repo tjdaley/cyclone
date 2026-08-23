@@ -48,10 +48,11 @@ class DiscoveryRequestItemResponse(BaseModel):
     status: DiscoveryRequestStatus
     ingested_by_staff_id: int
     interpretations: list[str]
-    privileges: list[dict]
-    objections: list[dict]
+    privileges: list[dict[str, str]]
+    objections: list[dict[str, str]]
     client_response_needed: bool
     response: Optional[str] = None
+    instructions_to_client: Optional[str] = None
 
 
 class DiscoveryRequestItemUpdateRequest(BaseModel):
@@ -59,9 +60,10 @@ class DiscoveryRequestItemUpdateRequest(BaseModel):
     source_text: Optional[str] = None
     client_response_needed: Optional[bool] = None
     interpretations: Optional[list[str]] = None
-    privileges: Optional[list[dict]] = None
-    objections: Optional[list[dict]] = None
+    privileges: Optional[list[dict[str, str]]] = None
+    objections: Optional[list[dict[str, str]]] = None
     response: Optional[str] = None
+    instructions_to_client: Optional[str] = None
 
 
 # ── Standard lookups ─────────────────────────────────────────────────────────

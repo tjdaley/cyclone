@@ -97,12 +97,12 @@ class DiscoveryRequestItem(BaseModel):
         default_factory=list,
         description="Attorney interpretations of this request",
     )
-    privileges: list[dict] = Field(
-        default_factory=list,
+    privileges: list[dict[str, str]] = Field(
+        default_factory=lambda: list[dict[str, str]](),
         description="Privilege assertions: [{privilege_name: str, text: str}]",
     )
-    objections: list[dict] = Field(
-        default_factory=list,
+    objections: list[dict[str, str]] = Field(
+        default_factory=lambda: list[dict[str, str]](),
         description="Objections: [{objection_name: str, text: str}]",
     )
     client_response_needed: bool = Field(
@@ -112,6 +112,11 @@ class DiscoveryRequestItem(BaseModel):
     response: Optional[str] = Field(
         default=None,
         description="Attorney's formal response to this request, in markdown",
+    )
+    instructions_to_client: Optional[str] = Field(
+        default=None,
+        description="Internal instructions telling the client what to gather for this request. "
+                    "Work product — never included in the response served on the other side.",
     )
 
 

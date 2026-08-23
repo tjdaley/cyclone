@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_top_p: float = 0.1
     llm_max_tokens: int = 16384
+    # Per-call ceiling. Without it a hung vendor hangs the whole request and
+    # failover never fires, because failover is triggered by an exception.
+    llm_timeout_seconds: float = 90.0
 
     # Task-named profiles live in a JSON catalog, not in .env — see
     # util/llm_profiles.py. Relative paths resolve against the app package.
@@ -97,6 +100,10 @@ class Settings(BaseSettings):
 
     # Redis / Valkey (poller locks + inbound-email idempotency)
     redis_url: str = "redis://localhost:6379/0"
+
+    # Background job worker. Short, because somebody is watching a spinner
+    # while an intake extraction runs.
+    job_poll_interval_seconds: int = 3
 
     # CRM agent poller
     lead_poll_interval_seconds: int = 60

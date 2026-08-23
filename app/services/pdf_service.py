@@ -7,6 +7,7 @@ image and uses the LLM's multimodal vision capability for OCR.
 """
 import base64
 import io
+import time
 from PIL import ImageFile, Image
 import pymupdf
 
@@ -15,6 +16,33 @@ from util.loggerfactory import LoggerFactory
 LOGGER = LoggerFactory.create_logger(__name__)
 
 _MIN_TEXT_LENGTH = 20  # Pages shorter than this are treated as image-only
+
+# Control characters to strip from extracted text, keeping tab, newline, and
+# carriage return. A NUL in particular is fatal downstream: Postgres rejects
+# one in text and jsonb ("unsupported Unicode escape sequence", SQLSTATE
+# 22P05), so a single one in an exhibit page fails the whole ingest. Badly
+# encoded PDFs — scanned exhibits, forms flattened by odd tooling — produce
+# them routinely.
+_CONTROL_CHARS = {c: None for c in range(0x20) if c not in (0x09, 0x0A, 0x0D)}
+_CONTROL_CHARS[0x7F] = None
+
+
+def _sanitize(text: str) -> str:
+    """
+    Strip characters that cannot survive a round trip through the database.
+
+    Removes control characters and any unpaired surrogate, which Postgres
+    rejects for the same reason. Extraction is lossy on a mangled page either
+    way; losing the unstorable bytes is better than losing the document.
+
+    :param text: Raw text as extracted from the PDF.
+    :type text: str
+    :return: Text safe to persist.
+    :rtype: str
+    """
+    cleaned = text.translate(_CONTROL_CHARS)
+    # Drops lone surrogates (\ud800-\udfff), which are equally unstorable.
+    return cleaned.encode("utf-8", "ignore").decode("utf-8", "ignore")
 
 _VISION_OCR_PROMPT = (
     "Extract ALL text from this image of a legal document page. "
@@ -52,6 +80,8 @@ class PDFService:
 
         pages: list[str] = []
         page_num = 0
+        ocr_pages = 0
+        started = time.monotonic()
         page: pymupdf.Page
         for page in doc:
             page_num += 1
@@ -61,11 +91,21 @@ class PDFService:
                 pages.append(text)  # type: ignore[union-attr]
             else:
                 LOGGER.debug("pdf_service: page %s text too short (%s chars), using LLM vision", page_num, len(text))  # type: ignore[union-attr]
+                ocr_pages += 1
                 ocr_text = self._vision_extract(page)
                 pages.append(ocr_text)
 
         doc.close()
-        return "\n\n".join(pages)
+        # At INFO because this is the dominant cost of an ingest: one vision
+        # call per image-only page. Without it a slow upload looks like a hang.
+        raw = "\n\n".join(pages)
+        text = _sanitize(raw)
+        dropped = len(raw) - len(text)
+        LOGGER.info(
+            "pdf_service.extract_text: %s pages (%s needed OCR) in %.1fs, %s unstorable chars removed",
+            page_num, ocr_pages, time.monotonic() - started, dropped,
+        )
+        return text
 
     def _vision_extract(self, page: pymupdf.Page) -> str:
         """

@@ -6,12 +6,14 @@ import {
   getLead, getLeadActions,
   updateLeadStatus, assignLead, updateLeadPriority, setLeadFollowUp,
   toggleLeadAgent, addLeadNote, addLeadAction,
-  getStaff,
+  getStaff, getClients, getMatters, linkLeadClient,
   sendDraft, rejectDraft,
 } from '../../lib/api'
 import type {
   LeadDetail, LeadAction, LeadStatus, LeadPriority, LeadActionType, DismissalReason, Staff,
+  Client, Matter,
 } from '../../types'
+import LeadPromotePanel from './LeadPromotePanel'
 
 const STATUS_OPTIONS: LeadStatus[] = [
   'new',
@@ -96,6 +98,41 @@ export default function LeadDetailPage() {
   // Dismissal reason + note (when status is 'disqualified')
   const [dismissalReason, setDismissalReason] = useState<DismissalReason | ''>('')
   const [dismissalNote, setDismissalNote]     = useState('')
+
+  // Conversion: promote this lead, or link it to a client opened earlier.
+  const [promoting, setPromoting]       = useState(false)
+  const [linking, setLinking]           = useState(false)
+  const [linkClientId, setLinkClientId] = useState<number | ''>('')
+  const [linkMatterId, setLinkMatterId] = useState<number | ''>('')
+  const [linkError, setLinkError]       = useState<string | null>(null)
+  const [clients, setClients]           = useState<Client[]>([])
+  const [matters, setMatters]           = useState<Matter[]>([])
+
+  // Only needed for the link flow, so they are fetched when it opens.
+  useEffect(() => {
+    if (!linking || clients.length) return
+    Promise.all([getClients(), getMatters()])
+      .then(([c, m]) => { setClients(c); setMatters(m) })
+      .catch(e => setLinkError(e instanceof Error ? e.message : 'Could not load clients'))
+  }, [linking, clients.length])
+
+  async function handleLinkClient() {
+    if (!sessionUuid || linkClientId === '') return
+    setBusy(true); setLinkError(null)
+    try {
+      const updated = await linkLeadClient(sessionUuid, {
+        client_id: Number(linkClientId),
+        matter_id: linkMatterId === '' ? null : Number(linkMatterId),
+      })
+      setLead(updated)
+      setLinking(false)
+      await refreshActions()
+    } catch (e) {
+      setLinkError(e instanceof Error ? e.message : 'Could not link that client')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   // HITL draft state — keyed by run_id; only populated when staff edits a draft.
   const [draftBodies, setDraftBodies] = useState<Record<number, string>>({})
@@ -496,6 +533,81 @@ export default function LeadDetailPage() {
 
         {/* Right: workflow controls */}
         <div className="space-y-6">
+
+          {/* Conversion. A promoted lead is the intended way a client is born:
+              the conflict check already happened here. */}
+          {lead.converted_to_client_id ? (
+            <section className="card p-5 bg-green-50 border border-green-200">
+              <h2 className="font-semibold text-navy mb-1">Converted</h2>
+              <p className="text-sm text-text-secondary">
+                Client #{lead.converted_to_client_id}
+                {lead.converted_to_matter_id && (
+                  <>
+                    {' · '}
+                    <Link to={`/app/matters/${lead.converted_to_matter_id}`} className="text-navy underline">
+                      open the matter
+                    </Link>
+                  </>
+                )}
+              </p>
+            </section>
+          ) : promoting ? (
+            <LeadPromotePanel
+              lead={lead}
+              onCancel={() => setPromoting(false)}
+              onPromoted={() => setPromoting(false)}
+            />
+          ) : linking ? (
+            <section className="card p-5 space-y-2">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-navy">Link an existing client</h2>
+                <button type="button" className="text-xs text-text-secondary underline"
+                  onClick={() => { setLinking(false); setLinkError(null) }}>Cancel</button>
+              </div>
+              <p className="text-xs text-text-secondary">
+                For an intake taken by phone, where the file was opened before this lead
+                record existed. Nothing new is created.
+              </p>
+              <select className="input text-sm" value={linkClientId}
+                onChange={e => setLinkClientId(e.target.value === '' ? '' : Number(e.target.value))}>
+                <option value="">Select the client…</option>
+                {clients.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {[c.name.first_name, c.name.last_name].filter(Boolean).join(' ')}
+                  </option>
+                ))}
+              </select>
+              <select className="input text-sm" value={linkMatterId}
+                onChange={e => setLinkMatterId(e.target.value === '' ? '' : Number(e.target.value))}
+                disabled={linkClientId === ''}>
+                <option value="">Matter (optional)…</option>
+                {matters.filter(m => m.client_id === linkClientId).map(m => (
+                  <option key={m.id} value={m.id}>{m.short_name ?? m.matter_name}</option>
+                ))}
+              </select>
+              {linkError && <p className="text-xs text-red-600">{linkError}</p>}
+              <button type="button" className="btn-primary text-sm"
+                disabled={linkClientId === '' || busy} onClick={handleLinkClient}>
+                Link to this lead
+              </button>
+            </section>
+          ) : (
+            <section className="card p-5">
+              <h2 className="font-semibold text-navy mb-1">Convert</h2>
+              <p className="text-xs text-text-secondary mb-3">
+                Open the file from this lead, or point it at a client that already exists.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-primary text-sm" onClick={() => setPromoting(true)}>
+                  Promote to client
+                </button>
+                <button type="button" className="btn-secondary text-sm" onClick={() => setLinking(true)}>
+                  Already a client
+                </button>
+              </div>
+            </section>
+          )}
+
           <section className="card p-5">
             <h2 className="font-semibold text-navy mb-3">Status</h2>
             <select

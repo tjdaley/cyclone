@@ -8,6 +8,7 @@ export interface AppConfig {
   version: string
   stripe_publishable_key: string
   time_increment_options: number[]
+  referral_types: string[]
 }
 
 /**

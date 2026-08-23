@@ -264,6 +264,7 @@ export default function DiscoveryPage() {
                 const privileges      = draft.privileges ?? item.privileges
                 const objections      = draft.objections ?? item.objections
                 const response        = draft.response ?? item.response ?? ''
+                const instructions    = draft.instructions_to_client ?? item.instructions_to_client ?? ''
 
                 return (
                   <div key={item.id} className="card overflow-hidden">
@@ -277,6 +278,12 @@ export default function DiscoveryPage() {
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
                         {isDirty && <span className="text-xs text-amber-600">unsaved</span>}
+                        {instructions.trim() && (
+                          <span className="text-xs bg-amber-100 text-amber-800 rounded-full px-2 py-0.5"
+                            title="Has instructions to the client">
+                            client instructions
+                          </span>
+                        )}
                         {!clientNeeded && <span className="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5">No client response</span>}
                         {(() => {
                           const s = effectiveStatus(item, draft)
@@ -393,6 +400,24 @@ export default function DiscoveryPage() {
                               + Add interpretation
                             </button>
                           </div>
+                        </div>
+
+                        {/* Instructions to the client — internal work product. Kept
+                            visually distinct from the formal response below so the
+                            two are never confused: this one is never served. */}
+                        <div>
+                          <div className="flex items-baseline justify-between mb-1">
+                            <label className="label">Instructions to client</label>
+                            <span className="text-xs text-text-secondary">
+                              Internal · not served, not exported
+                            </span>
+                          </div>
+                          <textarea
+                            className="input w-full h-24 text-sm resize-y bg-amber-50/50 border-amber-200
+                                       focus:ring-amber-400"
+                            placeholder="What should the client gather for this request — and what should they skip? e.g. Produce bank statements, but don't pull the check registers; I'm objecting to that part."
+                            value={instructions}
+                            onChange={e => patchDraft(item.id, { instructions_to_client: e.target.value })} />
                         </div>
 
                         {/* Response — editor left, live preview right. The preview

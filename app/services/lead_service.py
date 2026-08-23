@@ -1,3 +1,4 @@
+# type: ignore[reportPrivateImportUsage]
 """
 app/services/lead_service.py - CRM orchestration: foreign leads + cyclone workflow.
 
@@ -14,8 +15,11 @@ Architectural notes:
 - Every state mutation writes a ``lead_actions`` row so the activity log
   reflects the full history.
 """
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
+
+if TYPE_CHECKING:  # Type-only: the runtime import lives inside promote() to avoid a cycle
+    from schemas.intake import MatterIntakeCommitRequest, MatterIntakeCommitResponse
 
 from db_handler import DatabaseManager
 
@@ -161,6 +165,7 @@ class LeadService:
             priority=wf.priority if wf else LeadPriority.normal,
             next_action_at=wf.next_action_at if wf else None,
             has_workflow_row=wf is not None,
+            converted_to_client_id=wf.converted_to_client_id if wf else None,
         )
 
     # ── Detail ────────────────────────────────────────────────────────────
@@ -288,6 +293,121 @@ class LeadService:
         )
         LOGGER.info("lead_service.update_status: session=%s %s -> %s", session_uuid, old_status.value, new_status.value)
         return self.get_detail(cyclone_db, foreign_db, staff_id, role, session_uuid)
+
+    def promote(
+        self,
+        cyclone_db: DatabaseManager,
+        foreign_db: DatabaseManager,
+        staff_id: int,
+        role: str,
+        session_uuid: UUID,
+        intake: "MatterIntakeCommitRequest",
+    ) -> tuple[LeadDetail, "MatterIntakeCommitResponse"]:
+        """
+        Open a client and matter from this lead, and record the conversion.
+
+        This is the intended path into the clients table: a lead has already
+        cleared the conflict check, so promoting one keeps that gate in front
+        of every client created this way. The client/matter/pleading writes are
+        delegated to ``intake_service`` so the pleading-drop flow and this one
+        cannot drift apart.
+
+        :param session_uuid: The lead being promoted.
+        :type session_uuid: UUID
+        :param intake: Client, matter, and (optionally) pleading to create.
+        :return: The refreshed lead detail and what was created.
+        :rtype: tuple[LeadDetail, MatterIntakeCommitResponse]
+        """
+        from services.intake_service import intake_service  # noqa: PLC0415 — avoids an import cycle
+
+        wf = self._get_or_create_for_mutation(cyclone_db, foreign_db, staff_id, role, session_uuid)
+        if wf.converted_to_client_id:
+            raise ValueError(
+                "This lead was already converted to client %s — link or edit that record instead"
+                % wf.converted_to_client_id
+            )
+
+        result = intake_service.commit(manager=cyclone_db, staff_id=staff_id, request=intake)
+        self._record_conversion(
+            cyclone_db, wf.id, session_uuid, staff_id,
+            client_id=result.client_id, matter_id=result.matter_id,
+            metadata={
+                "client_created": result.client_created,
+                "pleading_id": result.pleading_id,
+                "source": "promote",
+            },
+        )
+        LOGGER.info(
+            "lead_service.promote: session=%s client_id=%s matter_id=%s pleading_id=%s",
+            session_uuid, result.client_id, result.matter_id, result.pleading_id,
+        )
+        return self.get_detail(cyclone_db, foreign_db, staff_id, role, session_uuid), result
+
+    def link_client(
+        self,
+        cyclone_db: DatabaseManager,
+        foreign_db: DatabaseManager,
+        staff_id: int,
+        role: str,
+        session_uuid: UUID,
+        client_id: int,
+        matter_id: Optional[int],
+    ) -> LeadDetail:
+        """
+        Point a lead at a client that already exists. Creates nothing.
+
+        Covers the emergency intake: a conflict check run over the phone, the
+        file opened immediately, and the lead record written afterwards. The
+        lead catches up to reality rather than being an exception to it.
+
+        :raises ValueError: If the client (or matter, when given) is not found.
+        """
+        from db.repositories.client import ClientRepository  # noqa: PLC0415
+        from db.repositories.matter import MatterRepository  # noqa: PLC0415
+
+        wf = self._get_or_create_for_mutation(cyclone_db, foreign_db, staff_id, role, session_uuid)
+
+        if ClientRepository(cyclone_db).select_one(condition={"id": client_id}) is None:
+            raise ValueError("Client not found: id=%s" % client_id)
+        if matter_id is not None:
+            matter = MatterRepository(cyclone_db).select_one(condition={"id": matter_id})
+            if matter is None:
+                raise ValueError("Matter not found: id=%s" % matter_id)
+            if matter.client_id != client_id:
+                raise ValueError("That matter belongs to a different client")
+
+        self._record_conversion(
+            cyclone_db, wf.id, session_uuid, staff_id,
+            client_id=client_id, matter_id=matter_id,
+            metadata={"source": "link_existing"},
+        )
+        LOGGER.info("lead_service.link_client: session=%s client_id=%s matter_id=%s",
+                    session_uuid, client_id, matter_id)
+        return self.get_detail(cyclone_db, foreign_db, staff_id, role, session_uuid)
+
+    def _record_conversion(
+        self,
+        cyclone_db: DatabaseManager,
+        workflow_id: int,
+        session_uuid: UUID,
+        staff_id: int,
+        client_id: int,
+        matter_id: Optional[int],
+        metadata: dict[str, object],
+    ) -> None:
+        """Write the conversion columns, move the lead to 'engaged', and log it."""
+        LeadWorkflowRepository(cyclone_db).update(workflow_id, {
+            "converted_to_client_id": client_id,
+            "converted_to_matter_id": matter_id,
+            "status": LeadStatus.engaged.value,
+        })
+        self._log_action(
+            cyclone_db,
+            session_uuid=session_uuid,
+            staff_id=staff_id,
+            action_type=LeadActionType.converted,
+            metadata={"client_id": client_id, "matter_id": matter_id, **metadata},
+        )
 
     def assign(
         self,

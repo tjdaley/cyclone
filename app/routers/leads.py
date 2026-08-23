@@ -7,9 +7,9 @@ Access control is two-layered:
   2. lead_service.assert_can_access_slug(...) blocks staff who don't have
      slug access to a particular lead (admin bypasses).
 """
-from typing import Optional
 from uuid import UUID
 
+from db_handler import SupabaseManager
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from db.repositories.staff import StaffRepository
@@ -22,7 +22,10 @@ from schemas.lead import (
     FollowUpRequest,
     LeadActionResponse,
     LeadDetail,
+    LeadLinkClientRequest,
     LeadListItem,
+    LeadPromoteRequest,
+    LeadPromoteResponse,
     PriorityUpdateRequest,
     StatusUpdateRequest,
 )
@@ -40,7 +43,7 @@ router = APIRouter(prefix="/api/v1/leads", tags=["leads"])
 _STAFF_ROLES = ["attorney", "paralegal", "admin"]
 
 
-def _resolve_staff_id(request: Request, cyclone_db) -> int:
+def _resolve_staff_id(request: Request, cyclone_db: SupabaseManager) -> int:
     """
     Resolve the authenticated user's cyclone staff.id from their supabase_uid.
 
@@ -70,8 +73,8 @@ def list_leads(
     request: Request,
     limit: int = 100,
     offset: int = 0,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[LeadListItem]:
     """List leads accessible to the caller, newest first."""
@@ -92,8 +95,8 @@ def list_leads(
 def get_lead(
     session_uuid: UUID,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Return the full detail for one lead, after access check."""
@@ -118,8 +121,8 @@ def get_lead(
 def list_lead_actions(
     session_uuid: UUID,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[LeadActionResponse]:
     """Return the activity timeline for a lead."""
@@ -140,18 +143,79 @@ def list_lead_actions(
 
 # ── Mutations ─────────────────────────────────────────────────────────────
 
-def _mutation_wrapper(handler):
+def _mutation_wrapper(handler):  # type: ignore
     """Translate service exceptions to HTTP errors. Used inline below."""
 
-    def wrapped(*args, **kwargs):
+    def wrapped(*args, **kwargs):  # type: ignore
         try:
-            return handler(*args, **kwargs)
+            return handler(*args, **kwargs)  # type: ignore
         except LeadNotFoundError:
             raise HTTPException(status_code=404, detail="Lead not found")
         except LeadAccessDeniedError:
             raise HTTPException(status_code=403, detail="No access to this lead")
 
-    return wrapped
+    return wrapped  # type: ignore
+
+
+@router.post("/{session_uuid}/promote", response_model=LeadPromoteResponse, status_code=201)
+def promote_lead(
+    session_uuid: UUID,
+    body: LeadPromoteRequest,
+    request: Request,
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
+    _=Depends(require_role(["attorney", "admin"])),
+) -> LeadPromoteResponse:
+    """
+    Open a client and matter from this lead.
+
+    Attorney/admin only — this creates the client file. A pleading may ride
+    along in the body to populate the matter, or be omitted entirely when the
+    file is being opened straight off a phone call.
+    """
+    staff_id = _resolve_staff_id(request, cyclone_db)
+    try:
+        lead, result = _mutation_wrapper(lead_service.promote)(
+            cyclone_db=cyclone_db,
+            foreign_db=foreign_db,
+            staff_id=staff_id,
+            role=_role(request),
+            session_uuid=session_uuid,
+            intake=body.intake,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return LeadPromoteResponse(lead=lead, result=result)
+
+
+@router.post("/{session_uuid}/link-client", response_model=LeadDetail)
+def link_lead_client(
+    session_uuid: UUID,
+    body: LeadLinkClientRequest,
+    request: Request,
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
+    _=Depends(require_role(["attorney", "admin"])),
+) -> LeadDetail:
+    """
+    Point this lead at a client that already exists. Creates nothing.
+
+    For an intake taken by phone where the file was opened before the lead
+    record caught up.
+    """
+    staff_id = _resolve_staff_id(request, cyclone_db)
+    try:
+        return _mutation_wrapper(lead_service.link_client)(
+            cyclone_db=cyclone_db,
+            foreign_db=foreign_db,
+            staff_id=staff_id,
+            role=_role(request),
+            session_uuid=session_uuid,
+            client_id=body.client_id,
+            matter_id=body.matter_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.patch("/{session_uuid}/status", response_model=LeadDetail)
@@ -159,8 +223,8 @@ def update_status(
     session_uuid: UUID,
     body: StatusUpdateRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Update the pipeline status of a lead."""
@@ -182,8 +246,8 @@ def assign_lead(
     session_uuid: UUID,
     body: AssignRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Assign or unassign the lead to a staff member."""
@@ -203,8 +267,8 @@ def update_priority(
     session_uuid: UUID,
     body: PriorityUpdateRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Update the priority of a lead."""
@@ -224,13 +288,13 @@ def set_follow_up(
     session_uuid: UUID,
     body: FollowUpRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Set or clear the next-action reminder."""
     staff_id = _resolve_staff_id(request, cyclone_db)
-    return _mutation_wrapper(lead_service.set_follow_up)(
+    return _mutation_wrapper(lead_service.set_follow_up)(  # type: ignore
         cyclone_db=cyclone_db,
         foreign_db=foreign_db,
         staff_id=staff_id,
@@ -246,8 +310,8 @@ def toggle_agent(
     session_uuid: UUID,
     body: AgentToggleRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadDetail:
     """Enable or disable the AI agent for this lead."""
@@ -267,8 +331,8 @@ def add_note(
     session_uuid: UUID,
     body: AddNoteRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadActionResponse:
     """Add a free-form note to the lead's activity log."""
@@ -288,13 +352,13 @@ def add_action(
     session_uuid: UUID,
     body: AddActionRequest,
     request: Request,
-    cyclone_db=Depends(get_db_manager),
-    foreign_db=Depends(get_landing_pages_db),
+    cyclone_db: SupabaseManager=Depends(get_db_manager),
+    foreign_db: SupabaseManager=Depends(get_landing_pages_db),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> LeadActionResponse:
     """Log a manual action like 'call_attempted' or 'voicemail_left'."""
     staff_id = _resolve_staff_id(request, cyclone_db)
-    return _mutation_wrapper(lead_service.log_manual_action)(
+    return _mutation_wrapper(lead_service.log_manual_action)(  # type: ignore
         cyclone_db=cyclone_db,
         foreign_db=foreign_db,
         staff_id=staff_id,

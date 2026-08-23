@@ -59,6 +59,18 @@ def _max_tokens(profile: LLMProfile, candidate: LLMCandidate) -> int:
     return profile.max_tokens if profile.max_tokens is not None else settings.llm_max_tokens
 
 
+def _gemini_timeout_ms() -> int:
+    """
+    google-genai takes its request timeout in milliseconds, unlike the others.
+
+    Floored at 10s because Gemini rejects a shorter deadline outright
+    ("Manually set deadline 1s is too short") — which would turn a tight
+    timeout setting into an immediate INVALID_ARGUMENT on every Gemini call
+    rather than the timeout the setting asked for.
+    """
+    return max(int(settings.llm_timeout_seconds * 1000), 10_000)
+
+
 class LLMService:
     """
     Multi-vendor LLM completion service with per-profile failover.
@@ -277,7 +289,7 @@ class LLMService:
         """
         import anthropic  # noqa: PLC0415 — imported lazily to avoid load cost when not in use
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=settings.llm_timeout_seconds)
         response = client.messages.create(
             model=candidate.model,
             max_tokens=_max_tokens(profile, candidate),
@@ -305,7 +317,8 @@ class LLMService:
         from google import genai  # noqa: PLC0415
         from google.genai import types  # noqa: PLC0415
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+        client = genai.Client(api_key=settings.gemini_api_key,
+                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms()))
         response = client.models.generate_content(
             model=candidate.model,
             contents=user_message,
@@ -334,7 +347,7 @@ class LLMService:
         """
         from openai import OpenAI  # noqa: PLC0415
 
-        client = OpenAI(api_key=settings.openai_api_key)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=settings.llm_timeout_seconds)
         response = client.chat.completions.create(
             model=candidate.model,
             temperature=_temperature(profile, candidate),
@@ -366,6 +379,7 @@ class LLMService:
         client = OpenAI(
             api_key=settings.groq_api_key,
             base_url=settings.groq_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -397,6 +411,7 @@ class LLMService:
         client = OpenAI(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -419,7 +434,8 @@ class LLMService:
         from google.genai import types  # noqa: PLC0415
         import base64 as b64mod  # noqa: PLC0415
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+        client = genai.Client(api_key=settings.gemini_api_key,
+                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms()))
         image_bytes = b64mod.b64decode(image_base64)
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=image_media_type)
         response = client.models.generate_content(
@@ -439,7 +455,7 @@ class LLMService:
         """Call the Anthropic Messages API with a base64 image block."""
         import anthropic  # noqa: PLC0415
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=settings.llm_timeout_seconds)
         response = client.messages.create(
             model=candidate.model,
             max_tokens=_max_tokens(profile, candidate),
@@ -468,7 +484,7 @@ class LLMService:
         """Call the OpenAI Chat Completions API with an inline image URL."""
         from openai import OpenAI  # noqa: PLC0415
 
-        client = OpenAI(api_key=settings.openai_api_key)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=settings.llm_timeout_seconds)
         response = client.chat.completions.create(
             model=candidate.model,
             max_tokens=_max_tokens(profile, candidate),
