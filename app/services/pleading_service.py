@@ -717,20 +717,39 @@ class PleadingService:
                 m_oc_repo.insert(link.model_dump())
             oc_count += 1
 
-        # 7. Create claims
+        # 7. Create claims. Extraction says whose claim each one is
+        # (party_side), but not which party — so resolve it here, and only when
+        # the answer is unambiguous. With two or more opposing parties, guessing
+        # would attribute a claim to the wrong person; the attorney assigns it
+        # on the matter page instead.
         claim_repo = MatterClaimRepository(manager)
+        sole_opposing_party = known_parties[0].id if len(known_parties) == 1 else None
+        assigned = 0
         for claim_entry in request.claims:
+            party_id = claim_entry.opposing_party_id
+            if party_id is None and claim_entry.party_side == "opposing":
+                party_id = sole_opposing_party
+                assigned += party_id is not None
+
             claim = MatterClaim(
                 matter_pleading_id=pleading_record.id,
                 matter_id=matter_id,
-                opposing_party_id=claim_entry.opposing_party_id,
+                opposing_party_id=party_id,
                 kind=claim_entry.kind,
                 label=claim_entry.label,
                 narrative=claim_entry.narrative,
                 statute_rule_cited=claim_entry.statute_rule_cited,
             )
             claim_repo.insert(claim.model_dump())
-        LOGGER.info("pleading_service.commit: created %s claims", len(request.claims))
+
+        if sole_opposing_party is None and any(c.party_side == "opposing" for c in request.claims):
+            LOGGER.info(
+                "pleading_service.commit: matter %s has %s opposing parties — opposing claims left "
+                "unassigned for the attorney to attribute",
+                matter_id, len(known_parties),
+            )
+        LOGGER.info("pleading_service.commit: created %s claims (%s attributed to an opposing party)",
+                    len(request.claims), assigned)
 
         return pleading_record, parties_created, children_created, oc_count, len(request.claims)
 

@@ -186,6 +186,7 @@ export default function MatterIntakePanel({
         claims: preview.claims.map(c => ({
           kind: c.kind, label: c.label, narrative: c.narrative,
           statute_rule_cited: c.statute_rule_cited, opposing_party_id: null,
+          party_side: c.party_side,
         })),
       }
 

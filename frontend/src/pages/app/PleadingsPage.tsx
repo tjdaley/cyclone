@@ -184,7 +184,11 @@ export default function PleadingsPage() {
       label: c.label,
       narrative: c.narrative,
       statute_rule_cited: c.statute_rule_cited,
+      // Left null here on purpose: an opposing party created by this same
+      // commit has no id yet. The backend attributes the claim once the
+      // parties exist, using party_side.
       opposing_party_id: null,
+      party_side: c.party_side,
     })))
   }, [preview])
 

@@ -312,6 +312,12 @@ class ClaimCommitEntry(BaseModel):
     narrative: str
     statute_rule_cited: Optional[str] = None
     opposing_party_id: Optional[int] = None  # resolved to a specific OP id, or null for our client
+    party_side: str = Field(
+        default="opposing",
+        description="'our_client' or 'opposing', carried from extraction. When opposing_party_id "
+                    "is not set, the commit resolves it from this — but only when the matter has "
+                    "exactly one opposing party, since more than one is genuinely ambiguous.",
+    )
 
 
 class OCCommitEntry(BaseModel):

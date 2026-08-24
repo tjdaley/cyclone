@@ -29,9 +29,12 @@ cyclone/
 │   ├── requirements.txt           # pip dependencies
 │   ├── config/
 │   │   └── llm_profiles.json      # Task-named LLM profile catalog — see §11
+│   ├── crm_worker.py              # Background worker: jobs every few seconds, CRM polls on their own cadence — see §11a
 │   ├── util/
 │   │   ├── settings.py            # Settings(BaseSettings) singleton — see §5
 │   │   ├── llm_profiles.py        # Loads/resolves the profile catalog — see §11
+│   │   ├── schema_check.py        # Startup diff of live columns vs models — see §15
+│   │   ├── redis_client.py        # claim_once / lock — fleet coordination
 │   │   └── loggerfactory.py       # LoggerFactory — see §6
 │   ├── middleware/
 │   │   └── auth_middleware.py     # JWT validation via JWKS (ES256); injects uid/role/email
@@ -51,6 +54,9 @@ cyclone/
 │   │   ├── billing_service.py     # Rate resolution, pro bono, NL parse, balance, cycle close
 │   │   ├── discovery_service.py   # Discovery document classification + item extraction
 │   │   ├── pleading_service.py    # Pleading preview/commit orchestration
+│   │   ├── intake_service.py      # Open a client + matter from a filed pleading — see §11
+│   │   ├── job_service.py         # Queue/run background work — see §11a
+│   │   ├── lead_service.py        # CRM leads; promotion to client + matter
 │   │   ├── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
 │   │   └── audit_logger.py        # AuditLogger.log() — never re-raises on failure
 │   └── schemas/                   # Pydantic request/response schemas (one per domain)
@@ -88,6 +94,9 @@ cyclone/
 │               ├── ClientsPage.tsx
 │               ├── DiscoveryPage.tsx
 │               ├── PleadingsPage.tsx
+│               ├── MatterDetailPage.tsx   # /app/matters/:matterId — parties, staff, children, counsel, claims
+│               ├── MatterIntakePanel.tsx  # Review a dropped pleading → new client + matter
+│               ├── LeadPromotePanel.tsx   # Promote a lead → client + matter (optional pleading)
 │               └── AdminPage.tsx
 ├── db/
 │   └── migrations/                # SQL DDL — run in numeric order
@@ -100,7 +109,14 @@ cyclone/
 │       ├── 007_discovery_redesign.sql      # discovery_requests → parent + items split
 │       ├── 008_discovery_item_editing.sql  # response column + standard_privileges/objections
 │       ├── 009_pleadings_and_oc.sql        # pleadings, claims, opposing_counsel, children
-│       └── run_all.sql
+│       ├── 010–014                         # CRM: leads_workflow, lead_actions, KB, agent runs
+│       ├── 015_pleading_status.sql         # matter_pleadings.status (live/superseded/withdrawn/inactive)
+│       ├── 016_prior_counsel_role.sql      # widens the matter_opposing_counsel role CHECK
+│       ├── 017_discovery_client_instructions.sql
+│       ├── 018_jobs.sql                    # background job queue — see §11a
+│       ├── 019_clients_referred_to_staff.sql
+│       ├── 020_clients_schema_reconcile.sql  # brings 002 back in line with the deployed table
+│       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
 ├── .env.example                   # All keys, no values — committed
@@ -176,7 +192,9 @@ from app.util.settings import settings
 | `supabase_anon_key` | `str` | Used by frontend Supabase JS client |
 | `llm_profiles_file` | `str` | Path to the task-profile catalog; relative paths resolve against `app/` (see §11) |
 | `llm_temperature`, `llm_top_p`, `llm_max_tokens` | `float`/`int` | Global sampling defaults; profiles and candidates may override |
+| `llm_timeout_seconds` | `float` | Per-call ceiling. Without it a hung vendor hangs the request and failover never fires. Keep ≥10 — Gemini rejects shorter deadlines |
 | `{vendor}_api_key`, `{vendor}_base_url` | `str` | Per-vendor credentials only — no model names |
+| `job_poll_interval_seconds` | `int` | How often the worker looks for queued jobs (see §11a). Short — someone is watching a spinner |
 | `referral_types` | `list[str]` | Client intake referral type dropdown values |
 | `time_increment_options` | `list[float]` | Valid billing time increments |
 | `default_refresh_trigger_pct` | `float` | Default retainer refresh threshold |
@@ -370,19 +388,24 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
 - `extract_text(pdf_bytes)` — PyMuPDF for searchable pages; LLM vision fallback for image-only pages
 - Image enhancement: grayscale, contrast 2.0, sharpness 1.5 before sending to the vision model
 - Tesseract is **not** used — LLM vision is more accurate for legal documents
+- **Output is sanitized** (`_sanitize`): control characters and lone surrogates are stripped. A NUL from a badly encoded exhibit page makes Postgres reject the entire row (`22P05`, "unsupported Unicode escape sequence"), which fails an ingest *after* all the extraction work is done. Never persist raw extraction output that has not been through this.
+- Logs pages, OCR-page count, and elapsed time at `INFO` — OCR is the dominant cost of an ingest and a slow upload otherwise looks like a hang
 
 ### Storage Service (`storage_service.py`)
 
 - Wraps Supabase Storage with matter-scoped paths: `matters/{matter_id}/pleadings/{id}.pdf` and `matters/{matter_id}/discovery/{id}.pdf`
+- Intake uploads land at `intake/{job_id}.pdf` — at intake there is no matter to file under yet
 - Bucket name: `matter-documents` (private, signed URLs only)
-- `upload_pleading`, `upload_discovery`, `get_signed_url`, `delete`
+- `upload_pleading`, `upload_discovery`, `upload_intake`, `get_signed_url`, `download`, `move`, `delete`
 - The bucket must be created manually in the Supabase dashboard before use
+- Serving a stored file to the SPA: return a **signed URL as JSON** and let the browser navigate to it (`GET /pleadings/{id}/pdf-url`). A redirect or a plain link cannot carry the bearer token.
 
 ### Docx Service (`docx_service.py`)
 
 - `generate_discovery_response_docx(document_type, matter_name, items)` → bytes
 - Parses markdown (`**bold**`, `*italic*`, numbered/bulleted lists) into native Word runs
-- Preserves hard line breaks in the response field (each line = its own paragraph)
+- **Line handling follows markdown block rules:** a single newline is a soft break inside the paragraph (`<w:br/>`, single-spaced); a blank line starts a new paragraph with `space_after`. This is what lets a witness block stay tight while blocks stay separated. The frontend preview uses `remark-breaks` so it agrees with the export.
+- `instructions_to_client` is **never** exported — it is internal work product, not part of the response served on the other side
 
 ### Billing Service (`billing_service.py`)
 
@@ -400,7 +423,21 @@ Two-step LLM pipeline for discovery document ingestion:
 Stateless preview/commit pattern for pleading ingestion:
 
 - `preview_ingest(matter_id, raw_text)` → `PleadingIngestPreviewResponse` (no writes; attorney reviews)
-- `commit_ingest(staff_id, request)` → writes pleading row, matter field updates, children, opposing counsel (with bar-number dedup), and claims
+- `commit_ingest(staff_id, request)` → writes opposing parties **first** (everything else references them), then the pleading row, matter field updates, children, opposing counsel (bar-number dedup), and claims
+- **Extraction needs to know who our client is.** `classify_and_extract(raw_text, client_name, firm_name)` takes them as required arguments: "opposing" is relative to our client, and a pleading filed against us names *our* attorney in its service paragraph. Without that context the model reasonably returns our own lawyer as opposing counsel.
+- `clip_for_metadata(raw_text)` trims a document for a metadata call (40k head + 10k tail). Generous on purpose — the signature block, the only place a bar number appears, sits at the end of the *pleading*, not the end of the file, and a petition with a standing order attached runs well past ten pages.
+- Committing an amendment marks what it amends `superseded`. A supplement does not — it adds to the live pleading.
+- Children and opposing parties are deduplicated on commit, and the commit **re-reads the matter** rather than trusting the preview, so a stale preview or a double submit cannot duplicate.
+
+### Intake Service (`intake_service.py`)
+
+Opens a **client and matter** from a filed pleading — the case where nothing exists yet.
+
+- `extract_case_style(raw_text)` takes no client context, deliberately: at intake we do not know which side we are on. The prompt asks for every party and every attorney *neutrally*, with `represents` on each attorney.
+- The attorney answers "who do we represent?" once in the review screen; everything adverse is derived from that single answer, in `commit()` and nowhere else.
+- `preview()` matches each party against existing **clients and leads**. Promoting a lead is preferred to creating a client from a caption — a lead has cleared the conflict check and carries contact details.
+- `_match_confidence()` requires **first and last name to both agree**. Surname-only matching is not enough: adverse parties in a family-law caption almost always share a surname, so a looser rule offers the opposing spouse as a candidate for our own client. The frontend panels mirror this rule exactly — if you change one, change both.
+- `commit()` creates the client (or reuses a matched one), then the matter, then delegates to `pleading_service.commit_ingest` so parties, counsel, children, and claims are written by the same code as every other pleading. `case=None` opens a client and matter with no pleading — that is how a lead is promoted off a phone call.
 
 ### Audit Logger (`audit_logger.py`)
 
@@ -416,6 +453,29 @@ Stateless preview/commit pattern for pleading ingestion:
 | Pleading ingestion — claims | (same call) | `extract_pleading_claims` — second LLM call inside preview_ingest |
 | PDF vision OCR | (internal to pdf_service) | `ocr_document_page` — for scanned pages with no text layer |
 | CRM lead agent | (internal to crm_agent_service) | `compose_welcome_email`, `triage_lead_message`, `extract_lead_issues`, `select_kb_articles`, `compose_lead_reply`, `response_guardrail`, `explain_message_edit` |
+
+---
+
+## 11a. Background Jobs (`job_service.py`, `crm_worker.py`, `jobs` table)
+
+**Anything that can take more than a few seconds must not hold an HTTP request open.** Production sits behind haproxy, whose `timeout server` cuts the connection long before nginx's 300s. The client gets a 504 with *no error in the API log*, because nothing failed — the request was still working. Reading a pleading is one LLM vision call per image-only page plus two more over the text; on a scanned document that is minutes.
+
+The pattern:
+
+1. **Upload** stores the input and inserts a `jobs` row, returning **202** with a job id in well under a second.
+2. **The worker** claims the row, does the work, and writes `result` (jsonb) or `error`.
+3. **The caller polls** `GET .../jobs/{id}` every couple of seconds until the status is terminal.
+
+Rules learned the hard way:
+
+- **Store the input before the row is queued.** `enqueue_matter_intake` generates the id in Python, uploads the PDF, and *then* inserts with `storage_path` already set. Inserting first publishes a queued job whose input is still uploading, and a worker polling in that window claims it and fails with "Job has no stored PDF".
+- **Claiming is two-layered.** A Redis `SET NX` (`claim_once`) stops two nodes starting the same job in the same instant; the `queued → running` transition holds it after the key expires. Redis being down degrades to the status check rather than halting the queue.
+- **Job claiming is deliberately outside the `crm:poller` lock.** That lock makes mailbox polling fleet-wide single-runner; jobs are claimed individually, so every node should take work.
+- **Failures land on the job,** with the reason in `error`. A failed upload must be able to tell the attorney what happened.
+- **Polling is scoped to the requester** (`get_for_staff`) — a result holds the full text of someone's pleading.
+- The worker runs **two cadences**: jobs every `job_poll_interval_seconds` (short — someone is watching a spinner), CRM polls on their own much slower schedule.
+
+Pleading ingestion and discovery upload still run extraction inline and carry the same exposure. The `jobs.kind` CHECK constraint is where they get added.
 
 ---
 
@@ -524,11 +584,14 @@ docker compose -f docker-compose.yml up -d    # Production: frontend on :8094, A
 ### Production config
 
 - Images are tagged: `ghcr.io/tjdaley/jdbot-cyclone-{api,frontend}:X.Y.Z`
+- **The `worker` service runs the same image as the API.** Backend changes need *both* rebuilt — shipping only the API leaves jobs queued and nothing running them.
 - Frontend exposed on host port `8094` (behind haproxy)
 - API has `expose: "8000"` — internal to Docker network only; nginx proxies `/api/*` to it
 - `.env` file is both `env_file`-injected AND mounted at `/app/.env:ro` so Pydantic can also read it
 - Healthchecks: API uses `python urllib` against `/api/health`; frontend uses `wget --spider` against `http://127.0.0.1:80/` (must use IPv4 literal, not `localhost`, due to Alpine's IPv6-first resolution)
 - nginx has `proxy_read_timeout 300s` for API calls and `client_max_body_size 50m` for large PDF uploads
+- **haproxy sits in front of nginx and is the real request-duration limit.** Its `timeout server` is shorter than nginx's 300s, so a slow endpoint returns haproxy's own 504 page ("The server didn't respond in time") with nothing in the API log — the request was still running. This is why long work goes through the job queue (§11a). Recognizing whose 504 you have matters: nginx stamps `nginx/<version>` in its error page, haproxy does not.
+- **Migrations are run by hand, in numeric order.** `run_all.sql` only covers `001–005`. When a change needs DDL, name the migration file explicitly so it can be run before the deploy.
 
 ### Running without Docker
 
@@ -548,6 +611,18 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 2. `SupabaseManager.__init__` raises `ValueError` if `supabase_url` or `supabase_service_role_key` are empty
 3. `AuthMiddleware` fetches JWKS from `{supabase_url}/auth/v1/.well-known/jwks.json` at module load
 4. Logs at `INFO`: `"Cyclone API started | env=%s log_level=%s llm_profiles: %s"`, then logs a `WARNING` per problem found by `llm_service.validate_profiles()`
+5. `util/schema_check.check_schema()` diffs the live columns against every model and logs an **`ERROR`** per mismatch
+
+### Schema drift (`util/schema_check.py`)
+
+A model field with no matching column is not a risk, it is a guaranteed 500: `model_dump()` includes a field even when it is `None`, and PostgREST rejects the whole row for an unknown column (`PGRST204`). That is how `clients.referred_to_staff_id` stayed broken until an intake commit hit it in production.
+
+- Live columns come from PostgREST's OpenAPI document (`GET /rest/v1/` with `Accept: application/openapi+json`) — it describes empty tables too, so no query access and no per-table round trips.
+- The table→model map comes from the **repositories**, the only authoritative source: each hands its table name and model class to `BaseRepository.__init__`.
+- One HTTP call, ~0.8s, read-only, and every failure is swallowed — a check that cannot run must never stop the API from starting. An unconfigured Supabase logs that it *skipped*, because a silent skip is indistinguishable from "checked and clean".
+- **It compares columns only.** CHECK constraints, types, nullability, and foreign keys are invisible to it — a migration that only widens a CHECK (like 016) cannot be verified this way.
+
+**`db/migrations/002_tables.sql` no longer describes the deployed `clients` table.** Production grew six columns that no migration creates; `020` reconciles them. Assume other tables may have drifted the same way and check rather than trust the DDL files.
 
 ---
 
@@ -562,10 +637,21 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 | Discovery document ingestion | ✅ Built (PDF upload with LLM vision fallback) |
 | Discovery item editing (privileges, objections, interpretations, response) | ✅ Built |
 | Discovery response export to Word | ✅ Built |
-| Pleading ingestion with preview/commit review | ✅ Built (matter fields, children, opposing counsel, claims) |
+| Pleading ingestion with preview/commit review | ✅ Built (parties, children, opposing counsel, claims) |
+| Pleading lifecycle status + stored PDF viewing | ✅ Built (live/superseded/withdrawn/inactive; signed-URL viewer) |
+| Discovery `instructions_to_client` (internal work product) | ✅ Built — never exported |
+| Matter detail page (`/app/matters/:id`) | ✅ Built — parties, staff w/ origination meter, children, counsel, claims by pleading |
+| CRUD for matter children / claims / counsel links / staff | ✅ Built (API + matter detail page) |
+| Matter intake from a dropped pleading | ✅ Built — neutral extraction, "who do we represent", client/lead matching |
+| Lead → client + matter promotion, and linking an existing client | ✅ Built (`converted_to_client_id` / `converted_to_matter_id` now written) |
+| Background job queue (`jobs` table + worker) | ✅ Built — matter intake only; see §11a |
+| Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
+| Conflict checking | ⏳ Done manually **outside** Cyclone today. Planned home: at the `leads` table, so every promoted client has passed it. `conflict_check_run` already exists in the lead action enum |
 | Phase 2 conflict checking (pg_trgm) | ⏳ SQL ready, Python wiring uses substring match only |
+| Re-extract / delete a pleading | ❌ Not started — `raw_text` is stored, so re-extraction needs no re-upload |
+| Moving the intake PDF onto the matter at commit | ❌ Not started — lands at `intake/{job_id}.pdf`; `StorageService.move()` exists |
 | Client Portal (separate from staff) | ❌ Not started — `client` role exists but redirects to `/access-denied` |
 | PDF bill generation (WeasyPrint) | ❌ Not started |
 | Stripe checkout / webhooks | ❌ Keys configured, no handler |
@@ -591,6 +677,10 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 | `SUPABASE_JWT_SECRET` | — | **Currently unused** — middleware uses JWKS/ES256 |
 | `LLM_PROFILES_FILE` | Backend | Task-profile catalog path (default `config/llm_profiles.json`) |
 | `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_MAX_TOKENS` | Backend | Global sampling defaults |
+| `LLM_TIMEOUT_SECONDS` | Backend | Per-call ceiling (default 90). Keep ≥10 — Gemini rejects shorter deadlines |
+| `JOB_POLL_INTERVAL_SECONDS` | Worker | How often queued jobs are picked up (default 3) |
+| `LEAD_POLL_INTERVAL_SECONDS` | Worker | CRM mailbox/lead polling cadence (default 60) |
+| `REDIS_URL` | Worker | Poller lock + job claim; job claiming degrades gracefully if unreachable |
 | `{VENDOR}_API_KEY`, `{VENDOR}_BASE_URL` | Backend | Per-vendor credentials only |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Backend | Never expose to frontend |
 | `STRIPE_PUBLISHABLE_KEY` | Backend → `/api/config` → Frontend | |
@@ -625,6 +715,11 @@ Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 | Hardcode environment-specific values | Use `settings.*` |
 | Use `supabase.from(...)` in frontend components | Use typed wrappers from `src/lib/api.ts` |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
+| Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |
+| Add a model field without a migration in the same change | The startup schema check will log an `ERROR`, but the insert is already broken |
+| Persist PDF-extracted text straight from PyMuPDF | It can contain NULs; Postgres rejects the row (`22P05`). `pdf_service` sanitizes — use its output |
+| Decide "opposing" without knowing our client | `intake_service`/`pleading_service` take the client name; a pleading names *our* attorney too |
+| Match people on surname alone | Adverse parties share surnames — require first **and** last (`_match_confidence`) |
 
 ---
 

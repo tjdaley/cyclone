@@ -274,6 +274,12 @@ export interface ClaimCommitEntry {
   narrative: string
   statute_rule_cited: string | null
   opposing_party_id: number | null
+  /**
+   * Whose claim this is, from extraction. When opposing_party_id is null the
+   * backend resolves it from this — but only when the matter has exactly one
+   * opposing party, since more than one is genuinely ambiguous.
+   */
+  party_side?: 'our_client' | 'opposing'
 }
 
 /** An adverse party to create, or reuse when existing_id is set. */
