@@ -15,6 +15,7 @@ import DashboardPage  from './pages/app/DashboardPage'
 import BillingPage    from './pages/app/BillingPage'
 import MattersPage    from './pages/app/MattersPage'
 import MatterDetailPage from './pages/app/MatterDetailPage'
+import MatterFinancialsPage from './pages/app/MatterFinancialsPage'
 import ClientsPage    from './pages/app/ClientsPage'
 import DiscoveryPage  from './pages/app/DiscoveryPage'
 import PleadingsPage    from './pages/app/PleadingsPage'
@@ -45,6 +46,7 @@ export default function App() {
               <Route path="/app/billing"   element={<BillingPage />} />
               <Route path="/app/matters"   element={<MattersPage />} />
               <Route path="/app/matters/:matterId" element={<MatterDetailPage />} />
+              <Route path="/app/matters/:matterId/financials" element={<MatterFinancialsPage />} />
               <Route path="/app/clients"   element={<ClientsPage />} />
               <Route path="/app/discovery" element={<DiscoveryPage />} />
               <Route path="/app/pleadings" element={<PleadingsPage />} />

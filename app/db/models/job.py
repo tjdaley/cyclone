@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class JobKind(str, Enum):
     """What the job does. Values must match the jobs.kind CHECK constraint."""
     matter_intake = "matter_intake"
+    statement_ingest = "statement_ingest"
 
 
 class JobStatus(str, Enum):
@@ -36,7 +37,16 @@ class Job(BaseModel):
         default=None,
         description="Supabase Storage path of the uploaded input, e.g. the PDF to read",
     )
+    matter_id: Optional[int] = Field(
+        default=None,
+        description="Matter the work belongs to. Null for matter intake, which has no matter yet",
+    )
     requested_by_staff_id: int = Field(..., description="FK to the staff member who started it")
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Options the job was started with, e.g. a Bates prefix override. "
+                    "Shape depends on kind; the counterpart to result",
+    )
     result: Optional[dict[str, Any]] = Field(
         default=None,
         description="Payload the caller polls for; shape depends on kind",

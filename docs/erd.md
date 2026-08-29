@@ -1,10 +1,10 @@
 # Cyclone — Entity Relationship Diagrams
 
-Six subject-area diagrams. Split deliberately: one ERD covering every table is
+Eight subject-area diagrams. Split deliberately: one ERD covering every table is
 unreadable, and crossings grow much faster than node count. `MATTERS` and
 `STAFF` repeat across frames so each frame can stay small.
 
-Vetted line by line against the deployed schema after migration 022. Every
+Vetted line by line against the deployed schema after migration 026. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
 
@@ -82,6 +82,7 @@ erDiagram
     STAFF                    ||--o{ ATTORNEY_LEAD_RESPONDERS : "is the attorney"
     STAFF                    ||--o{ ATTORNEY_LEAD_RESPONDERS : "is the responder"
     STAFF                    ||--o{ JOBS : requested
+    MATTERS                  |o--o{ JOBS : "scoped to"
 ```
 
 - Lead rows themselves live in the **landing-pages** project; this database
@@ -93,6 +94,12 @@ erDiagram
   behind them.
 - `attorney_lead_responders` gets two labelled edges because both of its columns
   point at `staff`; one edge would hide that it pairs two people.
+- `jobs.matter_id` is nullable because the queue predates it: a matter-intake
+  job runs *before* the matter exists, so only jobs raised from inside a matter
+  — statement ingestion, so far — carry one.
+- `jobs.params` (migration 025) holds the options a job was *started* with, the
+  counterpart to `result`. First use is the Bates prefix override: typed at the
+  upload, needed by the worker minutes later in another process.
 
 ## 4. Money and the calendar
 
@@ -167,6 +174,97 @@ chain in the schema.
   `get_by_matter` and `get_pending_client` single-table. Since migration 022 a
   composite foreign key on `(discovery_request_id, matter_id)` guarantees it
   equals the parent document's, so the shortcut cannot lie.
+
+---
+
+## 7. Account statements
+
+```mermaid
+erDiagram
+    MATTERS                        ||--o{ FINANCIAL_ACCOUNTS : "inventories"
+    FINANCIAL_ACCOUNTS             |o--o| FINANCIAL_ACCOUNTS : "succeeds"
+    FINANCIAL_ACCOUNTS             ||--o{ FINANCIAL_ACCOUNT_STATEMENTS : "statements for"
+    FINANCIAL_ACCOUNT_STATEMENTS   ||--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "lines on"
+    OPPOSING_PARTIES               |o--o{ FINANCIAL_ACCOUNTS : "held by"
+    STAFF                          ||--o{ FINANCIAL_ACCOUNT_STATEMENTS : ingested
+    JOBS                           |o--o{ FINANCIAL_ACCOUNT_STATEMENTS : "extracted by"
+    MATTERS                        ||--o{ FINANCIAL_ACCOUNT_STATEMENTS : "shortcut, held true by composite FK"
+    FINANCIAL_ACCOUNTS             ||--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "shortcut, held true by composite FK"
+```
+
+The source of the inventory, the settlement spreadsheet, and the waste and
+reimbursement exhibits. Added by migration 023.
+
+- `financial_accounts.opposing_party_id` is nullable and means "held by the
+  other side"; `NULL` is our own client's account, not missing data.
+- `property_character` is nullable on purpose. Characterization is argued, not
+  extracted, so a freshly ingested account has none until an attorney sets one.
+- Both denormalized shortcuts follow the pattern established in diagram 6:
+  `financial_account_statements.matter_id` and
+  `financial_account_transactions.financial_account_id` each carry a composite
+  foreign key back to the parent's `(id, <key>)` unique constraint, so neither
+  can drift from the row above it.
+- `source_job_id` is nullable and `ON DELETE SET NULL` — a statement outlives
+  the job that produced it, and job rows are prunable.
+- A statement is unique on `(financial_account_id, period_start, period_end)`
+  only where `review_status <> 'rejected'`. Rejecting a bad extraction frees
+  the period so the same PDF can be run again.
+- `ownership` (migration 026) says who holds the account: `client_sole`,
+  `opposing_sole`, `joint`, `third_party`, `unknown`. It exists because
+  `opposing_party_id` alone could not express *joint*, and a jointly held
+  account is the difference between an asset one side keeps and an asset the
+  court divides. `opposing_party_id` now names *which* other party — sole owner
+  or co-holder. It defaults to `unknown`, not `client_sole`: every existing row
+  was created by extraction, which never determined this.
+- The transaction→statement composite FK is `ON UPDATE CASCADE` since migration
+  026, which is what makes an account merge possible. Moving a statement changes
+  a key its transactions point at; under the default `NO ACTION` there is no
+  order of updates that works, in either direction.
+- `antecedent_account_id` is the one self-reference in the schema. A reissued
+  card or a bank migration produces several accounts with different numbers;
+  read separately they look like three half-produced accounts with alarming
+  gaps, and read as a chain they are one continuous history. It points
+  *backwards* so a new number can be linked the day it appears, and a partial
+  unique index keeps a chain single-file — two accounts cannot claim the same
+  predecessor, or "what came next" stops having one answer.
+
+---
+
+## 8. Classifying transactions
+
+```mermaid
+erDiagram
+    TRANSACTION_CATEGORIES              |o--o{ TRANSACTION_CATEGORIES : "parent of"
+    TRANSACTION_CATEGORIES              |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "files"
+    FINANCIAL_ACCOUNT_TRANSACTIONS      ||--o{ FINANCIAL_ACCOUNT_TRANSACTION_TAGS : "tagged by"
+    TRANSACTION_TAGS                    ||--o{ FINANCIAL_ACCOUNT_TRANSACTION_TAGS : "applied to"
+    MATTERS                             |o--o{ TRANSACTION_TAGS : "scopes"
+    STAFF                               ||--o{ FINANCIAL_ACCOUNT_TRANSACTION_TAGS : "tagged"
+```
+
+Two axes over the same rows, deliberately built from different mechanisms
+because they answer different questions. Added by migration 024.
+
+- **Category is one per line**, a firm-wide hierarchy nesting to arbitrary
+  depth (Housing > Utilities > Gas). It drives the Financial Information
+  Statement — the personal income statement filed for a temporary orders
+  hearing — where a line in two buckets double-counts. Firm-wide rather than
+  per-matter so an FIS is comparable across cases.
+- **Tags are many-to-many**, in two layers held in one table: `matter_id` NULL
+  is a firm-wide tag offered everywhere ("Waste Claim"), a value scopes it to
+  one case ("Waste: Sister's Wedding"). They drive the Rule 1006 summaries, and
+  a single line is routinely evidence in several exhibits at once — which is
+  exactly why this cannot be a column.
+- `include_in_fis` is what keeps a stock split off the income statement: money
+  that moves without being income or expense.
+- `category_id` is `ON DELETE RESTRICT`, not `SET NULL`. Quietly un-filing
+  evidence because someone tidied the chart is how an FIS loses a line with
+  nobody noticing; retiring a category sets `is_active` instead.
+- The join table carries `tagged_by_staff_id`. Tagging is an attorney judgment
+  that gets cross-examined, so the record says who made it.
+- The join table also carries a surrogate `id` on top of its natural
+  `(transaction_id, tag_id)` key, purely so `BaseRepository`'s update and
+  delete by id work unchanged.
 
 ---
 

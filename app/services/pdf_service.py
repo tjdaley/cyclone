@@ -8,6 +8,7 @@ image and uses the LLM's multimodal vision capability for OCR.
 import base64
 import io
 import time
+from typing import Optional
 from PIL import ImageFile, Image
 import pymupdf
 
@@ -60,12 +61,19 @@ class PDFService:
     LLM's vision endpoint for extraction.
     """
 
-    def extract_text(self, pdf_bytes: bytes) -> str:
+    def extract_text(self, pdf_bytes: bytes, page_markers: bool = False) -> str:
         """
         Extract all text from a PDF, page by page.
 
         :param pdf_bytes: Raw PDF file content.
         :type pdf_bytes: bytes
+        :param page_markers: Prefix each page with ``<<<PAGE n>>>``. Off by
+            default because the pleading and discovery extractors were written
+            against unmarked text. Statement extraction turns it on: an exhibit
+            has to cite the page a line was printed on, and the model cannot
+            report a page number it was never shown. The delimiter is chosen to
+            be unmistakable — nothing on a bank statement looks like it.
+        :type page_markers: bool
         :return: Full extracted text, pages separated by double newlines.
         :rtype: str
         :raises ValueError: If the PDF cannot be opened.
@@ -95,6 +103,9 @@ class PDFService:
                 ocr_text = self._vision_extract(page)
                 pages.append(ocr_text)
 
+            if page_markers:
+                pages[-1] = "<<<PAGE %d>>>\n%s" % (page_num, pages[-1])
+
         doc.close()
         # At INFO because this is the dominant cost of an ingest: one vision
         # call per image-only page. Without it a slow upload looks like a hang.
@@ -107,7 +118,45 @@ class PDFService:
         )
         return text
 
-    def _vision_extract(self, page: pymupdf.Page) -> str:
+    def ask_page(self, pdf_bytes: bytes, page_number: int, prompt: str) -> Optional[str]:
+        """
+        Put one question to the model about one rendered page.
+
+        ``extract_text`` only falls back to vision when a page has almost no
+        text layer, which is the right rule for reading a document but leaves a
+        real gap: a page can be dense with text and still carry its most
+        important word — the institution's name — only inside the letterhead
+        graphic. Nothing is wrong with the text layer. The name was never in it.
+
+        This is the narrow remedy: one page, one question, asked only when
+        something downstream found the answer missing.
+
+        :param pdf_bytes: Raw PDF file content.
+        :param page_number: 1-based page of the PDF.
+        :param prompt: What to ask about the rendered page.
+        :return: The model's answer, or None when the page cannot be read.
+        :rtype: Optional[str]
+        """
+        import pymupdf
+
+        try:
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("pdf_service.ask_page: could not open PDF: %s", str(e))
+            return None
+        try:
+            if not 1 <= page_number <= doc.page_count:
+                return None
+            # A failed lookup must never fail the ingest around it.
+            answer = self._vision_extract(doc[page_number - 1], prompt=prompt)
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("pdf_service.ask_page: page %s failed: %s", page_number, str(e))
+            return None
+        finally:
+            doc.close()
+        return _sanitize(answer).strip() or None
+
+    def _vision_extract(self, page: pymupdf.Page, prompt: Optional[str] = None) -> str:
         """
         Render a page to an enhanced image and use LLM vision to extract text.
 
@@ -135,7 +184,7 @@ class PDFService:
         try:
             text = llm_service.complete_with_image(
                 system_prompt="You are a precise OCR system for legal documents.",
-                user_message=_VISION_OCR_PROMPT,
+                user_message=prompt or _VISION_OCR_PROMPT,
                 image_base64=b64,
                 image_media_type="image/png",
                 profile="ocr_document_page",

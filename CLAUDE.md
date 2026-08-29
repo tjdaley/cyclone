@@ -116,6 +116,12 @@ cyclone/
 │       ├── 018_jobs.sql                    # background job queue — see §11a
 │       ├── 019_clients_referred_to_staff.sql
 │       ├── 020_clients_schema_reconcile.sql  # brings 002 back in line with the deployed table
+│       ├── 021–022                         # client user_roles; discovery composite FK
+│       ├── 023_financial_statements.sql    # accounts, statements, transactions
+│       ├── 024_transaction_categories_and_tags.sql  # FIS chart + Rule 1006 tags
+│       ├── 025_job_params.sql             # jobs.params jsonb — options a job was started with
+│       ├── 026_account_ownership_and_merge.sql  # joint accounts; ON UPDATE CASCADE for merges
+│       ├── 027_purge_rejected_statements.sql   # ⚠ deletes data — old soft-rejected rows
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -439,6 +445,62 @@ Opens a **client and matter** from a filed pleading — the case where nothing e
 - `_match_confidence()` requires **first and last name to both agree**. Surname-only matching is not enough: adverse parties in a family-law caption almost always share a surname, so a looser rule offers the opposing spouse as a candidate for our own client. The frontend panels mirror this rule exactly — if you change one, change both.
 - `commit()` creates the client (or reuses a matched one), then the matter, then delegates to `pleading_service.commit_ingest` so parties, counsel, children, and claims are written by the same code as every other pleading. `case=None` opens a client and matter with no pleading — that is how a lead is promoted off a phone call.
 
+### Statement Service (`statement_service.py`)
+
+Ingests bank, brokerage, and credit-card statements. Output is **evidence**, and three rules follow from that:
+
+- **One sign convention.** An amount is signed by how it moves the balance the institution prints: a deposit and a card purchase are both positive, a withdrawal and a card payment both negative. Every account type then reconciles with `beginning + sum(amount) == ending`.
+- **Every statement checks itself.** One that does not tie is stored as unreconciled with the exact delta. Nothing is invented to close the gap — a synthetic balancing row is precisely what gets cross-examined.
+- **Inference is flagged.** `YEAR_INFERRED`, `LOCATION_INFERRED`, `SIGN_ASSUMED`, `AMOUNT_UNCLEAR`. A warn-level flag anywhere holds the whole statement in the exceptions queue; everything else is `auto_accepted` unseen, which is what makes a production of several hundred statements workable.
+
+Money is `numeric(14,2)` everywhere and `Decimal` in Python. `_money()` converts via `str` on purpose — `Decimal(1203.02)` from a float carries binary rounding error into an exhibit. It crosses the wire as a **string** and the frontend formats it without ever calling `Number()`.
+
+Statement extraction is the only caller of `pdf_service.extract_text(..., page_markers=True)`. The markers are what let the model report `physical_page_number`; a Rule 1006 summary has to cite the page, and a `bates_number` is copied from the page stamp or left null — never constructed from a neighbouring page.
+
+**The institution is the field that goes wrong, and it is half the dedup key.** `find_match` keys on institution *plus* last four, so a misread name opens a second account for one that already exists — which is invisible once statements pile up as two half-complete histories. Two real misreads from one production: the name read as null (letterhead graphic), and the vision fallback answering **"CSI"** — Computer Services, Inc., the core-banking vendor whose imprint sits beside the form revision code at the foot of every page. `_FORM_VENDORS` rejects those answers outright, because an unnamed account is fixed in seconds while a confidently wrong one looks settled; `_INSTITUTION_WORDS` keeps the guard from eating a real "CSI Federal Credit Union". And `others_with_last4` raises `SAME_LAST4_DIFFERENT_INSTITUTION` (warn) when a new account duplicates a number the matter already holds — it reports rather than merging, because two banks really can share a last four. Covered by `tests/test_institution_misread.py`.
+
+**The institution is often not in the text layer.** Many statements print the bank's name only inside the letterhead graphic. The page is otherwise dense with text, so it clears `_MIN_TEXT_LENGTH` and is never rendered for vision — the name exists solely as pixels nobody looks at, and the account is filed under "Unknown institution". That matters more than it sounds: institution plus last four is the dedup key, so the *next* upload of the same account opens a second row. `resolve_missing_institutions()` is the remedy — one narrow `pdf_service.ask_page()` vision call per unnamed statement, asking only that question.
+
+**Merging is the repair when that has already happened.** `preview_merge()` reports before `merge()` acts, because a merge moves evidence and deletes a row. `PERIOD_OVERLAP`, `SAME_ACCOUNT`, and `DIFFERENT_MATTER` are blocking; `BATES_OVERLAP`, `LAST4_MISMATCH`, and `TYPE_MISMATCH` need `force`. Period overlap is blocking rather than forceable for a concrete reason: the unique index on `(account, period_start, period_end)` would reject the second statement and fail the merge part-way with an opaque database error. Two ordering rules inside `merge()`: statements move **before** the source is deleted (the statements table cascades on account delete, so deleting first destroys them), and successors naming the source as `antecedent_account_id` are repointed first. Covered by `tests/test_account_merge.py`.
+
+**One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements claim the same page, because two statements cannot be printed on one page. Covered by `tests/test_statement_split_guard.py`.
+
+**Rejecting a statement deletes it.** Not a status flip — the statement, its transactions, and (when nothing of value would go with it) the account the bad import created. `review_status = 'rejected'` used to leave all of it filtered out of every view but still present, which is the worst of both worlds: nobody can act on invisible rows, and the empty account sits in the inventory forever. `_reason_to_keep()` spares an account that still has statements, sits in a succession chain, or carries attorney judgment (`ownership`, `property_character`, `purpose`, `notes`) — that is work the import did not do and should not undo. The source PDF stays in Storage: one upload can back several statements, so deleting it on one rejection would take another's source with it. Migration 027 applies the same rule to rows rejected under the old behaviour. Covered by `tests/test_statement_reject.py`.
+
+**A line can be corrected after ingestion, but never quietly.** `correct_transaction()` appends a `MANUAL_CORRECTION` flag per changed field — the field, both values, the staff member's name, the timestamp, and an optional reason — so the original stays recoverable from the record that goes into an exhibit. It also writes an `audit_log` entry (§13). Only the nine fields in `_CORRECTABLE` may be changed; structural columns are not editable, because changing which statement a line belongs to is a re-ingest, not an edit.
+
+**Correcting an `amount` re-reconciles the statement.** That is the point of allowing the edit: an unreconciled statement is usually one misread figure. `_rereconcile()` recomputes the close and *replaces* the stale `UNRECONCILED` flag rather than stacking another one, so a statement corrected into balance stops claiming it is out of balance. It deliberately leaves `review_status` alone — clearing an exception is a decision, not a consequence of arithmetic. Covered by `tests/test_transaction_correction.py`.
+
+Pass `Decimal` and `date` straight to `repo.update()`. The manager's `json_safe` already converts them, and converting to `str` first leaves a string on the model handed back to the caller, which then breaks the next arithmetic that touches it.
+
+**`source_filename`, `bates_first`, and `bates_last` live in the statement's `extraction` jsonb**, not in columns — they are provenance, never queried on. `_statement_response()` in the router lifts them out, because "which file was this?" is the first question asked about a statement that will not reconcile, and Storage renames every upload to a job id.
+
+### Bates Service (`bates_service.py`)
+
+**A Bates number is a pattern problem, not an extraction problem.** The stamp is one token printed in the same place on every page of a production, and its numeric part advances by one per page — nothing else on a bank statement behaves that way. An account number repeats, a balance fluctuates, a check number jumps around.
+
+So it runs in Python over the page-marked text, never through the model. Exact, free, auditable, and it removes a hallucination surface: asked for "the Bates number" on an unstamped page, a model will produce a plausible one, and a citation to a number that is not on the document is worse than no citation.
+
+- **Strict monotonicity is the hard gate**, not unit steps. A production with pages missing is *precisely* a run whose steps are not all one — gating on unit steps would reject the incomplete productions and accept only the complete ones, exactly backwards. Unit steps are evidence used for ranking and confidence.
+- **When a series is detected, the pattern owns `bates_number` outright**, including writing `None` for a page it found no stamp on. The model's answer is discarded, not used as a fallback. With no series detected the model's value is kept but the statement carries `BATES_UNVERIFIED`.
+- **The gap scan runs over a statement's page SPAN, not its transaction-bearing pages.** Statements are full of pages with no lines: a checkbook reconciliation worksheet, disclosures, a closing page of running balances. Scanning only pages that carried a transaction made every one of those read as a hole — a First Financial statement with entries on pages 1 and 3 reported its own stamped page 2 as missing from the production. The flag fired exactly when a statement had transactions on two non-adjacent pages, which says nothing about the production. `SUSPECT_SPLIT` still uses transaction pages, deliberately: the narrower range means fewer false positives on a combined statement carrying two accounts.
+- **An unstamped page we hold is not a gap.** It is projected onto the run so the number it would carry does not read as missing. That inference only ever *suppresses* a false alarm — the projected number is deliberately never written to `by_page`.
+- `BATES_GAP` is `warn` (a hole inside a statement usually means missing lines, which is also the reading behind an unreconciled balance); `BATES_UNSTAMPED` and `BATES_UNVERIFIED` are `info`.
+- The `bates_prefix` upload field is an override for a document carrying two competing series. It rides on `jobs.params`, because the user types it at the upload and the worker needs it minutes later in another process.
+
+Covered by `tests/test_bates_service.py` and `tests/test_statement_bates_commit.py` — run them directly with the venv interpreter; there is no runner wired up yet.
+
+### Transaction Search Service (`transaction_search_service.py`)
+
+Everything downstream of ingestion. Two classification axes, deliberately different mechanisms:
+
+- **Category** — one per transaction, from the firm-wide `transaction_categories` hierarchy. Drives the Financial Information Statement, where a line in two buckets double-counts. `include_in_fis` is what keeps a stock split off an income statement. Extraction never sets `category_id`; the free-text `category` column is the model's guess and is only ever a hint.
+- **Tags** — many-to-many, two layers in one table (`matter_id` NULL is firm-wide). Drives the Rule 1006 summaries. One line is routinely evidence in several exhibits at once.
+
+**A matter's accounts are the search scope.** Transactions carry no `matter_id`, so every query resolves the matter's accounts first and intersects any account filter against them — that is what stops a crafted request reaching another matter's records. `_verify_on_matter()` does the same for every mutation.
+
+`FinancialAccountTransactionRepository.search()` is the one place that builds a PostgREST query by hand instead of passing a condition dict: the dict supports equality, `IN`, and null checks only, so a date window and an `ILIKE` cannot be expressed through it at all. The "untagged" filter is expressed as *exclude the tagged ids*, never as the complement — the complement is the whole production and would blow both the URI limit and PostgREST's max-rows cap.
+
 ### Audit Logger (`audit_logger.py`)
 
 `AuditLogger.log()` **never re-raises on failure** — audit logging must not crash the primary operation.
@@ -644,7 +706,19 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | CRUD for matter children / claims / counsel links / staff | ✅ Built (API + matter detail page) |
 | Matter intake from a dropped pleading | ✅ Built — neutral extraction, "who do we represent", client/lead matching |
 | Lead → client + matter promotion, and linking an existing client | ✅ Built (`converted_to_client_id` / `converted_to_matter_id` now written) |
-| Background job queue (`jobs` table + worker) | ✅ Built — matter intake only; see §11a |
+| Background job queue (`jobs` table + worker) | ✅ Built — matter intake and statement ingest; see §11a |
+| Account statement ingestion (bank/brokerage/card) | ✅ Built — queued, reconciles itself, exceptions queue |
+| Transaction categories (FIS chart of accounts) | ✅ Built — firm-wide hierarchy, seeded by 024 |
+| Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply |
+| Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
+| Financial Information Statement generation | ❌ Not started — the chart and `include_in_fis` are in place |
+| Bates detection + gap reporting | ✅ Built — pattern-based, per-page, with production-gap flags |
+| Account merge (two rows, one real account) | ✅ Built — previewed, with blocking and forceable conflicts |
+| Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
+| Reject a statement (discards it and its lines) | ✅ Built — deletes; removes an emptied, uncharacterized account too |
+| Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
+| Rule 1006 exhibit export | ❌ Not started — tagging and Bates capture are in place |
+| Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
@@ -714,6 +788,31 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Import `fitz` / `PIL` outside `pdf_service.py` | Call `pdf_service.extract_text(...)` |
 | Hardcode environment-specific values | Use `settings.*` |
 | Use `supabase.from(...)` in frontend components | Use typed wrappers from `src/lib/api.ts` |
+| Parse an API money string with `Number()` / `parseFloat` | Format the string directly. It is a string so exact cents survive Postgres `numeric`; parsing undoes that where it matters most |
+| Store a money value as `float` | `numeric(14,2)` in SQL, `Decimal` in Python, converted via `str` — never `Decimal(some_float)` |
+| Decide a transaction amount sign by account type | Sign by effect on the printed balance, so `beginning + sum == ending` holds for every account type |
+| Invent a row to make a statement reconcile | Record it unreconciled with the delta; a synthetic balancing row is what gets cross-examined |
+| Add a second category to a transaction | Category is one per line — it drives the FIS. Use a tag; that is what tags are for |
+| Set `category_id` from extraction | The LLM fills free-text `category` as a hint only; a human files the line |
+| Query transactions without resolving the matter's accounts first | Transactions carry no `matter_id`; the account list is the matter boundary |
+| Express "untagged" as the complement of the tagged set | Exclude the tagged ids — the complement is the whole production and blows the URI and max-rows limits |
+| Rely on `find_period` to catch a duplicated statement | It is account-scoped, so it misses the case where the account itself was misread. Page overlap is the document-scoped check |
+| Take a vision answer for the institution at face value | The form printer'"'"'s imprint is the other company name on the page. Reject known vendors; prefer unnamed to wrongly named |
+| Use `.get("field", "")` on extraction output | The key is present and null far more often than absent, and a default never sees null. Use `or ""` |
+| Trust an institution name when one upload reports several | Disagreement means at least one is a guess. Re-read them from the pages |
+| Leave a rejected extraction in the table "filtered out" | Delete it. Invisible-but-present means nobody can act on it and the empty account never goes away |
+| Delete an account that carries a characterization | `_reason_to_keep()` spares it. Ownership, character, purpose, and notes are attorney work, not import output |
+| Overwrite an extracted value in place | Correct it through `correct_transaction()` — the flag trail is what makes the figure defensible |
+| Convert `Decimal`/`date` to `str` before `repo.update()` | Pass the native type; `json_safe` handles it, and converting early corrupts the returned model |
+| Add an `UNRECONCILED` flag on re-check | Replace the existing one, or a corrected statement keeps claiming it is out of balance |
+| Infer account ownership from `opposing_party_id` being null | Read `ownership`. Null-means-ours cannot express *joint*, and joint decides whether an asset divides |
+| Assume a missing institution means the PDF is unreadable | It usually means the name is only in the letterhead graphic. Ask the page (`pdf_service.ask_page`) |
+| Delete a financial account before moving its statements | `financial_account_statements` cascades on account delete — the evidence goes with it |
+| Take `files[0]` from a drop event | Statements arrive as a stack. Dropping the rest silently is the worst failure mode: nothing looks wrong |
+| Construct a Bates number for an unstamped page | Leave it null. A cited number that is not on the page is worse than no citation |
+| Ask the model for a Bates number when a series was detected | The pattern owns the field — the model's value is discarded, not used as a fallback |
+| Derive a statement's page range from its transactions | Use the span. A worksheet or disclosures page carries no lines and is not missing |
+| Gate Bates detection on perfect one-per-page steps | That rejects exactly the incomplete productions worth flagging. Gate on monotonicity |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
 | Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |
 | Add a model field without a migration in the same change | The startup schema check will log an `ERROR`, but the insert is already broken |

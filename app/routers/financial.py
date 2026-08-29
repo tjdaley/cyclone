@@ -1,0 +1,720 @@
+"""
+app/routers/financial.py - Accounts, statements, and transactions on a matter.
+
+Ingestion is queued (§11a): a statement PDF is one LLM call per statement over
+a document that may hold several months, which is far too long to hold a
+request open. The upload returns a job id; the worker does the work.
+"""
+from typing import Any
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+
+from db.models.financial import StatementReviewStatus, TransactionCategory, TransactionTag
+from db.models.job import JobStatus
+from db.repositories.financial import (
+    FinancialAccountRepository,
+    FinancialAccountStatementRepository,
+    FinancialAccountTransactionRepository,
+    TransactionCategoryRepository,
+    TransactionTagRepository,
+)
+from db.repositories.matter import MatterRepository
+from db.repositories.staff import StaffRepository
+from dependencies import get_db_manager, require_role
+from schemas.financial import (
+    AccountMergePreview,
+    AccountMergeRequest,
+    AccountMergeResult,
+    BulkCategorizeRequest,
+    BulkResultResponse,
+    BulkTagRequest,
+    FinancialAccountResponse,
+    FinancialAccountUpdateRequest,
+    StatementIngestJobResponse,
+    StatementIngestSummary,
+    StatementJobStatusResponse,
+    StatementRejectResult,
+    StatementResponse,
+    StatementReviewRequest,
+    StatementReviewResponse,
+    TransactionCategoryResponse,
+    TransactionCategoryWriteRequest,
+    TransactionCorrectionResponse,
+    TransactionResponse,
+    TransactionSearchRequest,
+    TransactionSearchResponse,
+    TransactionTagResponse,
+    TransactionTagWriteRequest,
+    TransactionUpdateRequest,
+)
+from services.audit_logger import AuditLogger
+from services.job_service import job_service
+from services.statement_service import statement_service
+from services.transaction_search_service import transaction_search_service
+from util.loggerfactory import LoggerFactory
+
+LOGGER = LoggerFactory.create_logger(__name__)
+
+router = APIRouter(prefix="/api/v1", tags=["financial"])
+
+_STAFF_ROLES = ["attorney", "admin", "paralegal"]
+
+
+def _staff_id(request: Request, manager: Any) -> int:
+    staff = StaffRepository(manager).get_by_supabase_uid(request.state.supabase_uid)
+    if staff is None:
+        raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
+    return staff.id
+
+
+
+def _statement_response(record: Any) -> StatementResponse:
+    """
+    Build a statement response, lifting provenance out of the extraction blob.
+
+    Filename and Bates range live in ``extraction`` rather than in columns of
+    their own — they are provenance, never queried on — but the exceptions queue
+    needs them front and centre, because "which file was this?" is the first
+    question asked about a statement that will not reconcile.
+    """
+    extraction = record.extraction or {}
+    return StatementResponse(
+        **record.model_dump(),
+        source_filename=extraction.get("source_filename"),
+        bates_first=extraction.get("bates_first"),
+        bates_last=extraction.get("bates_last"),
+    )
+
+
+# ── Ingestion ────────────────────────────────────────────────────────────────
+
+@router.post("/matters/{matter_id}/statements/upload",
+             response_model=StatementIngestJobResponse, status_code=202)
+def upload_statement(
+    matter_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    bates_prefix: str = Form(default=""),
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementIngestJobResponse:
+    """
+    Accept a statement PDF and return a job to poll.
+
+    One PDF may hold several statements — a combined bank package, or months
+    scanned together. Each is filed against its own account.
+
+    ``bates_prefix`` is optional and rarely needed: the stamp is normally found
+    by pattern, and the prefix only helps when a document carries two competing
+    series or an unusual one.
+    """
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    pdf_bytes = file.file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty")
+
+    try:
+        job = job_service.enqueue_statement_ingest(
+            manager, _staff_id(request, manager), matter_id, pdf_bytes,
+            bates_prefix=bates_prefix.strip() or None,
+            source_filename=(file.filename or "").strip() or None,
+        )
+    except Exception as e:  # noqa: BLE001 — storage failure is the only path here
+        LOGGER.error("financial.upload_statement: could not queue: %s", str(e))
+        raise HTTPException(status_code=502, detail="Could not store the upload for processing") from e
+
+    return StatementIngestJobResponse(id=job.id, status=job.status.value)
+
+
+@router.get("/statements/jobs/{job_id}", response_model=StatementJobStatusResponse)
+def get_statement_job(
+    job_id: str,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementJobStatusResponse:
+    """
+    Poll a statement ingest. Returns the summary once the status is 'succeeded'.
+
+    Scoped to the staff member who uploaded, like every other job poll.
+    """
+    job = job_service.get_for_staff(manager, job_id, _staff_id(request, manager))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    summary = None
+    if job.status == JobStatus.succeeded and job.result:
+        try:
+            summary = StatementIngestSummary.model_validate(job.result)
+        except Exception as e:  # noqa: BLE001 — a result from an older shape
+            LOGGER.error("financial.get_statement_job: job=%s result no longer parses: %s", job_id, str(e))
+            return StatementJobStatusResponse(
+                id=job.id, status=JobStatus.failed.value,
+                error="This ingest was produced by an older version — please upload again.",
+            )
+
+    return StatementJobStatusResponse(
+        id=job.id, status=job.status.value, result=summary, error=job.error,
+    )
+
+
+# ── Accounts ─────────────────────────────────────────────────────────────────
+
+@router.get("/matters/{matter_id}/financial-accounts", response_model=list[FinancialAccountResponse])
+def list_accounts(
+    matter_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[FinancialAccountResponse]:
+    """List the accounts on a matter — the financial section of the inventory."""
+    records = FinancialAccountRepository(manager).get_by_matter(matter_id)
+    return [FinancialAccountResponse(**r.model_dump()) for r in records]
+
+
+@router.patch("/financial-accounts/{account_id}", response_model=FinancialAccountResponse)
+def update_account(
+    account_id: int,
+    body: FinancialAccountUpdateRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> FinancialAccountResponse:
+    """
+    Correct or characterize an account.
+
+    Extraction fills in institution and number; characterization, ownership,
+    and purpose are attorney judgments and are only ever set here.
+    """
+    repo = FinancialAccountRepository(manager)
+    if repo.select_one(condition={"id": account_id}) is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    # exclude_unset, not exclude_none: clearing a note or a characterization back
+    # to null is a real edit, and exclude_none would silently drop it.
+    updates = body.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields provided for update")
+    return FinancialAccountResponse(**repo.update(account_id, updates).model_dump())
+
+
+@router.get("/financial-accounts/{account_id}/merge-preview/{target_account_id}",
+            response_model=AccountMergePreview)
+def preview_account_merge(
+    account_id: int,
+    target_account_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> AccountMergePreview:
+    """
+    Report what merging one account into another would do.
+
+    Accounts split in two for a mundane reason: many statements print the
+    institution only in the letterhead graphic, so the first upload files an
+    "Unknown institution" account, and correcting that name does not
+    retroactively match the next upload.
+
+    Merging moves evidence and drops a row, so it reports before it acts.
+    """
+    try:
+        preview = statement_service.preview_merge(manager, account_id, target_account_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return AccountMergePreview(**preview)
+
+
+@router.post("/financial-accounts/{account_id}/merge", response_model=AccountMergeResult)
+def merge_accounts(
+    account_id: int,
+    body: AccountMergeRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> AccountMergeResult:
+    """
+    Move every statement off this account onto another, then delete this one.
+
+    Transactions follow their statements automatically — migration 026 made
+    that composite foreign key ``ON UPDATE CASCADE``.
+    """
+    try:
+        result = statement_service.merge(manager, account_id, body.target_account_id, force=body.force)
+    except ValueError as e:
+        # 409: the request is well-formed, the state will not allow it.
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return AccountMergeResult(
+        statements_moved=result["statements_moved"],
+        transactions_moved=result["transactions_moved"],
+        target=FinancialAccountResponse(**result["target"].model_dump()),
+    )
+
+
+# ── Statements ───────────────────────────────────────────────────────────────
+
+@router.get("/financial-accounts/{account_id}/statements", response_model=list[StatementResponse])
+def list_statements(
+    account_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[StatementResponse]:
+    """An account's statements, oldest period first."""
+    records = FinancialAccountStatementRepository(manager).get_by_account(account_id)
+    return [_statement_response(r) for r in records]
+
+
+@router.get("/matters/{matter_id}/statements/exceptions", response_model=list[StatementResponse])
+def list_exceptions(
+    matter_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[StatementResponse]:
+    """
+    The exceptions queue: statements that did not clear on their own.
+
+    A statement reaches this list because it failed to reconcile, printed no
+    balances to check against, matched no account, or carried a warning from
+    extraction. Everything else was accepted without review.
+    """
+    records = FinancialAccountStatementRepository(manager).needing_review(matter_id)
+    return [_statement_response(r) for r in records]
+
+
+@router.patch("/statements/{statement_id}/review", response_model=StatementReviewResponse)
+def review_statement(
+    statement_id: int,
+    body: StatementReviewRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementReviewResponse:
+    """
+    Clear a statement out of the exceptions queue.
+
+    ``accepted`` keeps it, unreconciled or not — an exhibit can still footnote
+    the discrepancy.
+
+    ``rejected`` **deletes** it, along with its transactions and, when nothing
+    of value would go with it, the account it created. A rejected extraction is
+    not evidence held back, it is data that was read wrong; leaving it filtered
+    out but present means nobody can act on it and the empty account it opened
+    sits in the inventory forever.
+    """
+    repo = FinancialAccountStatementRepository(manager)
+    record = repo.select_one(condition={"id": statement_id})
+    if record is None:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    if body.review_status not in (StatementReviewStatus.accepted, StatementReviewStatus.rejected):
+        raise HTTPException(status_code=422, detail="Review sets 'accepted' or 'rejected'")
+
+    if body.review_status == StatementReviewStatus.rejected:
+        try:
+            result = statement_service.reject_statement(manager, statement_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        # Deleting evidence is exactly what §13 wants a second, immutable record of.
+        AuditLogger(manager).log(
+            action="financial_statement_rejected",
+            entity_type="financial_account_statements",
+            entity_id=str(statement_id),
+            supabase_uid=request.state.supabase_uid,
+            after_json=result,
+        )
+        return StatementReviewResponse(discarded=StatementRejectResult(**result))
+
+    updated = repo.update(statement_id, {"review_status": StatementReviewStatus.accepted.value})
+    LOGGER.info("financial.review_statement: statement=%s accepted", statement_id)
+    return StatementReviewResponse(statement=_statement_response(updated))
+
+
+# ── Transactions ─────────────────────────────────────────────────────────────
+
+@router.get("/statements/{statement_id}/transactions", response_model=list[TransactionResponse])
+def list_statement_transactions(
+    statement_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[TransactionResponse]:
+    """One statement's lines, in printed order."""
+    records = FinancialAccountTransactionRepository(manager).get_by_statement(statement_id)
+    return [TransactionResponse(**r.model_dump()) for r in records]
+
+
+@router.get("/financial-accounts/{account_id}/transactions", response_model=list[TransactionResponse])
+def list_account_transactions(
+    account_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[TransactionResponse]:
+    """
+    An account's whole history in date order.
+
+    This is the query behind the waste and reimbursement exhibits.
+    """
+    records = FinancialAccountTransactionRepository(manager).get_by_account(account_id)
+    return [TransactionResponse(**r.model_dump()) for r in records]
+
+
+
+@router.patch("/transactions/{transaction_id}", response_model=TransactionCorrectionResponse)
+def correct_transaction(
+    transaction_id: int,
+    body: TransactionUpdateRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionCorrectionResponse:
+    """
+    Correct a value on an ingested line.
+
+    The change is recorded on the line itself as a MANUAL_CORRECTION flag
+    naming the field, both values, and who made it. The corrected figure ends up
+    in an exhibit, and the first question on cross is where it came from.
+
+    Correcting an amount re-reconciles the statement, which is the point of
+    allowing the edit: an unreconciled statement is usually one misread figure.
+    """
+    staff = StaffRepository(manager).get_by_supabase_uid(request.state.supabase_uid)
+    if staff is None:
+        raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
+    name = " ".join(p for p in (staff.name.first_name, staff.name.last_name) if p).strip() \
+        or "A staff member"
+
+    updates = body.model_dump(exclude_unset=True)
+    reason = updates.pop("reason", None)
+    try:
+        transaction, statement = statement_service.correct_transaction(
+            manager, transaction_id, updates, staff.id, name, reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    # Editing evidence is exactly the kind of act §13 wants a second record of,
+    # in a table that cannot be updated or deleted.
+    AuditLogger(manager).log(
+        action="financial_transaction_corrected",
+        entity_type="financial_account_transactions",
+        entity_id=str(transaction_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"fields": sorted(updates), "reason": reason},
+    )
+    return TransactionCorrectionResponse(
+        transaction=TransactionResponse(**transaction.model_dump()),
+        statement=_statement_response(statement) if statement is not None else None,
+    )
+
+
+# ── Categories (the firm-wide chart of accounts) ─────────────────────────────
+
+def _decorate(categories: list) -> list[TransactionCategoryResponse]:
+    """
+    Add depth and a full path to each node.
+
+    A leaf name on its own is ambiguous — "Gas" is both a utility and a car
+    expense — so the picker shows the whole path. Computed on read rather than
+    stored: a stored path goes stale the moment a category is reparented.
+    """
+    by_id = {c.id: c for c in categories}
+    out: list[TransactionCategoryResponse] = []
+    for category in categories:
+        names: list[str] = []
+        depth = 0
+        current = category
+        seen: set[int] = set()
+        while current is not None and current.id not in seen:
+            seen.add(current.id)
+            names.append(current.description)
+            current = by_id.get(current.parent_id) if current.parent_id else None
+            if current is not None:
+                depth += 1
+        out.append(TransactionCategoryResponse(
+            **category.model_dump(), depth=depth, path=" > ".join(reversed(names)),
+        ))
+    return out
+
+
+@router.get("/transaction-categories", response_model=list[TransactionCategoryResponse])
+def list_categories(
+    include_inactive: bool = False,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[TransactionCategoryResponse]:
+    """
+    The firm-wide category tree in display order.
+
+    Not matter-scoped on purpose: a Financial Information Statement is only
+    comparable across cases when every case buckets to the same chart.
+    """
+    return _decorate(TransactionCategoryRepository(manager).get_all(include_inactive=include_inactive))
+
+
+@router.post("/transaction-categories", response_model=TransactionCategoryResponse, status_code=201)
+def create_category(
+    body: TransactionCategoryWriteRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(["admin", "attorney"])),
+) -> TransactionCategoryResponse:
+    """Add a category. Firm-wide, so it changes every matter's chart."""
+    if not (body.description or "").strip():
+        raise HTTPException(status_code=422, detail="A category needs a description")
+    repo = TransactionCategoryRepository(manager)
+    if body.parent_id is not None and repo.select_one(condition={"id": body.parent_id}) is None:
+        raise HTTPException(status_code=422, detail="No such parent category")
+    try:
+        created = repo.insert(TransactionCategory(
+            description=body.description.strip(),
+            parent_id=body.parent_id,
+            display_order=body.display_order or 0,
+            include_in_fis=True if body.include_in_fis is None else body.include_in_fis,
+        ).model_dump())
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail="A sibling category already has that name") from e
+    return next(c for c in _decorate(repo.get_all(include_inactive=True)) if c.id == created.id)
+
+
+@router.patch("/transaction-categories/{category_id}", response_model=TransactionCategoryResponse)
+def update_category(
+    category_id: int,
+    body: TransactionCategoryWriteRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(["admin", "attorney"])),
+) -> TransactionCategoryResponse:
+    """Amend a category. Reparenting it under its own descendant is refused."""
+    repo = TransactionCategoryRepository(manager)
+    if repo.select_one(condition={"id": category_id}) is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    updates = body.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields provided for update")
+    if updates.get("parent_id") is not None:
+        if updates["parent_id"] == category_id:
+            raise HTTPException(status_code=422, detail="A category cannot be its own parent")
+        # Reparenting under a descendant makes a cycle: the branch detaches from
+        # the tree, and every walk over it either loops or loses those rows.
+        if updates["parent_id"] in repo.expand([category_id]):
+            raise HTTPException(status_code=422, detail="That would put the category inside its own branch")
+
+    updated = repo.update(category_id, updates)
+    return next(c for c in _decorate(repo.get_all(include_inactive=True)) if c.id == updated.id)
+
+
+@router.delete("/transaction-categories/{category_id}", status_code=204)
+def delete_category(
+    category_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(["admin"])),
+) -> None:
+    """
+    Remove a category that nothing uses.
+
+    Refused while transactions are filed under it or children hang off it.
+    Deactivate instead — quietly un-filing evidence because someone tidied the
+    chart is how an FIS loses a line with nobody noticing.
+    """
+    repo = TransactionCategoryRepository(manager)
+    if repo.select_one(condition={"id": category_id}) is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    in_use = repo.in_use(category_id)
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail="%d transaction(s) are filed under this category. Deactivate it instead." % in_use,
+        )
+    if any(c.parent_id == category_id for c in repo.get_all(include_inactive=True)):
+        raise HTTPException(status_code=409, detail="This category still has subcategories")
+    repo.delete(category_id)
+
+
+# ── Tags ─────────────────────────────────────────────────────────────────────
+
+@router.get("/matters/{matter_id}/transaction-tags", response_model=list[TransactionTagResponse])
+def list_tags(
+    matter_id: int,
+    include_inactive: bool = False,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[TransactionTagResponse]:
+    """
+    Every tag offered on this matter: the firm-wide layer plus the case's own.
+
+    Usage counts come back with them — the number of lines behind a tag is the
+    size of the exhibit it would produce.
+    """
+    repo = TransactionTagRepository(manager)
+    tags = repo.available_for_matter(matter_id, include_inactive=include_inactive)
+    return [TransactionTagResponse(**t.model_dump(), usage_count=repo.in_use(t.id)) for t in tags]
+
+
+@router.post("/matters/{matter_id}/transaction-tags",
+             response_model=TransactionTagResponse, status_code=201)
+def create_matter_tag(
+    matter_id: int,
+    body: TransactionTagWriteRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionTagResponse:
+    """
+    Add a tag scoped to this matter, e.g. "Waste: Sister's Wedding".
+
+    Matter-scoped because the label states a theory about this case; it means
+    nothing on anyone else's and should not clutter their picker.
+    """
+    if not (body.label or "").strip():
+        raise HTTPException(status_code=422, detail="A tag needs a label")
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    try:
+        created = TransactionTagRepository(manager).insert(TransactionTag(
+            matter_id=matter_id,
+            label=body.label.strip(),
+            description=body.description,
+            color=body.color,
+            display_order=body.display_order or 500,
+        ).model_dump())
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail="This matter already has a tag with that label") from e
+    return TransactionTagResponse(**created.model_dump(), usage_count=0)
+
+
+@router.post("/transaction-tags", response_model=TransactionTagResponse, status_code=201)
+def create_firm_tag(
+    body: TransactionTagWriteRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(["admin", "attorney"])),
+) -> TransactionTagResponse:
+    """Add a firm-wide tag, offered on every matter."""
+    if not (body.label or "").strip():
+        raise HTTPException(status_code=422, detail="A tag needs a label")
+    try:
+        created = TransactionTagRepository(manager).insert(TransactionTag(
+            matter_id=None,
+            label=body.label.strip(),
+            description=body.description,
+            color=body.color,
+            display_order=body.display_order or 500,
+        ).model_dump())
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail="A firm-wide tag with that label exists") from e
+    return TransactionTagResponse(**created.model_dump(), usage_count=0)
+
+
+@router.patch("/transaction-tags/{tag_id}", response_model=TransactionTagResponse)
+def update_tag(
+    tag_id: int,
+    body: TransactionTagWriteRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionTagResponse:
+    """Rename or restyle a tag. Its links to transactions are untouched."""
+    repo = TransactionTagRepository(manager)
+    if repo.select_one(condition={"id": tag_id}) is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    updates = body.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields provided for update")
+    updated = repo.update(tag_id, updates)
+    return TransactionTagResponse(**updated.model_dump(), usage_count=repo.in_use(tag_id))
+
+
+@router.delete("/transaction-tags/{tag_id}", status_code=204)
+def delete_tag(
+    tag_id: int,
+    force: bool = False,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> None:
+    """
+    Delete a tag.
+
+    Refused while it is in use unless ``force=true``, because the delete
+    cascades: removing a tag applied to three hundred lines dissolves an exhibit
+    without a trace. The count in the error is what the caller needs to decide.
+    """
+    repo = TransactionTagRepository(manager)
+    if repo.select_one(condition={"id": tag_id}) is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    in_use = repo.in_use(tag_id)
+    if in_use and not force:
+        raise HTTPException(
+            status_code=409,
+            detail="%d transaction(s) carry this tag. Deactivate it, or delete with force=true." % in_use,
+        )
+    LOGGER.info("financial.delete_tag: tag=%s in_use=%s forced=%s", tag_id, in_use, force)
+    repo.delete(tag_id)
+
+
+# ── Search and bulk classification ───────────────────────────────────────────
+
+@router.post("/matters/{matter_id}/transactions/search", response_model=TransactionSearchResponse)
+def search_transactions(
+    matter_id: int,
+    body: TransactionSearchRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionSearchResponse:
+    """
+    Filter a matter's transactions by account, date, category, tag, and text.
+
+    The matter bounds every search: transactions carry no matter_id, so the
+    service resolves the matter's accounts first and intersects any account
+    filter against them.
+    """
+    result = transaction_search_service.search(
+        manager=manager,
+        matter_id=matter_id,
+        account_ids=body.account_ids,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        category_ids=body.category_ids,
+        include_subcategories=body.include_subcategories,
+        uncategorized=body.uncategorized,
+        tag_ids=body.tag_ids,
+        tag_match_all=body.tag_match_all,
+        untagged=body.untagged,
+        text=body.text,
+        limit=body.limit,
+        offset=body.offset,
+    )
+    return TransactionSearchResponse(**result)
+
+
+@router.post("/matters/{matter_id}/transactions/categorize", response_model=BulkResultResponse)
+def categorize_transactions(
+    matter_id: int,
+    body: BulkCategorizeRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> BulkResultResponse:
+    """File a set of transactions under one category, or clear it."""
+    try:
+        changed = transaction_search_service.set_category(
+            manager, matter_id, body.transaction_ids, body.category_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return BulkResultResponse(changed=changed)
+
+
+@router.post("/matters/{matter_id}/transactions/tag", response_model=BulkResultResponse)
+def tag_transactions(
+    matter_id: int,
+    body: BulkTagRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> BulkResultResponse:
+    """
+    Apply or remove one tag across a set of transactions.
+
+    Who applied it is recorded on every link — tagging is an attorney judgment,
+    and it gets cross-examined.
+    """
+    try:
+        changed = transaction_search_service.apply_tag(
+            manager, matter_id, body.transaction_ids, body.tag_id,
+            _staff_id(request, manager), remove=body.remove,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return BulkResultResponse(changed=changed)
+

@@ -9,107 +9,119 @@
     "Adding a profile here requires no code change; naming one at a call site",
     "that is missing here raises LLMUnavailableError."
   ],
-
   "_physical_chains": "The three below are the real model chains. Task profiles extend them.",
-
   "default": {
     "description": "General-purpose reasoning over long legal text",
     "chain": [
-      {"vendor": "anthropic", "model": "claude-opus-4-6"},
-      {"vendor": "gemini", "model": "gemini-3.1-pro-preview"},
-      {"vendor": "openai", "model": "gpt-5.4"}
+      {
+        "vendor": "anthropic",
+        "model": "claude-opus-4-6"
+      },
+      {
+        "vendor": "gemini",
+        "model": "gemini-3.1-pro-preview"
+      },
+      {
+        "vendor": "openai",
+        "model": "gpt-5.4"
+      }
     ]
   },
-
   "fast": {
     "description": "Latency-sensitive calls on small models",
     "chain": [
-      {"vendor": "gemini", "model": "gemini-3.1-flash-lite-preview"},
-      {"vendor": "anthropic", "model": "claude-opus-4-6-lite"},
-      {"vendor": "openai", "model": "gpt-5.4-nano"}
+      {
+        "vendor": "gemini",
+        "model": "gemini-3.1-flash-lite-preview"
+      },
+      {
+        "vendor": "anthropic",
+        "model": "claude-opus-4-6-lite"
+      },
+      {
+        "vendor": "openai",
+        "model": "gpt-5.4-nano"
+      }
     ]
   },
-
   "vision": {
-    "description": "Multimodal calls — only anthropic, gemini, and openai qualify",
+    "description": "Multimodal calls \u2014 only anthropic, gemini, and openai qualify",
     "vision": true,
     "chain": [
-      {"vendor": "anthropic", "model": "claude-opus-4-6"},
-      {"vendor": "gemini", "model": "gemini-3.1-pro-preview"}
+      {
+        "vendor": "anthropic",
+        "model": "claude-opus-4-6"
+      },
+      {
+        "vendor": "gemini",
+        "model": "gemini-3.1-pro-preview"
+      }
     ]
   },
-
-  "_tasks": "Task profiles — retune these freely; call sites never change.",
-
+  "_tasks": "Task profiles \u2014 retune these freely; call sites never change.",
   "parse_billing_entry": {
     "description": "Parse a natural-language billing entry into structured fields",
     "extends": "fast",
     "temperature": 0.0
   },
-
   "compose_welcome_email": {
     "description": "Draft the first outbound email to a new lead",
     "extends": "fast"
   },
-
   "triage_lead_message": {
     "description": "Classify an inbound lead message as spam | escalate | continue",
     "extends": "fast",
     "temperature": 0.0
   },
-
   "extract_lead_issues": {
     "description": "Pull the legal issues out of a lead's message",
     "extends": "fast",
     "temperature": 0.0
   },
-
   "select_kb_articles": {
     "description": "Choose the knowledge-base articles that answer a lead's issues",
     "extends": "fast",
     "temperature": 0.0
   },
-
   "compose_lead_reply": {
-    "description": "Draft the substantive reply to a lead — quality over latency",
+    "description": "Draft the substantive reply to a lead \u2014 quality over latency",
     "extends": "default"
   },
-
   "response_guardrail": {
     "description": "Safety check on a drafted reply before it can be sent",
     "extends": "fast",
     "temperature": 0.0
   },
-
   "explain_message_edit": {
     "description": "Explain how staff edited an AI draft before sending",
     "extends": "fast"
   },
-
   "classify_discovery_document": {
     "description": "Identify discovery type, propounding party, and service dates",
     "extends": "default",
     "temperature": 0.0
   },
-
   "extract_discovery_items": {
     "description": "Split a discovery document into numbered items, verbatim",
     "extends": "default",
     "temperature": 0.0
   },
-
+  "extract_account_statement": {
+    "description": "Read a bank/brokerage/card statement into signed transactions",
+    "extends": "default",
+    "temperature": 0.0,
+    "max_tokens": 32000
+  },
   "analyze_pleading": {
     "description": "Extract case metadata, children, and counsel from a filed pleading",
     "extends": "default",
     "temperature": 0.0
   },
-
   "extract_pleading_claims": {
     "description": "Extract claims, defenses, and counterclaims from a pleading",
     "extends": "default",
     "temperature": 0.0
   },
-
   "ocr_document_page": {
     "description": "Read text off a scanned page image",
     "extends": "vision",

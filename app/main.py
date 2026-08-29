@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from middleware.auth_middleware import AuthMiddleware
-from routers import admin, attorney_lead_responder, auth_flow, billing, clients, discovery, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
+from routers import admin, attorney_lead_responder, auth_flow, billing, clients, discovery, financial, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 from util.schema_check import check_schema
@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(matters.router)      # /api/v1/matters
     app.include_router(billing.router)      # /api/v1/billing
     app.include_router(discovery.router)    # /api/v1/discovery
+    app.include_router(financial.router)   # /api/v1/matters/{id}/statements, financial-accounts
     app.include_router(pleading.router)     # /api/v1/pleadings, /api/v1/claims, /api/v1/opposing-counsel
     app.include_router(leads.router)        # /api/v1/leads
     app.include_router(lead_agent_run.router)  # /api/v1/lead-agent-runs

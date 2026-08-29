@@ -81,6 +81,54 @@ class JobService:
         LOGGER.info("job_service.enqueue_matter_intake: job=%s staff=%s", job.id, staff_id)
         return job
 
+    def enqueue_statement_ingest(
+        self,
+        manager: DatabaseManager,
+        staff_id: int,
+        matter_id: int,
+        pdf_bytes: bytes,
+        bates_prefix: Optional[str] = None,
+        source_filename: Optional[str] = None,
+    ) -> JobInDB:
+        """
+        Store an uploaded statement PDF and queue it for extraction.
+
+        Same ordering rule as intake: the file is stored before the row is
+        queued, so a worker can never claim a job whose input is still
+        uploading.
+
+        :param matter_id: Matter these statements belong to — known up front,
+            unlike intake.
+        :param source_filename: The uploaded file's own name. Storage renames it
+            to the job id, so without this there is nothing tying a statement in
+            the exceptions queue back to the document it came out of.
+        :param bates_prefix: Optional stamp prefix to disambiguate detection on
+            an odd production. Carried on the job because the user types it at
+            the upload and the worker needs it minutes later, elsewhere.
+        :return: The queued job.
+        :rtype: JobInDB
+        """
+        job_id = str(uuid4())
+        path = StorageService(manager).upload_intake(job_id, pdf_bytes)
+
+        job = JobRepository(manager).insert({
+            "id": job_id,
+            **Job(
+                kind=JobKind.statement_ingest,
+                status=JobStatus.queued,
+                storage_path=path,
+                matter_id=matter_id,
+                requested_by_staff_id=staff_id,
+                params={k: v for k, v in {
+                    "bates_prefix": bates_prefix,
+                    "source_filename": source_filename,
+                }.items() if v},
+            ).model_dump(),
+        })
+        LOGGER.info("job_service.enqueue_statement_ingest: job=%s matter=%s staff=%s",
+                    job.id, matter_id, staff_id)
+        return job
+
     def get_for_staff(self, manager: DatabaseManager, job_id: str, staff_id: int) -> Optional[JobInDB]:
         """Fetch a job for polling, scoped to the staff member who started it."""
         return JobRepository(manager).get_for_staff(job_id, staff_id)
@@ -99,12 +147,17 @@ class JobService:
         :rtype: int
         """
         repo = JobRepository(manager)
+        handlers = {
+            JobKind.matter_intake: self._run_matter_intake,
+            JobKind.statement_ingest: self._run_statement_ingest,
+        }
         done = 0
-        for job in repo.next_queued(JobKind.matter_intake, limit=limit):
-            if not self._claim(repo, job):
-                continue
-            self._run_matter_intake(manager, repo, job)
-            done += 1
+        for kind, handler in handlers.items():
+            for job in repo.next_queued(kind, limit=limit):
+                if not self._claim(repo, job):
+                    continue
+                handler(manager, repo, job)
+                done += 1
         return done
 
     def _claim(self, repo: JobRepository, job: JobInDB) -> bool:
@@ -131,6 +184,70 @@ class JobService:
             "attempts": job.attempts + 1,
         })
         return True
+
+    def _run_statement_ingest(self, manager: DatabaseManager, repo: JobRepository, job: JobInDB) -> None:
+        """
+        Read a statement PDF and write its statements, accounts, and lines.
+
+        Unlike matter intake this commits directly rather than parking a
+        preview: statements that reconcile need no review, and the ones that do
+        not are held in the exceptions queue by their ``review_status``. The
+        job's result is the ingest summary the caller polls for.
+        """
+        from services.pdf_service import pdf_service  # noqa: PLC0415
+        from services.statement_service import statement_service  # noqa: PLC0415
+
+        LOGGER.info("job_service: running statement_ingest job=%s attempt=%s", job.id, job.attempts + 1)
+        try:
+            if not job.storage_path:
+                raise ValueError("Job has no stored PDF")
+            if job.matter_id is None:
+                raise ValueError("Statement ingest requires a matter")
+
+            pdf_bytes = StorageService(manager).download(job.storage_path)
+            if not pdf_bytes:
+                raise ValueError("Stored PDF could not be read back")
+
+            # Page markers on: a Rule 1006 summary has to cite the page each
+            # line came off, and the model cannot report a page it was not shown.
+            raw_text = pdf_service.extract_text(pdf_bytes, page_markers=True)
+            if not raw_text.strip():
+                raise ValueError("No text could be extracted from the PDF")
+
+            extracted = statement_service.extract(raw_text)
+            # The institution is often only in the letterhead graphic, which the
+            # text layer never carried. Look at the page before filing an
+            # account under "Unknown institution" — that name becomes half the
+            # dedup key, so getting it wrong splits one account into two.
+            statement_service.resolve_missing_institutions(extracted, pdf_bytes)
+            summary = statement_service.commit_document(
+                manager=manager,
+                matter_id=job.matter_id,
+                staff_id=job.requested_by_staff_id,
+                extracted=extracted,
+                raw_text=raw_text,
+                storage_path=job.storage_path,
+                source_job_id=job.id,
+                bates_prefix=(job.params or {}).get("bates_prefix"),
+                source_filename=(job.params or {}).get("source_filename"),
+            )
+            repo.update(job.id, {
+                "status": JobStatus.succeeded.value,
+                "result": summary,
+                "error": None,
+                "finished_at": _now(),
+            })
+            LOGGER.info(
+                "job_service: statement_ingest job=%s found=%s auto_accepted=%s needs_review=%s",
+                job.id, summary["statements_found"], summary["auto_accepted"], summary["needs_review"],
+            )
+        except Exception as e:  # noqa: BLE001 — the failure belongs on the job
+            LOGGER.error("job_service: statement_ingest job=%s failed: %s", job.id, str(e))
+            repo.update(job.id, {
+                "status": JobStatus.failed.value,
+                "error": str(e),
+                "finished_at": _now(),
+            })
 
     def _requester_role(self, manager: DatabaseManager, staff_id: int) -> Optional[str]:
         """
