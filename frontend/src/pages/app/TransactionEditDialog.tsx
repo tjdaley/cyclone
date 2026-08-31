@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { correctTransaction } from '../../lib/api'
+import { correctTransaction, deleteTransaction, restoreTransaction } from '../../lib/api'
 import { money, formatDate } from '../../lib/money'
 import type { AccountTransaction, AccountStatement, ExtractionFlag } from '../../types'
 
@@ -26,11 +26,13 @@ export default function TransactionEditDialog({ transaction, onSaved, onClose }:
     amount: transaction.amount,
     running_balance: transaction.running_balance ?? '',
     bates_number: transaction.bates_number ?? '',
+    check_number: transaction.check_number ?? '',
     physical_page_number: transaction.physical_page_number?.toString() ?? '',
   })
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmingDrop, setConfirmingDrop] = useState(false)
 
   function set<K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) {
     setDraft(prev => ({ ...prev, [key]: value }))
@@ -64,6 +66,9 @@ export default function TransactionEditDialog({ transaction, onSaved, onClose }:
       if (draft.bates_number !== (transaction.bates_number ?? '')) {
         patch.bates_number = draft.bates_number || null
       }
+      if (draft.check_number !== (transaction.check_number ?? '')) {
+        patch.check_number = draft.check_number || null
+      }
       if (draft.physical_page_number !== (transaction.physical_page_number?.toString() ?? '')) {
         patch.physical_page_number = draft.physical_page_number ? Number(draft.physical_page_number) : null
       }
@@ -77,6 +82,30 @@ export default function TransactionEditDialog({ transaction, onSaved, onClose }:
       setBusy(false)
     }
   }
+
+  async function drop() {
+    setBusy(true); setError(null)
+    try {
+      const result = await deleteTransaction(transaction.id, reason)
+      onSaved(result.transaction, result.statement)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove the line')
+      setBusy(false)
+    }
+  }
+
+  async function restore() {
+    setBusy(true); setError(null)
+    try {
+      const result = await restoreTransaction(transaction.id)
+      onSaved(result.transaction, result.statement)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not restore the line')
+      setBusy(false)
+    }
+  }
+
+  const isDropped = transaction.deleted_at !== null
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4"
@@ -153,6 +182,14 @@ export default function TransactionEditDialog({ transaction, onSaved, onClose }:
             </p>
           </div>
           <div>
+            <label className="label" htmlFor="tx-check-no">Check number</label>
+            <input id="tx-check-no" className="input mt-1 font-mono" value={draft.check_number}
+              onChange={e => set('check_number', e.target.value)} />
+            <p className="text-xs text-text-secondary mt-1">
+              As printed, without the asterisk — that marks a gap in the serial run, not the number.
+            </p>
+          </div>
+          <div>
             <label className="label" htmlFor="tx-page">Page</label>
             <input id="tx-page" className="input mt-1 tabular-nums" value={draft.physical_page_number}
               inputMode="numeric" onChange={e => set('physical_page_number', e.target.value)} />
@@ -176,13 +213,46 @@ export default function TransactionEditDialog({ transaction, onSaved, onClose }:
 
         {error && <p className="text-sm text-red-700 mt-3">{error}</p>}
 
-        <div className="flex items-center justify-end gap-3 mt-4">
-          <button type="button" className="text-sm text-text-secondary hover:text-navy"
-            onClick={onClose}>Cancel</button>
-          <button type="button" className="btn-primary" disabled={busy} onClick={save}>
-            {busy ? 'Saving…' : 'Save correction'}
-          </button>
+        <div className="flex flex-wrap items-center gap-3 mt-4">
+          {isDropped ? (
+            <button type="button" className="text-sm text-navy underline" disabled={busy}
+              onClick={restore}>Put this line back</button>
+          ) : confirmingDrop ? (
+            <span className="flex items-center gap-2 text-sm">
+              <span className="text-red-700">Remove this line from the statement?</span>
+              <button type="button" className="text-red-700 underline font-medium" disabled={busy}
+                onClick={drop}>Remove</button>
+              <button type="button" className="text-text-secondary underline"
+                onClick={() => setConfirmingDrop(false)}>Keep it</button>
+            </span>
+          ) : (
+            <button type="button" className="text-sm text-red-700 underline" disabled={busy}
+              onClick={() => setConfirmingDrop(true)}>Remove this line</button>
+          )}
+
+          <span className="ml-auto flex items-center gap-3">
+            <button type="button" className="text-sm text-text-secondary hover:text-navy"
+              onClick={onClose}>Cancel</button>
+            <button type="button" className="btn-primary" disabled={busy || isDropped} onClick={save}>
+              {busy ? 'Saving…' : 'Save correction'}
+            </button>
+          </span>
         </div>
+
+        {!isDropped && confirmingDrop && (
+          <p className="text-xs text-text-secondary mt-2">
+            Removing hides the line and takes it out of every total, but keeps it — with your name
+            and the reason above. If extraction invented this line, the statement will reconcile
+            better without it; if it was real, the balance will stop tying and say so.
+          </p>
+        )}
+        {isDropped && (
+          <p className="text-xs text-amber-700 mt-2">
+            This line was removed from the statement{transaction.deletion_reason
+              ? ` — ${transaction.deletion_reason}` : ''}. It is excluded from every total until
+            it is put back.
+          </p>
+        )}
       </div>
     </div>
   )

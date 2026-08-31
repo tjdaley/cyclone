@@ -45,6 +45,13 @@ def _sanitize(text: str) -> str:
     # Drops lone surrogates (\ud800-\udfff), which are equally unstorable.
     return cleaned.encode("utf-8", "ignore").decode("utf-8", "ignore")
 
+# Stands in for a page whose text could not be read at all — the text layer was
+# too thin to use and the vision fallback failed. Deliberately conspicuous: it
+# travels in raw_text, so it survives into the stored record, and any extractor
+# reading downstream sees plainly that something is missing rather than
+# inferring a blank page.
+_UNREADABLE_MARKER = "[[PAGE COULD NOT BE READ — text extraction and OCR both failed]]"
+
 _VISION_OCR_PROMPT = (
     "Extract ALL text from this image of a legal document page. "
     "Preserve the original formatting, indentation, and numbering as closely "
@@ -191,8 +198,15 @@ class PDFService:
             )
             return text.strip()
         except Exception as e:
+            # Say so in the text itself rather than returning "".
+            #
+            # An empty string was appended as the page's content and nothing
+            # anywhere recorded that a page had been lost — the ingest carried
+            # on as though the page were blank. A page we know we could not read
+            # is a completely different thing from a page with nothing on it,
+            # and only one of them is safe to build an exhibit over.
             LOGGER.warning("pdf_service._vision_extract: LLM vision failed: %s", str(e))
-            return ""
+            return _UNREADABLE_MARKER
 
     def _enhance_image(self, image: ImageFile.ImageFile) -> "Image.Image":
         """

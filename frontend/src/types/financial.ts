@@ -130,7 +130,23 @@ export interface AccountTransaction {
   category_id: number | null
   physical_page_number: number | null
   bates_number: string | null
+  /**
+   * The check this was drawn on.
+   *
+   * A card purchase names the merchant; a check says only its number, so this
+   * is what a discovery request asks about when money leaves without a payee.
+   */
+  check_number: string | null
   flags: ExtractionFlag[]
+  /**
+   * Set when somebody dropped this line from the statement.
+   *
+   * Hidden everywhere and excluded from every total, but kept: dropping a line
+   * asserts it is not printed on the document, and that reaches an exhibit.
+   */
+  deleted_at: string | null
+  deleted_by_staff_id: number | null
+  deletion_reason: string | null
 }
 
 /**
@@ -260,6 +276,12 @@ export interface TransactionSearchFilter {
   tag_match_all?: boolean
   untagged?: boolean
   text?: string | null
+  /** One check, by number. */
+  check_number?: string | null
+  /** Every check on the account and nothing else. */
+  checks_only?: boolean
+  /** Show lines somebody dropped. Off by default. */
+  include_deleted?: boolean
   limit?: number
   offset?: number
 }
@@ -325,6 +347,7 @@ export interface TransactionCorrectionPayload {
   amount?: string
   running_balance?: string | null
   bates_number?: string | null
+  check_number?: string | null
   physical_page_number?: number | null
   /** Why the change was made. Kept on the flag. */
   reason?: string
@@ -355,4 +378,16 @@ export interface StatementRejectResult {
 export interface StatementReviewResult {
   statement: AccountStatement | null
   discarded: StatementRejectResult | null
+}
+
+/** What deleting an account would take with it. */
+export interface AccountDeletePreview {
+  account_id: number
+  account_label: string
+  statements: number
+  transactions: number
+  /** Each statement's period, oldest first. */
+  periods: string[]
+  /** Reasons to stop and look. Warnings, not blocks. */
+  warnings: string[]
 }

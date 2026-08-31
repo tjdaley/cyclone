@@ -61,6 +61,9 @@ class TransactionSearchService:
         tag_match_all: bool = False,
         untagged: bool = False,
         text: Optional[str] = None,
+        check_number: Optional[str] = None,
+        checks_only: bool = False,
+        include_deleted: bool = False,
         limit: int = 200,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -82,6 +85,13 @@ class TransactionSearchService:
         :param tag_match_all: Require every tag rather than any of them.
         :param untagged: Only lines carrying no tag at all.
         :param text: Case-insensitive substring of the description.
+        :param check_number: One check, by number.
+        :param checks_only: Every check on the account and nothing else — the
+            starting point for asking where money went that the statement does
+            not describe.
+        :param include_deleted: Show lines somebody dropped from a statement.
+            Off by default, so a dropped line cannot reach an exhibit through an
+            oversight; on, it is how they are found again to restore.
         :param limit: Page size, capped at ``MAX_PAGE_SIZE``.
         :param offset: Rows to skip.
         :return: ``{"total": int, "items": [...], "sum_amount": str}``. Each
@@ -140,6 +150,9 @@ class TransactionSearchService:
             transaction_ids=restrict_ids,
             exclude_transaction_ids=exclude_ids,
             text=text,
+            check_number=check_number,
+            checks_only=checks_only,
+            include_deleted=include_deleted,
             limit=min(limit, MAX_PAGE_SIZE),
             offset=offset,
         )

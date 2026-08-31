@@ -242,20 +242,40 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
     def __init__(self, manager: DatabaseManager):
         super().__init__(manager, "financial_account_transactions", FinancialAccountTransactionInDB)
 
-    def get_by_statement(self, statement_id: int) -> list[FinancialAccountTransactionInDB]:
-        """Return a statement's lines in printed order."""
-        return self.select_many(condition={"statement_id": statement_id}, sort_by="line_no")[0]
+    def get_by_statement(
+        self,
+        statement_id: int,
+        include_deleted: bool = False,
+    ) -> list[FinancialAccountTransactionInDB]:
+        """
+        Return a statement's lines in printed order.
 
-    def get_by_account(self, financial_account_id: int) -> list[FinancialAccountTransactionInDB]:
+        Dropped lines are excluded unless asked for. That default is what makes
+        the soft delete honest: a line someone removed must not turn up in a
+        reconciliation, an exhibit, or a total merely because a caller forgot a
+        flag. ``include_deleted`` exists for the two callers that genuinely need
+        every row — showing a person what they removed, and counting what a
+        cascade is about to take.
+        """
+        rows = self.select_many(condition={"statement_id": statement_id}, sort_by="line_no")[0]
+        return rows if include_deleted else [r for r in rows if r.deleted_at is None]
+
+    def get_by_account(
+        self,
+        financial_account_id: int,
+        include_deleted: bool = False,
+    ) -> list[FinancialAccountTransactionInDB]:
         """
         Return an account's whole history in date order.
 
-        This is the query behind every waste and reimbursement exhibit.
+        This is the query behind every waste and reimbursement exhibit, which is
+        why dropped lines are excluded by default.
         """
-        return self.select_many(
+        rows = self.select_many(
             condition={"financial_account_id": financial_account_id},
             sort_by="transaction_date",
         )[0]
+        return rows if include_deleted else [r for r in rows if r.deleted_at is None]
 
     def search(
         self,
@@ -268,6 +288,9 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
         transaction_ids: Optional[list[int]] = None,
         exclude_transaction_ids: Optional[list[int]] = None,
         text: Optional[str] = None,
+        check_number: Optional[str] = None,
+        checks_only: bool = False,
+        include_deleted: bool = False,
         limit: int = 200,
         offset: int = 0,
     ) -> tuple[list[FinancialAccountTransactionInDB], int]:
@@ -302,6 +325,13 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             the complement. Tagging is manual, so the tagged set is small and
             bounded while the complement is the whole production.
         :param text: Case-insensitive substring of the description.
+        :param check_number: One check, by number. A check is the only debit
+            that does not say where the money went, so this is how a payment
+            gets traced back to the instrument that made it.
+        :param checks_only: Every check on the account and nothing else.
+        :param include_deleted: Show lines a person dropped from their
+            statement. Off by default — a dropped line must never reach a total
+            or an exhibit through an oversight.
         :param limit: Page size.
         :param offset: Rows to skip.
         :return: ``(rows, total_matching)``. The total counts every match, not
@@ -334,6 +364,12 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             query = query.is_("category_id", "null")
         elif category_ids:
             query = query.in_("category_id", category_ids)
+        if check_number:
+            query = query.eq("check_number", check_number.strip().rstrip("*").strip())
+        elif checks_only:
+            query = query.not_.is_("check_number", "null")
+        if not include_deleted:
+            query = query.is_("deleted_at", "null")
         if text:
             # Escape the pattern wildcards so a literal % or _ typed into the
             # search box matches itself rather than everything.

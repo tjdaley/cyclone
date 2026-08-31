@@ -76,7 +76,8 @@ class FakeStatements:
 
 class FakeTransactions:
     def __init__(self, rows): self.rows = rows
-    def get_by_account(self, a): return [r for r in self.rows if r["financial_account_id"] == a]
+    def get_by_account(self, a, include_deleted=False):
+        return [r for r in self.rows if r["financial_account_id"] == a]
 
 
 def wire(accounts, statements, transactions):

@@ -153,7 +153,7 @@ class AccountMergePreview(BaseModel):
     target_label: str
     statements_to_move: int
     transactions_to_move: int
-    conflicts: list[MergeConflict] = Field(default_factory=list)
+    conflicts: list[MergeConflict] = Field(default_factory=list[MergeConflict])
     can_merge: bool = Field(..., description="True when nothing blocking was found")
     needs_force: bool = Field(..., description="True when only non-blocking conflicts remain")
 
@@ -242,7 +242,11 @@ class TransactionResponse(BaseModel):
     category_id: Optional[int]
     physical_page_number: Optional[int]
     bates_number: Optional[str]
+    check_number: Optional[str]
     flags: list[dict[str, Any]]
+    deleted_at: Optional[datetime] = None
+    deleted_by_staff_id: Optional[int] = None
+    deletion_reason: Optional[str] = None
 
 
 # ── Classification: categories and tags ──────────────────────────────────────
@@ -334,7 +338,21 @@ class TransactionSearchRequest(BaseModel):
         description="Require every listed tag rather than any of them",
     )
     untagged: bool = Field(default=False, description="Only lines carrying no tag at all")
+    include_deleted: bool = Field(
+        default=False,
+        description="Show lines somebody dropped from their statement. Off by default — a dropped "
+                    "line must never reach a total or an exhibit through an oversight",
+    )
     text: Optional[str] = Field(default=None, description="Case-insensitive substring of the description")
+    check_number: Optional[str] = Field(
+        default=None,
+        description="One check, by number. A check is the only debit that does not say where the "
+                    "money went, so this traces a payment back to the instrument",
+    )
+    checks_only: bool = Field(
+        default=False,
+        description="Every check on the account and nothing else",
+    )
     limit: int = Field(default=200, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
 
@@ -401,6 +419,7 @@ class TransactionUpdateRequest(BaseModel):
     amount: Optional[Decimal] = None
     running_balance: Optional[Decimal] = None
     bates_number: Optional[str] = None
+    check_number: Optional[str] = None
     physical_page_number: Optional[int] = None
     reason: Optional[str] = Field(
         default=None,
@@ -415,4 +434,28 @@ class TransactionCorrectionResponse(BaseModel):
         default=None,
         description="Re-reconciled when an amount changed — that is the point of allowing the edit. "
                     "None when the correction did not touch the arithmetic",
+    )
+
+
+class TransactionDeleteRequest(BaseModel):
+    """Body for dropping a line from its statement."""
+    reason: Optional[str] = Field(
+        default=None,
+        description="Why the line is not on the statement, e.g. 'duplicate of line 4'. "
+                    "Recorded on the line with the person's name",
+    )
+
+
+class AccountDeletePreview(BaseModel):
+    """What deleting an account would take with it."""
+    account_id: int
+    account_label: str
+    statements: int
+    transactions: int
+    periods: list[str] = Field(default_factory=list, description="Each statement's period, oldest first")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Reasons to stop and look: a characterization, a recorded owner, notes "
+                    "somebody wrote, or a place in an account history. Warnings, not blocks — "
+                    "this is a deliberate act, not an automatic cleanup",
     )

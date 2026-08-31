@@ -20,7 +20,10 @@ typo should not silently run on some other model.
 Which models serve a task is therefore a config edit
 (``app/config/llm_profiles.json``), never a code change.
 """
-from typing import Callable, Optional
+import re
+from typing import Any, Callable, Optional
+
+from pydantic import BaseModel, Field
 
 from util.llm_profiles import LLMCandidate, LLMProfile, LLMUnavailableError, llm_profiles
 from util.loggerfactory import LoggerFactory
@@ -35,7 +38,7 @@ _MAX_LOG_CHARS = 200  # Truncate prompt/response in DEBUG logs
 # it on an unknown profile) and re-exported here — it is the error every LLM
 # call site sees, and `from services.llm_service import LLMUnavailableError`
 # keeps working.
-__all__ = ["LLMService", "LLMUnavailableError", "llm_service"]
+__all__ = ["LLMResult", "LLMService", "LLMUnavailableError", "llm_service"]
 
 
 def _temperature(profile: LLMProfile, candidate: LLMCandidate) -> float:
@@ -59,16 +62,110 @@ def _max_tokens(profile: LLMProfile, candidate: LLMCandidate) -> int:
     return profile.max_tokens if profile.max_tokens is not None else settings.llm_max_tokens
 
 
-def _gemini_timeout_ms() -> int:
+class LLMResult(BaseModel):
+    """
+    A completion, plus which candidate actually produced it.
+
+    The profile name alone says what was *asked for*; a chain has several
+    vendors and any of them may have served the call. For work that becomes
+    evidence that is not a detail — "which tool produced this figure" is a
+    question with one right answer, and it is not "extract_account_statement".
+    """
+
+    text: str = Field(..., description="The completion")
+    profile: str = Field(..., description="Profile the caller named")
+    vendor: str = Field(..., description="Vendor that answered")
+    model: str = Field(..., description="Model that answered")
+    attempts: int = Field(
+        ...,
+        description="Candidates called before this one succeeded, inclusive. Above 1 means "
+                    "the preferred model did not answer and the chain fell through",
+    )
+
+    def label(self) -> str:
+        """``vendor/model``, for a summary line."""
+        return "%s/%s" % (self.vendor, self.model)
+
+
+def _anthropic_text(response: Any) -> str:
+    """
+    Pull the answer out of an Anthropic response.
+
+    Not ``content[0].text``. A model with extended thinking returns its
+    reasoning first, so the opening block is a ``ThinkingBlock`` with no
+    ``text`` attribute at all — indexing straight into it raised
+    ``AttributeError`` and the candidate was failed over as if the vendor had
+    refused, when in fact the answer was sitting in the next block. Every
+    Anthropic call silently fell through to the next vendor.
+
+    Selecting by block type rather than position also covers the other blocks a
+    response can carry — redacted thinking, tool use — without needing to know
+    which are possible.
+
+    :return: Every text block joined, or "" when the response carried none.
+        ``_run`` treats empty as a failure, which is the right reading.
+    :rtype: str
+    """
+    parts = [
+        block.text for block in getattr(response, "content", [])
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    ]
+    return "".join(parts).strip()
+
+
+def _anthropic_takes_temperature(model: str) -> bool:
+    """
+    Whether an Anthropic model still accepts ``temperature``.
+
+    The 5.x family rejects it. Testing for ``"-5" in model`` is the obvious
+    reading and the wrong one: ``claude-haiku-4-5-20251001`` contains ``-5`` and
+    is a 4.5 model that takes temperature perfectly well. Dropping it there
+    would not error — it would quietly leave the sampling at the vendor default
+    on exactly the tasks that ask for 0.0, so a guardrail or a triage call would
+    stop being deterministic and nothing would say so.
+
+    So the *major* version decides: the first number after the family name.
+    ``claude-opus-5`` is 5, ``claude-haiku-4-5-20251001`` is 4.
+    """
+    numbers = re.findall(r"\d+", model)
+    return not numbers or int(numbers[0]) < 5
+
+
+def _timeout(profile: LLMProfile, candidate: LLMCandidate) -> float:
+    """
+    Resolve the request deadline: candidate -> profile -> global.
+
+    Worth its own knob rather than one global number, because the cost of
+    getting it wrong is not what it looks like. A deadline too short for the
+    work does not simply fail — it *selects for the model that gives up
+    soonest*, since a short answer is the only kind that fits inside it. A
+    27-page statement extraction proved that twice: the run that "succeeded"
+    returned 38 of 286 transactions inside 90 seconds, and the run where every
+    vendor tried to do the job properly was killed at 90 seconds three times
+    over.
+    """
+    if candidate.timeout_seconds is not None:
+        return candidate.timeout_seconds
+    if profile.timeout_seconds is not None:
+        return profile.timeout_seconds
+    return settings.llm_timeout_seconds
+
+
+def _gemini_timeout_ms(seconds: float) -> int:
     """
     google-genai takes its request timeout in milliseconds, unlike the others.
+
+    It also enforces the deadline server-side rather than in the client, so an
+    overrun comes back as a structured ``504 DEADLINE_EXCEEDED`` from Google
+    instead of a client timeout — the same event, wearing different clothes
+    from Anthropic's and OpenAI's.
 
     Floored at 10s because Gemini rejects a shorter deadline outright
     ("Manually set deadline 1s is too short") — which would turn a tight
     timeout setting into an immediate INVALID_ARGUMENT on every Gemini call
     rather than the timeout the setting asked for.
     """
-    return max(int(settings.llm_timeout_seconds * 1000), 10_000)
+    return max(int(seconds * 1000), 10_000)
 
 
 class LLMService:
@@ -115,6 +212,28 @@ class LLMService:
         :raises LLMUnavailableError: If the profile is unknown, or every
             candidate in its chain failed.
         """
+        return self._run(profile, system_prompt, user_message).text
+
+    def complete_detailed(
+        self,
+        system_prompt: str,
+        user_message: str,
+        profile: str = "default",
+    ) -> LLMResult:
+        """
+        Complete, and report which candidate actually answered.
+
+        Same call as :meth:`complete`; use this where the answer becomes part of
+        a record that has to say how it was produced. The profile name is not
+        enough on its own — a chain holds several vendors, and which one served
+        a given call depends on what was failing that minute.
+
+        :return: The response, the vendor and model behind it, and how many
+            candidates were tried to get there.
+        :rtype: LLMResult
+        :raises LLMUnavailableError: If the profile is unknown, or every
+            candidate in its chain failed.
+        """
         return self._run(profile, system_prompt, user_message)
 
     def complete_with_image(
@@ -152,7 +271,7 @@ class LLMService:
             user_message,
             image_base64=image_base64,
             image_media_type=image_media_type,
-        )
+        ).text
 
     def describe_profiles(self) -> str:
         """
@@ -184,7 +303,7 @@ class LLMService:
         user_message: str,
         image_base64: Optional[str] = None,
         image_media_type: Optional[str] = None,
-    ) -> str:
+    ) -> LLMResult:
         """
         Walk a profile's chain until a candidate returns a non-empty response.
 
@@ -202,8 +321,8 @@ class LLMService:
         :type image_base64: Optional[str]
         :param image_media_type: MIME type of the image.
         :type image_media_type: Optional[str]
-        :return: Response text from the first candidate that succeeds.
-        :rtype: str
+        :return: The response, and which candidate produced it.
+        :rtype: LLMResult
         :raises LLMUnavailableError: If the profile is unknown or no candidate
             produced a response.
         """
@@ -262,7 +381,13 @@ class LLMService:
                 "LLMService: profile=%s vendor=%s response=%.*s",
                 profile_name, candidate.vendor, _MAX_LOG_CHARS, response,
             )
-            return response
+            return LLMResult(
+                text=response,
+                profile=profile_name,
+                vendor=candidate.vendor,
+                model=candidate.model,
+                attempts=attempted,
+            )
 
         message = "All %d candidate(s) in LLM profile '%s' failed for a %s call (%d attempted)" % (
             len(chain), profile_name, call_type, attempted,
@@ -288,16 +413,21 @@ class LLMService:
         :rtype: str
         """
         import anthropic  # noqa: PLC0415 — imported lazily to avoid load cost when not in use
+        timeout = _timeout(profile, candidate)
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=settings.llm_timeout_seconds)
-        response = client.messages.create(
-            model=candidate.model,
-            max_tokens=_max_tokens(profile, candidate),
-            temperature=_temperature(profile, candidate),
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        return response.content[0].text  # type: ignore[attr-defined]
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout)
+
+        params: dict[str, str | int | float | list[dict[str, str]]] = {
+            "model": candidate.model,
+            "max_tokens": _max_tokens(profile, candidate),
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+        }
+        if _anthropic_takes_temperature(candidate.model):
+            params["temperature"] = _temperature(profile, candidate) or 0.0
+
+        response = client.messages.create(**params)  # type: ignore[arg-type]
+        return _anthropic_text(response)
 
     def _call_gemini(self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str) -> str:
         """
@@ -315,10 +445,11 @@ class LLMService:
         :rtype: str
         """
         from google import genai  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
         from google.genai import types  # noqa: PLC0415
 
         client = genai.Client(api_key=settings.gemini_api_key,
-                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms()))
+                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms(timeout)))
         response = client.models.generate_content(
             model=candidate.model,
             contents=user_message,
@@ -346,10 +477,17 @@ class LLMService:
         :rtype: str
         """
         from openai import OpenAI  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
 
-        client = OpenAI(api_key=settings.openai_api_key, timeout=settings.llm_timeout_seconds)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
         response = client.chat.completions.create(
             model=candidate.model,
+            # max_completion_tokens, not max_tokens — chat.completions rejects
+            # the old name outright, which is how every OpenAI call came to fail
+            # over. Dropping the ceiling entirely fixes the error and replaces
+            # it with a quieter problem: a profile asking for 32,000 tokens
+            # would silently get the vendor default and truncate a long answer.
+            max_completion_tokens=_max_tokens(profile, candidate),
             temperature=_temperature(profile, candidate),
             top_p=_top_p(profile, candidate),
             messages=[
@@ -375,11 +513,12 @@ class LLMService:
         :rtype: str
         """
         from openai import OpenAI  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
 
         client = OpenAI(
             api_key=settings.groq_api_key,
             base_url=settings.groq_base_url,
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -407,11 +546,12 @@ class LLMService:
         :rtype: str
         """
         from openai import OpenAI  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
 
         client = OpenAI(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -431,11 +571,12 @@ class LLMService:
     ) -> str:
         """Call Gemini with an inline image part."""
         from google import genai  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
         from google.genai import types  # noqa: PLC0415
         import base64 as b64mod  # noqa: PLC0415
 
         client = genai.Client(api_key=settings.gemini_api_key,
-                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms()))
+                              http_options=types.HttpOptions(timeout=_gemini_timeout_ms(timeout)))
         image_bytes = b64mod.b64decode(image_base64)
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=image_media_type)
         response = client.models.generate_content(
@@ -454,8 +595,9 @@ class LLMService:
     ) -> str:
         """Call the Anthropic Messages API with a base64 image block."""
         import anthropic  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=settings.llm_timeout_seconds)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout)
         response = client.messages.create(
             model=candidate.model,
             max_tokens=_max_tokens(profile, candidate),
@@ -475,7 +617,7 @@ class LLMService:
                 ],
             }],
         )
-        return response.content[0].text  # type: ignore[attr-defined]
+        return _anthropic_text(response)
 
     def _call_openai_vision(
         self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str,
@@ -483,11 +625,12 @@ class LLMService:
     ) -> str:
         """Call the OpenAI Chat Completions API with an inline image URL."""
         from openai import OpenAI  # noqa: PLC0415
+        timeout = _timeout(profile, candidate)
 
-        client = OpenAI(api_key=settings.openai_api_key, timeout=settings.llm_timeout_seconds)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
         response = client.chat.completions.create(
             model=candidate.model,
-            max_tokens=_max_tokens(profile, candidate),
+            max_completion_tokens=_max_tokens(profile, candidate),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": [

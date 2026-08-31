@@ -165,7 +165,7 @@ class FinancialAccountStatement(BaseModel):
         description="Totals the statement prints (payments, purchases, fees, interest) — a second check",
     )
     flags: list[dict[str, Any]] = Field(
-        default_factory=list,
+        default_factory=list[dict[str, Any]],
         description="Statement-level findings: NO_ACCOUNT_MATCH, DUPLICATE_PERIOD, UNRECONCILED",
     )
     review_status: StatementReviewStatus = Field(default=StatementReviewStatus.needs_review)
@@ -235,10 +235,24 @@ class FinancialAccountTransaction(BaseModel):
         default=None,
         description="Bates number stamped on that page, exactly as printed; None when unstamped",
     )
+    check_number: Optional[str] = Field(
+        default=None,
+        description="Check number this was drawn on, as printed. A check is the one debit that "
+                    "does not say where the money went, so the number is what a discovery request "
+                    "asks about. Text: leading zeros are kept and it is never arithmetic",
+    )
     flags: list[dict[str, Any]] = Field(
-        default_factory=list,
+        default_factory=list[dict[str, Any]],
         description="Per-line findings: YEAR_INFERRED, LOCATION_INFERRED, SIGN_ASSUMED",
     )
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        description="Set when a person drops the line from the statement. Hidden everywhere by "
+                    "default and excluded from reconciliation, but kept: dropping a line asserts "
+                    "it is not printed on the document, and that assertion reaches an exhibit",
+    )
+    deleted_by_staff_id: Optional[int] = Field(default=None, description="Who dropped it")
+    deletion_reason: Optional[str] = Field(default=None, description="Why, in their words")
 
 
 class FinancialAccountTransactionInDB(FinancialAccountTransaction):

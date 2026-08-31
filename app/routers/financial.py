@@ -22,6 +22,7 @@ from db.repositories.matter import MatterRepository
 from db.repositories.staff import StaffRepository
 from dependencies import get_db_manager, require_role
 from schemas.financial import (
+    AccountDeletePreview,
     AccountMergePreview,
     AccountMergeRequest,
     AccountMergeResult,
@@ -40,6 +41,7 @@ from schemas.financial import (
     TransactionCategoryResponse,
     TransactionCategoryWriteRequest,
     TransactionCorrectionResponse,
+    TransactionDeleteRequest,
     TransactionResponse,
     TransactionSearchRequest,
     TransactionSearchResponse,
@@ -67,6 +69,19 @@ def _staff_id(request: Request, manager: Any) -> int:
     return staff.id
 
 
+
+def _staff_and_name(request: Request, manager: Any):
+    """
+    The acting staff member and how their name should read in a record.
+
+    The name is stored on the line, not just the id: these entries are read back
+    years later, when a staff id means nothing to anybody.
+    """
+    staff = StaffRepository(manager).get_by_supabase_uid(request.state.supabase_uid)
+    if staff is None:
+        raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
+    name = " ".join(p for p in (staff.name.first_name, staff.name.last_name) if p).strip()
+    return staff, name or "A staff member"
 
 def _statement_response(record: Any) -> StatementResponse:
     """
@@ -249,6 +264,52 @@ def merge_accounts(
     )
 
 
+
+@router.get("/financial-accounts/{account_id}/delete-preview", response_model=AccountDeletePreview)
+def preview_account_delete(
+    account_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> AccountDeletePreview:
+    """What deleting this account would take with it, and any reason to pause."""
+    try:
+        return AccountDeletePreview(**statement_service.preview_account_delete(manager, account_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.delete("/financial-accounts/{account_id}", response_model=AccountDeletePreview)
+def delete_account(
+    account_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> AccountDeletePreview:
+    """
+    Delete an account, its statements, and their transactions.
+
+    For a statement imported into the wrong matter, or an account that only
+    exists because an early extraction misread the institution and a clean copy
+    was ingested afterwards.
+
+    Hard, not soft: the PDFs are still in Storage, so a mistake costs a
+    re-import, while a half-deleted account sitting in an inventory is worse
+    than one that is gone.
+    """
+    try:
+        result = statement_service.delete_account(manager, account_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="financial_account_deleted",
+        entity_type="financial_accounts",
+        entity_id=str(account_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json=result,
+    )
+    return AccountDeletePreview(**result)
+
+
 # ── Statements ───────────────────────────────────────────────────────────────
 
 @router.get("/financial-accounts/{account_id}/statements", response_model=list[StatementResponse])
@@ -326,6 +387,40 @@ def review_statement(
     return StatementReviewResponse(statement=_statement_response(updated))
 
 
+
+@router.delete("/statements/{statement_id}", response_model=StatementRejectResult)
+def delete_statement(
+    statement_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementRejectResult:
+    """
+    Delete a statement, its transactions, and an account left empty by it.
+
+    Identical to rejecting from the exceptions queue — the same discard, reached
+    from the statement itself. That matters because a statement can look fine on
+    ingest and only later turn out to be a mess: pages scanned out of order,
+    pages missing, no Bates numbers to catch it by. Reject only ever reached the
+    ones that failed a check.
+
+    The source PDF stays in Storage, so backing an import out and running it
+    again costs the extraction, not the evidence.
+    """
+    try:
+        result = statement_service.reject_statement(manager, statement_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="financial_statement_deleted",
+        entity_type="financial_account_statements",
+        entity_id=str(statement_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json=result,
+    )
+    return StatementRejectResult(**result)
+
+
 # ── Transactions ─────────────────────────────────────────────────────────────
 
 @router.get("/statements/{statement_id}/transactions", response_model=list[TransactionResponse])
@@ -373,12 +468,7 @@ def correct_transaction(
     Correcting an amount re-reconciles the statement, which is the point of
     allowing the edit: an unreconciled statement is usually one misread figure.
     """
-    staff = StaffRepository(manager).get_by_supabase_uid(request.state.supabase_uid)
-    if staff is None:
-        raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
-    name = " ".join(p for p in (staff.name.first_name, staff.name.last_name) if p).strip() \
-        or "A staff member"
-
+    staff, name = _staff_and_name(request, manager)
     updates = body.model_dump(exclude_unset=True)
     reason = updates.pop("reason", None)
     try:
@@ -401,6 +491,70 @@ def correct_transaction(
         transaction=TransactionResponse(**transaction.model_dump()),
         statement=_statement_response(statement) if statement is not None else None,
     )
+
+
+@router.post("/transactions/{transaction_id}/delete", response_model=TransactionCorrectionResponse)
+def delete_transaction(
+    transaction_id: int,
+    body: TransactionDeleteRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionCorrectionResponse:
+    """
+    Drop a line from its statement.
+
+    Hidden everywhere and excluded from every total, but kept: removing a line
+    asserts it is not printed on the document, and that assertion reaches an
+    exhibit. The statement comes back re-reconciled — if the line really was
+    invented by extraction, the balance ties better without it.
+    """
+    staff, name = _staff_and_name(request, manager)
+    try:
+        transaction, statement = statement_service.delete_transaction(
+            manager, transaction_id, staff.id, name, body.reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="financial_transaction_deleted",
+        entity_type="financial_account_transactions",
+        entity_id=str(transaction_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"reason": body.reason},
+    )
+    return TransactionCorrectionResponse(
+        transaction=TransactionResponse(**transaction.model_dump()),
+        statement=_statement_response(statement) if statement is not None else None,
+    )
+
+
+@router.post("/transactions/{transaction_id}/restore", response_model=TransactionCorrectionResponse)
+def restore_transaction(
+    transaction_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionCorrectionResponse:
+    """Put a dropped line back, and re-reconcile the statement with it."""
+    staff, name = _staff_and_name(request, manager)
+    try:
+        transaction, statement = statement_service.restore_transaction(
+            manager, transaction_id, staff.id, name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="financial_transaction_restored",
+        entity_type="financial_account_transactions",
+        entity_id=str(transaction_id),
+        supabase_uid=request.state.supabase_uid,
+    )
+    return TransactionCorrectionResponse(
+        transaction=TransactionResponse(**transaction.model_dump()),
+        statement=_statement_response(statement) if statement is not None else None,
+    )
+
 
 
 # ── Categories (the firm-wide chart of accounts) ─────────────────────────────
@@ -672,6 +826,9 @@ def search_transactions(
         tag_match_all=body.tag_match_all,
         untagged=body.untagged,
         text=body.text,
+        check_number=body.check_number,
+        checks_only=body.checks_only,
+        include_deleted=body.include_deleted,
         limit=body.limit,
         offset=body.offset,
     )

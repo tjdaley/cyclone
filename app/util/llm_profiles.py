@@ -71,6 +71,10 @@ class LLMCandidate(BaseModel):
     temperature: Optional[float] = Field(default=None, description="Overrides the profile/global temperature")
     top_p: Optional[float] = Field(default=None, description="Overrides the profile/global top_p")
     max_tokens: Optional[int] = Field(default=None, description="Overrides the profile/global max_tokens")
+    timeout_seconds: Optional[float] = Field(
+        default=None,
+        description="Overrides the profile/global request deadline",
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +88,13 @@ class LLMProfile(BaseModel):
     temperature: Optional[float] = Field(default=None, description="Profile-level temperature default")
     top_p: Optional[float] = Field(default=None, description="Profile-level top_p default")
     max_tokens: Optional[int] = Field(default=None, description="Profile-level max_tokens default")
+    timeout_seconds: Optional[float] = Field(
+        default=None,
+        description="Profile-level request deadline. A task whose answer is long needs a longer "
+                    "one than a chat reply — and a deadline that is too short does not merely "
+                    "fail, it selects for whichever model gives up soonest, because a short "
+                    "answer is the only kind that fits",
+    )
     vision: bool = Field(default=False, description="True when this profile serves multimodal calls")
 
 
@@ -96,6 +107,7 @@ class _RawProfile(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    timeout_seconds: Optional[float] = None
     vision: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -335,6 +347,7 @@ def _resolve(
         temperature=inherited(entry.temperature, "temperature"),
         top_p=inherited(entry.top_p, "top_p"),
         max_tokens=inherited(entry.max_tokens, "max_tokens"),
+        timeout_seconds=inherited(entry.timeout_seconds, "timeout_seconds"),
         vision=entry.vision or bool(parent and parent.vision),
     )
     resolved[name] = profile

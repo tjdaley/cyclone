@@ -122,6 +122,8 @@ cyclone/
 │       ├── 025_job_params.sql             # jobs.params jsonb — options a job was started with
 │       ├── 026_account_ownership_and_merge.sql  # joint accounts; ON UPDATE CASCADE for merges
 │       ├── 027_purge_rejected_statements.sql   # ⚠ deletes data — old soft-rejected rows
+│       ├── 028_transaction_soft_delete.sql    # deleted_at on transactions
+│       ├── 029_transaction_check_number.sql  # check_number on transactions
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -376,8 +378,13 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
                         "description": "Safety check on a drafted reply" }
 ```
 
-- Object keys: `description`, `extends`, `chain`, `temperature`, `top_p`, `max_tokens`, `vision`. Unknown keys are rejected at load. Top-level keys starting with `_` are ignored — that's how you comment in JSON.
+- Object keys: `description`, `extends`, `chain`, `temperature`, `top_p`, `max_tokens`, `timeout_seconds`, `vision`. Unknown keys are rejected at load. Top-level keys starting with `_` are ignored — that's how you comment in JSON.
 - **Convention:** `default`, `fast`, and `vision` are the physical model chains; every task profile `extends` one of them. Retune a task by changing what it extends.
+- **A deadline too short for the work selects for the model that gives up soonest.** This is the non-obvious failure and it cost a session to see. At the global 90s, a 27-page statement extraction "succeeded" only because that model stopped at 38 of 286 transactions — a short answer is the only kind that fits — while the run where all three vendors tried to finish was killed three times over. `timeout_seconds` on a profile fixes it where the answer is long: `extract_account_statement` 300s, `ocr_document_page` 180s, everything else on the global 90s. Both run inside background jobs, where a generous deadline costs only patience.
+- **Gemini enforces the deadline server-side**, so an overrun arrives as a structured `504 DEADLINE_EXCEEDED` from Google rather than a client timeout. Anthropic and OpenAI raise client-side (`APITimeoutError`). Same event, three different shapes — do not read the Gemini 504 as a network fault.
+- **Chain order is measured, not priced.** The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI complete and correct, Gemini good but stopped at 200 entries, DeepSeek lost and mis-stated amounts and invented JSON keys. `default` and `vision` therefore run Claude → OpenAI → Gemini. **DeepSeek is in no chain and must not be added to one that touches evidence.**
+- **`complete_detailed()` returns `LLMResult`** — the text plus the vendor, model, and how many candidates were tried. Use it wherever the answer becomes part of a record that has to say how it was produced. `complete()` still returns a bare string and is right everywhere else. The profile name says what was *asked for*; it cannot say who answered, and on a long statement read in passes it cannot even be one answer — the chain is walked independently per call, so a single document can be part Claude and part OpenAI.
+- **Vendor SDKs drift, and the failover hides it.** Any exception fails the candidate over with a `WARNING` — including a crash in *our own* parsing, which then reads as "the vendor refused". Two of these ran for a whole session: `response.content[0].text` on Anthropic breaks the moment a model returns extended thinking, because the opening block is a `ThinkingBlock` with no `text` (use `_anthropic_text`, which selects blocks by type); and OpenAI's `chat.completions` no longer accepts `max_tokens`. **When one vendor is always serving, suspect the ones ahead of it in the chain rather than assuming they are down.**
 - **Failover:** the first candidate is tried; on *any* failure — network, quota, auth, API error, or an empty response — the service logs a `WARNING` and moves to the next candidate. No same-candidate retry. Chain exhausted → `LLMUnavailableError` (a `RuntimeError`).
 - **An unknown profile name raises `LLMUnavailableError`** listing the known names. Profile names are config; a typo must not silently run on some other model.
 - Candidates whose vendor has no API key, or that can't serve the call type (vision), are **skipped without being called**.
@@ -394,6 +401,7 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
 - `extract_text(pdf_bytes)` — PyMuPDF for searchable pages; LLM vision fallback for image-only pages
 - Image enhancement: grayscale, contrast 2.0, sharpness 1.5 before sending to the vision model
 - Tesseract is **not** used — LLM vision is more accurate for legal documents
+- **A page nobody could read is not a blank page.** When the text layer is unusable *and* the vision fallback fails, `_vision_extract` leaves `_UNREADABLE_MARKER` in place of the page's text instead of returning `""`. It used to return an empty string, so the page contributed nothing and no record anywhere said one had been lost. The marker travels in `raw_text`, and `statement_service` raises `PAGE_UNREADABLE` (warn) naming the pages.
 - **Output is sanitized** (`_sanitize`): control characters and lone surrogates are stripped. A NUL from a badly encoded exhibit page makes Postgres reject the entire row (`22P05`, "unsupported Unicode escape sequence"), which fails an ingest *after* all the extraction work is done. Never persist raw extraction output that has not been through this.
 - Logs pages, OCR-page count, and elapsed time at `INFO` — OCR is the dominant cost of an ingest and a slow upload otherwise looks like a hang
 
@@ -463,7 +471,33 @@ Statement extraction is the only caller of `pdf_service.extract_text(..., page_m
 
 **Merging is the repair when that has already happened.** `preview_merge()` reports before `merge()` acts, because a merge moves evidence and deletes a row. `PERIOD_OVERLAP`, `SAME_ACCOUNT`, and `DIFFERENT_MATTER` are blocking; `BATES_OVERLAP`, `LAST4_MISMATCH`, and `TYPE_MISMATCH` need `force`. Period overlap is blocking rather than forceable for a concrete reason: the unique index on `(account, period_start, period_end)` would reject the second statement and fail the merge part-way with an opaque database error. Two ordering rules inside `merge()`: statements move **before** the source is deleted (the statements table cascades on account delete, so deleting first destroys them), and successors naming the source as `antecedent_account_id` are repointed first. Covered by `tests/test_account_merge.py`.
 
+**One missing date condemns every date in the batch.** A null is not merely a missing value — it marks a call that stopped reading the date column, and the dates that call *did* emit are no more trustworthy than the ones it dropped. Ground truth on a 27-page statement showed why: wrong dates never appeared in a batch that was otherwise clean, only ever mixed in with nulls, and they were undetectable on their own — inside the period, not reliably out of order. So `_date_audit_reason` triggers a re-read of the whole batch on a single null (or on any date outside the period, which is the only handle on a batch of wrong dates with no nulls).
+- **Only the date column is re-read.** The amounts in those batches were perfect; re-running the batch to fix one column would re-roll the dice on data that already ties.
+- **The re-read matches by POSITION.** Descriptions and amounts repeat constantly — three identical `Transfer from DDA (Sweep)` of $5,000.00 on one day is ordinary — so matching on them would date lines confidently and wrongly. Order is the key; description and amount only confirm.
+- **The second reading wins, and every change is flagged** (`DATE_REREAD`, with both values). Dates do not enter reconciliation, so nothing downstream would otherwise reveal that a date had been revised.
+- **One attempt, no looping.** Anything still undated raises `UNDATED_TRANSACTIONS` (warn) and a person dates it from the source page.
+- **There is no ordering check, deliberately.** These statements list credits then debits, each section restarting at the beginning of the period, so dates jump backwards mid-batch on the first batch of nearly every statement. It would fire constantly and catch nothing known.
+Covered by `tests/test_date_audit.py`.
+
+**Checks in a summary table are transactions.** A block headed "CHECKS IN SERIAL NUMBER ORDER" is, on many statements, the *only* place a check appears — the prompt used to say it "only lists them again by number" and threw them away, which lost twelve debits worth $25,669.39 on one statement. Two things make it readable: the table is **column groups read left to right**, so the extracted text interleaves them and reading straight down a column gives the wrong rows; and a row whose amount is not a printed figure ("-See above-") is already itemised in the debit list, which is the bank telling you which rows would double-count. `_dedupe_checks` is the backstop for banks that reprint a check *with* its amount — the debit-list entry wins, because it carries the payee. A doubled debit is worse than a missing one: it reconciles to a wrong number rather than an obviously wrong one. Covered by `tests/test_check_extraction.py`.
+
+**`check_number` is stored and searchable** (`checks_only`, or one number). A check is the only debit that does not say where the money went, and not every bank prints the images — so the number is what a discovery request asks about. Stored as text: leading zeros are kept, the footnote asterisk in "2493*" is stripped (it marks a gap in the serial run, not the number), and it is never arithmetic.
+
+**A long statement must be read in passes.** One call reliably handles a short statement and reliably gives up on a long one. A 27-page statement of 286 entries came back with 38 — every credit, then fifteen debits, then a closing brace. The JSON was valid, the input was 36,863 characters against a 60,000 ceiling, and the output used about a seventh of its 32,000-token budget: nothing failed, nothing was truncated, the model just stopped. **No limit can be raised to fix that, because no limit was reached.** Above `_MAX_SINGLE_PASS_PAGES` the document is indexed once (accounts, periods, balances, page ranges) and then each statement is walked `_PAGES_PER_CHUNK` pages at a time asking only for transactions, so every answer is small enough that finishing is the easy option. Line numbers are assigned in Python — each pass only ever saw a slice — and every pass is handed the statement period, or a line printed "12/04" has no year.
+
+**Check the extraction against what the statement says about itself.** The account summary states its own answer — "24 Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and `_completeness_findings` compares both count and total per side, raising `INCOMPLETE_EXTRACTION` (warn). Reconciliation alone does catch a short read, but only as one unexplained delta; this says *which side* fell short and by how much, which is the difference between "something is wrong" and "the debits stopped after fifteen of two hundred sixty-two". Covered by `tests/test_long_statement.py`.
+
 **One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements claim the same page, because two statements cannot be printed on one page. Covered by `tests/test_statement_split_guard.py`.
+
+**The three deletes are deliberately not the same delete.** Nothing in this database is the original record — the Bates-stamped PDF in Storage is — so a statement or an account is removed outright: a mistake costs a re-import, and a half-deleted account sitting in an inventory is worse than one that is gone. A single *line* is different, and gets a soft delete:
+
+- Dropping a line asserts something about the document ("this is not printed there") and changes whether the statement reconciles, so it is flagged, hidden, attributed, and re-reconciled — never destroyed. `delete_transaction` / `restore_transaction`, swept by the matter-close workflow when that exists.
+- **The tell that a drop was legitimate: the statement reconciles *better* without the line**, because extraction invented it (a row read twice, a daily-balance entry read as a transaction). If reconciliation gets worse, something real was removed, and the returned statement says so.
+- `get_by_statement` / `get_by_account` / `search()` exclude dropped lines **by default**; `include_deleted=True` is for the two callers that need every row — showing someone what they removed, and counting what a cascade is about to take.
+- Deleting a statement is `reject_statement` reached from the statement row rather than the exceptions queue. Same operation; the gap was reach, since a statement can look fine on ingest and only later turn out to be a mess.
+- `delete_account` cascades and previews first. Its warnings are the `_reason_to_keep` conditions, downgraded to warnings — this is a deliberate act, not an automatic cleanup.
+
+Covered by `tests/test_deletes.py`.
 
 **Rejecting a statement deletes it.** Not a status flip — the statement, its transactions, and (when nothing of value would go with it) the account the bad import created. `review_status = 'rejected'` used to leave all of it filtered out of every view but still present, which is the worst of both worlds: nobody can act on invisible rows, and the empty account sits in the inventory forever. `_reason_to_keep()` spares an account that still has statements, sits in a succession chain, or carries attorney judgment (`ownership`, `property_character`, `purpose`, `notes`) — that is work the import did not do and should not undo. The source PDF stays in Storage: one upload can back several statements, so deleting it on one rejection would take another's source with it. Migration 027 applies the same rule to rows rejected under the old behaviour. Covered by `tests/test_statement_reject.py`.
 
@@ -472,6 +506,8 @@ Statement extraction is the only caller of `pdf_service.extract_text(..., page_m
 **Correcting an `amount` re-reconciles the statement.** That is the point of allowing the edit: an unreconciled statement is usually one misread figure. `_rereconcile()` recomputes the close and *replaces* the stale `UNRECONCILED` flag rather than stacking another one, so a statement corrected into balance stops claiming it is out of balance. It deliberately leaves `review_status` alone — clearing an exception is a decision, not a consequence of arithmetic. Covered by `tests/test_transaction_correction.py`.
 
 Pass `Decimal` and `date` straight to `repo.update()`. The manager's `json_safe` already converts them, and converting to `str` first leaves a string on the model handed back to the caller, which then breaks the next arithmetic that touches it.
+
+**`extraction` records who did the work, not just what was asked.** `_provenance()` writes a `passes` list — one entry per LLM call with its label (`index`, `pages 5-8`), vendor, model, and attempt count — plus `models_used` and a `failed_over` flag. Because each pass carries its page range, any line traces to the model that read it. `attempts > 1` on a pass means the preferred model did not answer, which is how a vendor regression gets noticed after the fact rather than never. Covered by `tests/test_extraction_provenance.py`.
 
 **`source_filename`, `bates_first`, and `bates_last` live in the statement's `extraction` jsonb**, not in columns — they are provenance, never queried on. `_statement_response()` in the router lifts them out, because "which file was this?" is the first question asked about a statement that will not reconcile, and Storage renames every upload to a job id.
 
@@ -712,10 +748,15 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply |
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
 | Financial Information Statement generation | ❌ Not started — the chart and `include_in_fis` are in place |
+| Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks |
+| Extraction completeness check | ✅ Built — extracted counts and totals vs the statement's own |
 | Bates detection + gap reporting | ✅ Built — pattern-based, per-page, with production-gap flags |
 | Account merge (two rows, one real account) | ✅ Built — previewed, with blocking and forceable conflicts |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
 | Reject a statement (discards it and its lines) | ✅ Built — deletes; removes an emptied, uncharacterized account too |
+| Delete a transaction / statement / account | ✅ Built — soft for a line, hard for a statement or account |
+| Reassign an account to another matter | ❌ Not started — needs `ON UPDATE CASCADE` on the statements→accounts FK, as 026 did for transactions |
+| Matter-close workflow | ❌ Not started — must purge soft-deleted transactions |
 | Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
 | Rule 1006 exhibit export | ❌ Not started — tagging and Bates capture are in place |
 | Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
@@ -800,6 +841,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Take a vision answer for the institution at face value | The form printer'"'"'s imprint is the other company name on the page. Reject known vendors; prefer unnamed to wrongly named |
 | Use `.get("field", "")` on extraction output | The key is present and null far more often than absent, and a default never sees null. Use `or ""` |
 | Trust an institution name when one upload reports several | Disagreement means at least one is a guess. Re-read them from the pages |
+| Read transactions without thinking about `include_deleted` | It defaults to excluding dropped lines. Pass True only to show someone what they removed, or to count a cascade |
+| Soft-delete a statement or an account | The PDF in Storage is the undo. Soft state there infects account lists, queues, search scoping, and gap detection for no gain |
 | Leave a rejected extraction in the table "filtered out" | Delete it. Invisible-but-present means nobody can act on it and the empty account never goes away |
 | Delete an account that carries a characterization | `_reason_to_keep()` spares it. Ownership, character, purpose, and notes are attorney work, not import output |
 | Overwrite an extracted value in place | Correct it through `correct_transaction()` — the flag trail is what makes the figure defensible |
@@ -812,6 +855,19 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Construct a Bates number for an unstamped page | Leave it null. A cited number that is not on the page is worse than no citation |
 | Ask the model for a Bates number when a series was detected | The pattern owns the field — the model's value is discarded, not used as a fallback |
 | Derive a statement's page range from its transactions | Use the span. A worksheet or disclosures page carries no lines and is not missing |
+| Put a cheap model on an extraction that becomes evidence | Chain order here is measured accuracy. A model that invents JSON keys and mis-states amounts costs more than it saves |
+| Record only the profile name as an extraction's provenance | A chain has several vendors and a chunked read can use more than one. Use `complete_detailed()` and keep the per-pass record |
+| Index into `response.content[0]` on an Anthropic reply | Extended thinking puts a `ThinkingBlock` first. Select by block type — `_anthropic_text` |
+| Test an Anthropic model family with `"-5" in model` | That matches `claude-haiku-4-5-…` too, and silently drops `temperature` on tasks that ask for 0.0. Use `_anthropic_takes_temperature` |
+| Read a Gemini `504 DEADLINE_EXCEEDED` as a network fault | It is usually our own deadline. Gemini enforces it server-side and reports it in Google's error format |
+| Set one global timeout for every task | A long answer needs a long deadline, and a short one silently selects for the model that quits earliest. Use `timeout_seconds` on the profile |
+| Return `""` for a page OCR could not read | Leave the marker. A page known to be missing and a page that was blank are not the same fact |
+| Repair only the nulls when a batch comes back with missing dates | A null marks a degraded call; the dates it did produce are equally suspect. Re-read the whole batch's date column |
+| Match a re-read line by its description or amount | Both repeat constantly on a statement. Match by printed position |
+| Assume a checks-summary table repeats debits already listed | On many statements it is the only place the check appears. Skip rows with no printed amount; dedupe the rest |
+| Read a multi-column table straight down one column | Statement tables are column groups read left to right; the extracted text interleaves them |
+| Raise `max_tokens` when an extraction comes back short | Check what it actually used first. A model that stops at a seventh of its budget did not run out of room — split the work instead |
+| Trust a well-formed extraction because it parsed | Valid JSON says nothing about completeness. Compare it against the totals the statement prints for itself |
 | Gate Bates detection on perfect one-per-page steps | That rejects exactly the incomplete productions worth flagging. Gate on monotonicity |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
 | Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |

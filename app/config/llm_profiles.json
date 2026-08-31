@@ -15,15 +15,15 @@
     "chain": [
       {
         "vendor": "anthropic",
-        "model": "claude-opus-4-6"
-      },
-      {
-        "vendor": "gemini",
-        "model": "gemini-3.1-pro-preview"
+        "model": "claude-opus-5"
       },
       {
         "vendor": "openai",
         "model": "gpt-5.4"
+      },
+      {
+        "vendor": "gemini",
+        "model": "gemini-3.1-pro-preview"
       }
     ]
   },
@@ -36,7 +36,7 @@
       },
       {
         "vendor": "anthropic",
-        "model": "claude-opus-4-6-lite"
+        "model": "claude-haiku-4-5-20251001"
       },
       {
         "vendor": "openai",
@@ -45,12 +45,16 @@
     ]
   },
   "vision": {
-    "description": "Multimodal calls \u2014 only anthropic, gemini, and openai qualify",
+    "description": "Multimodal calls — only anthropic, gemini, and openai qualify",
     "vision": true,
     "chain": [
       {
         "vendor": "anthropic",
-        "model": "claude-opus-4-6"
+        "model": "claude-opus-5"
+      },
+      {
+        "vendor": "openai",
+        "model": "gpt-5.4"
       },
       {
         "vendor": "gemini",
@@ -58,7 +62,7 @@
       }
     ]
   },
-  "_tasks": "Task profiles \u2014 retune these freely; call sites never change.",
+  "_tasks": "Task profiles — retune these freely; call sites never change.",
   "parse_billing_entry": {
     "description": "Parse a natural-language billing entry into structured fields",
     "extends": "fast",
@@ -84,7 +88,7 @@
     "temperature": 0.0
   },
   "compose_lead_reply": {
-    "description": "Draft the substantive reply to a lead \u2014 quality over latency",
+    "description": "Draft the substantive reply to a lead — quality over latency",
     "extends": "default"
   },
   "response_guardrail": {
@@ -110,7 +114,8 @@
     "description": "Read a bank/brokerage/card statement into signed transactions",
     "extends": "default",
     "temperature": 0.0,
-    "max_tokens": 32000
+    "max_tokens": 32000,
+    "timeout_seconds": 300
   },
   "analyze_pleading": {
     "description": "Extract case metadata, children, and counsel from a filed pleading",
@@ -125,6 +130,9 @@
   "ocr_document_page": {
     "description": "Read text off a scanned page image",
     "extends": "vision",
-    "temperature": 0.0
-  }
+    "temperature": 0.0,
+    "timeout_seconds": 180
+  },
+  "_chain_order": "Order is from measured accuracy on a hard extraction, not from price. The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI were both complete and correct; Gemini did well on what it produced but stopped after 200 entries; DeepSeek lost and mis-stated amounts and invented JSON keys, so it appears in no chain and must not be added to one that touches evidence.",
+  "_timeouts": "timeout_seconds overrides the global LLM_TIMEOUT_SECONDS per profile. Set it where the answer is long. A deadline too short for the work does not merely fail: it selects for whichever model gives up soonest, because a short answer is the only kind that fits. On a 27-page statement at the global 90s, the run that \"succeeded\" returned 38 of 286 transactions, and the run where all three vendors tried to finish was killed three times. extract_account_statement gets 300s and ocr_document_page 180s; both run inside background jobs, where a generous deadline costs only patience."
 }

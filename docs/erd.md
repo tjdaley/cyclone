@@ -4,7 +4,7 @@ Eight subject-area diagrams. Split deliberately: one ERD covering every table is
 unreadable, and crossings grow much faster than node count. `MATTERS` and
 `STAFF` repeat across frames so each frame can stay small.
 
-Vetted line by line against the deployed schema after migration 026. Every
+Vetted line by line against the deployed schema after migration 028. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
 
@@ -260,6 +260,12 @@ because they answer different questions. Added by migration 024.
 - `category_id` is `ON DELETE RESTRICT`, not `SET NULL`. Quietly un-filing
   evidence because someone tidied the chart is how an FIS loses a line with
   nobody noticing; retiring a category sets `is_active` instead.
+- `financial_account_transactions.deleted_at` (migration 028) is the one soft
+  delete in the schema. Statements and accounts are removed outright, because
+  the PDF in Storage is the undo; a line is not, because dropping one asserts
+  it is not printed on the document and changes whether the statement
+  reconciles. Every read excludes them by default, and the matter-close
+  workflow is meant to sweep them.
 - The join table carries `tagged_by_staff_id`. Tagging is an attorney judgment
   that gets cross-examined, so the record says who made it.
 - The join table also carries a surrogate `id` on top of its natural

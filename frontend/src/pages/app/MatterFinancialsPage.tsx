@@ -6,6 +6,7 @@ import {
   getAccountStatements, getStatementExceptions, reviewStatement,
   getStatementTransactions, getAccountTransactions,
   previewAccountMerge, mergeAccounts,
+  deleteStatement, previewAccountDelete, deleteAccount,
 } from '../../lib/api'
 import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
@@ -13,7 +14,7 @@ import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
   Matter, OpposingParty,
   FinancialAccount, AccountType, PropertyCharacter, AccountOwnership,
-  AccountMergePreview,
+  AccountMergePreview, AccountDeletePreview,
   AccountStatement, StatementReviewStatus, AccountTransaction,
   StatementIngestSummary, StatementJobStatus, ExtractionFlag,
 } from '../../types'
@@ -286,6 +287,41 @@ export default function MatterFinancialsPage() {
       setTxLabel(`all periods · ${accountLabel(account)}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load transactions')
+    } finally { setBusy(false) }
+  }
+
+  /**
+   * Discard a statement from the account list.
+   *
+   * The same operation as rejecting from the exceptions queue. It is reachable
+   * here because a statement can look fine on ingest and only later turn out to
+   * be a mess — pages scanned out of order, pages missing, no Bates numbers to
+   * have caught it by.
+   */
+  async function discardStatement(statement: AccountStatement) {
+    if (!window.confirm(
+      'Delete this statement?\n\nIts transactions go with it, and if that leaves the account ' +
+      'with nothing, the account goes too. The source PDF stays in storage, so it can be ' +
+      'uploaded again.',
+    )) return
+
+    setBusy(true)
+    try {
+      const result = await deleteStatement(statement.id)
+      setStatements(prev => prev.filter(s => s.id !== statement.id))
+      setExceptions(prev => prev.filter(s => s.id !== statement.id))
+      setOpenStatementId(null); setTransactions([])
+      if (result.account_deleted) { setOpenAccountId(null); setEditing(null) }
+      setNotice(
+        `Deleted the statement and ${result.transactions_deleted} transaction` +
+        `${result.transactions_deleted === 1 ? '' : 's'}. ` +
+        (result.account_deleted
+          ? 'The account it created was empty, so that went too.'
+          : result.account_kept_reason ? `The account was kept — ${result.account_kept_reason}.` : ''),
+      )
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the statement')
     } finally { setBusy(false) }
   }
 
@@ -676,8 +712,12 @@ export default function MatterFinancialsPage() {
                             {s.bates_last && s.bates_last !== s.bates_first ? `–${s.bates_last}` : ''}
                           </span>
                         )}
-                        <span className="ml-auto text-xs text-text-secondary tabular-nums">
-                          {money(s.beginning_balance)} → {money(s.ending_balance)}
+                        <span className="ml-auto flex items-baseline gap-3">
+                          <span className="text-xs text-text-secondary tabular-nums">
+                            {money(s.beginning_balance)} → {money(s.ending_balance)}
+                          </span>
+                          <button type="button" className="text-xs text-red-700 underline" disabled={busy}
+                            onClick={() => discardStatement(s)}>Delete</button>
                         </span>
                       </div>
                     ))}
@@ -885,10 +925,100 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
         </button>
       </div>
 
-      <div className="md:col-span-2">
+      <div className="md:col-span-2 space-y-2">
         <MergePanel account={account} accounts={accounts} onMerged={onMerged} />
+        <DeletePanel account={account} onDeleted={onMerged} />
       </div>
     </div>
+  )
+}
+
+/**
+ * Remove an account and everything filed under it.
+ *
+ * For a statement imported into the wrong matter, or an account that only
+ * exists because an early extraction misread the institution and a clean copy
+ * was ingested afterwards.
+ *
+ * Hard, not soft: the PDFs are still in storage, so a mistake costs a re-import,
+ * while a half-deleted account sitting in an inventory is worse than one that is
+ * gone. It previews first, because the cascade is the whole point.
+ */
+function DeletePanel({ account, onDeleted }: {
+  account: FinancialAccount
+  onDeleted: () => Promise<void>
+}) {
+  const [preview, setPreview] = useState<AccountDeletePreview | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function look() {
+    setBusy(true); setError(null)
+    try {
+      setPreview(await previewAccountDelete(account.id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not check the account')
+    } finally { setBusy(false) }
+  }
+
+  async function commit() {
+    if (!preview) return
+    if (!window.confirm(
+      `Delete ${preview.account_label}?\n\n${preview.statements} statement(s) and ` +
+      `${preview.transactions} transaction(s) go with it. This cannot be undone — the source ` +
+      'PDFs stay in storage, so the statements can be uploaded again.',
+    )) return
+    setBusy(true); setError(null)
+    try {
+      await deleteAccount(account.id)
+      await onDeleted()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the account')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <details className="border border-red-200 rounded p-3" onToggle={e => {
+      if ((e.target as HTMLDetailsElement).open && !preview && !busy) look()
+    }}>
+      <summary className="cursor-pointer text-sm text-red-700 hover:text-red-800">
+        Delete this account
+      </summary>
+      <p className="text-xs text-text-secondary mt-2">
+        For a statement imported into the wrong matter, or an account that exists only because an
+        extraction misread the institution. Everything filed under it goes.
+      </p>
+
+      {busy && !preview && <p className="text-xs text-text-secondary mt-2">checking…</p>}
+      {error && <p className="text-xs text-red-700 mt-2">{error}</p>}
+
+      {preview && (
+        <div className="mt-3 text-sm">
+          <p className="text-text-primary">
+            Deletes <span className="tabular-nums font-medium">{preview.statements}</span> statement
+            {preview.statements === 1 ? '' : 's'} and{' '}
+            <span className="tabular-nums font-medium">{preview.transactions}</span> transaction
+            {preview.transactions === 1 ? '' : 's'} from{' '}
+            <span className="font-medium">{preview.account_label}</span>.
+          </p>
+          {preview.periods.length > 0 && (
+            <p className="text-xs text-text-secondary mt-1">{preview.periods.join(' · ')}</p>
+          )}
+          {preview.warnings.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {preview.warnings.map((w, i) => (
+                <li key={i} className="text-xs text-amber-700">{w}</li>
+              ))}
+            </ul>
+          )}
+          <button type="button" className="btn-primary bg-red-700 hover:bg-red-800 mt-3"
+            disabled={busy} onClick={commit}>
+            Delete account and everything under it
+          </button>
+        </div>
+      )}
+    </details>
   )
 }
 

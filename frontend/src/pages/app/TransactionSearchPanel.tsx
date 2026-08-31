@@ -36,14 +36,16 @@ function emptyFilter(): TransactionSearchFilter {
     account_ids: null, date_from: null, date_to: null,
     category_ids: null, include_subcategories: true, uncategorized: false,
     tag_ids: null, tag_match_all: false, untagged: false,
-    text: null, limit: PAGE_SIZE, offset: 0,
+    text: null, check_number: null, checks_only: false,
+    include_deleted: false, limit: PAGE_SIZE, offset: 0,
   }
 }
 
 function isFiltered(f: TransactionSearchFilter): boolean {
   return Boolean(
     f.account_ids?.length || f.date_from || f.date_to || f.category_ids?.length ||
-    f.uncategorized || f.tag_ids?.length || f.untagged || f.text,
+    f.uncategorized || f.tag_ids?.length || f.untagged || f.text ||
+    f.check_number || f.checks_only,
   )
 }
 
@@ -201,6 +203,12 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
             onChange={e => setTextDraft(e.target.value)} />
         </div>
         <div>
+          <label className="label" htmlFor="tx-check">Check #</label>
+          <input id="tx-check" className="input mt-1 font-mono" placeholder="2495"
+            value={filter.check_number ?? ''}
+            onChange={e => patch({ check_number: e.target.value.trim() || null })} />
+        </div>
+        <div>
           <label className="label" htmlFor="tx-from">From</label>
           <input id="tx-from" type="date" className="input mt-1" value={filter.date_from ?? ''}
             onChange={e => patch({ date_from: e.target.value || null })} />
@@ -274,6 +282,20 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
               filter.untagged ? 'bg-navy text-white border-navy' : 'bg-off-white text-text-secondary border-border hover:border-navy/40'}`}
             onClick={() => patch({ untagged: !filter.untagged, tag_ids: null })}>
             Untagged
+          </button>
+          {/* Removed lines are hidden from every total; this is how they are
+              found again to put back. */}
+          <button type="button"
+            className={`text-xs rounded-full px-2.5 py-1 border transition-colors ${
+              filter.checks_only ? 'bg-navy text-white border-navy' : 'bg-off-white text-text-secondary border-border hover:border-navy/40'}`}
+            onClick={() => patch({ checks_only: !filter.checks_only })}>
+            Checks only
+          </button>
+          <button type="button"
+            className={`text-xs rounded-full px-2.5 py-1 border transition-colors ${
+              filter.include_deleted ? 'bg-red-700 text-white border-red-700' : 'bg-off-white text-text-secondary border-border hover:border-navy/40'}`}
+            onClick={() => patch({ include_deleted: !filter.include_deleted })}>
+            Show removed
           </button>
           {tags.map(t => {
             const on = filter.tag_ids?.includes(t.id) ?? false
@@ -389,7 +411,9 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                 const category = row.category_id ? categoryById.get(row.category_id) : undefined
                 return (
                   <tr key={row.id}
-                    className={`border-b border-border/60 align-top ${selected.has(row.id) ? 'bg-navy/5' : ''}`}>
+                    className={`border-b border-border/60 align-top ${
+                      row.deleted_at ? 'opacity-50 line-through decoration-red-400' : ''} ${
+                      selected.has(row.id) ? 'bg-navy/5' : ''}`}>
                     <td className="py-2 pr-2">
                       <input type="checkbox" checked={selected.has(row.id)}
                         aria-label={`Select ${row.description}`}
@@ -403,7 +427,19 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                       )}
                     </td>
                     <td className="py-2 pr-3">
-                      <div>{row.description}<CorrectedMark flags={row.flags} /></div>
+                      <div>
+                        {row.check_number && (
+                          <span className="mr-1.5 text-xs font-mono rounded px-1.5 py-0.5 bg-navy/10 text-navy">
+                            #{row.check_number}
+                          </span>
+                        )}
+                        {row.description}<CorrectedMark flags={row.flags} />
+                        {row.deleted_at && (
+                          <span className="ml-2 text-xs text-red-700 no-underline">
+                            removed{row.deletion_reason ? ` — ${row.deletion_reason}` : ''}
+                          </span>
+                        )}
+                      </div>
                       {row.location && <span className="text-xs text-text-secondary">{row.location}</span>}
                       {row.tag_ids.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-1">

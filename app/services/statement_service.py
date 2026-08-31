@@ -20,7 +20,7 @@ evidence. Three rules follow from that:
 """
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
@@ -114,6 +114,16 @@ ONLY for a genuinely different account number or a genuinely different period.
 Statements repeat their header — account number, statement dates, "Page 2 of 3"
 — on every page. A repeated header is NOT a new statement.
 
+CHECKS ARE TRANSACTIONS. A table headed "CHECKS IN SERIAL NUMBER ORDER",
+"CHECKS PAID", or similar lists real debits — on many statements it is the ONLY
+place a check appears. Extract every priced row: amount NEGATIVE, check_number
+as printed without any trailing asterisk, description "Check 2495" when nothing
+else is given. The table is laid out in COLUMN GROUPS read left to right
+(Date/Number/Amount, then Date/Number/Amount again on the same rows), which the
+extracted text interleaves into one sequence — read it as repeating triples. A
+row whose amount is not a printed figure ("-See above-", blank) is already
+itemised in the debit list; skip it or you will double-count.
+
 These blocks are NOT transaction registers. Never turn one into transactions,
 and never let one become a statement of its own:
   - DAILY ENDING BALANCE, or any table of dates against running balances. These
@@ -123,8 +133,8 @@ and never let one become a statement of its own:
   - Checkbook reconciliation worksheets, and any blank form the customer fills in.
   - Check images, disclosures, error-resolution notices, marketing inserts.
 A date column next to an amount column does not make a table a register. Ask
-whether each row is a payment, deposit, or charge that moved the balance. If it
-is a balance, a total, or a rate, leave it out.
+whether each row is a payment, deposit, or charge that moved the balance. A
+check did; a balance, a total, or a rate did not.
 
 Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each
 statement object has:
@@ -152,7 +162,12 @@ statement object has:
   - beginning_balance: number or null
   - ending_balance: number or null
   - printed_totals: object of any totals the statement itself prints, e.g.
-    {"payments": -6.49, "purchases": 1271.39, "fees": 0.00, "interest": 0.00}
+    {"deposits_credits": 202100.41, "checks_debits": -195600.04, "fees": 0.00}
+  - printed_counts: object of any transaction COUNTS the statement prints. Most
+    statements say something like "24 Deposits/Credits" and "262 Checks/Debits"
+    in the account summary. Report them as
+    {"deposits_credits": 24, "checks_debits": 262}. Omit a key you cannot find;
+    never estimate one from the rows you extracted.
 - transactions: array, in printed order. Each has:
   - line_no: 1-based integer
   - transaction_date: "YYYY-MM-DD" or null
@@ -169,6 +184,10 @@ statement object has:
   - physical_page_number: integer. The document text is broken up by lines of
     the form "<<<PAGE 7>>>". Report the number from the marker that most
     recently preceded this transaction. Null only if no marker precedes it.
+  - check_number: string or null. Set it whenever a check number is printed for
+    the entry, wherever it appears — "ARC CHECK # 2487" in the debit list and a
+    row of the checks table are both checks. As printed, without any trailing
+    asterisk.
   - bates_number: string or null. Productions are stamped with a Bates number in
     a corner of every page, e.g. "KF-000142", "SMITH 0087". If the page this
     line appears on carries one, copy it EXACTLY as printed, prefix and leading
@@ -199,6 +218,205 @@ If the document is not an account statement at all, return {"statements": []}.
 
 Respond ONLY with the JSON object. No markdown fences, no explanation.\
 """
+
+
+_METADATA_SYSTEM = """\
+You are indexing a PDF of financial account statements. Identify each statement
+and where it sits in the document. Do NOT extract transactions — another pass
+does that.
+
+The text is broken up by lines of the form "<<<PAGE 7>>>".
+
+A statement is one account over one period. Two blocks belong to the SAME
+statement when they carry the same account number and the same statement dates,
+however many pages lie between them. Statements repeat their header on every
+page; a repeated header is not a new statement.
+
+Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each has:
+
+- first_page / last_page: integers, the page range this statement occupies,
+  from its first header to the last page belonging to it. Include its balance
+  tables, check images, and disclosure pages — everything before the next
+  statement starts.
+- account:
+  - institution: the bank, brokerage, or card issuer that HOLDS the account, as
+    printed in the letterhead at the top of the page. Statements also name the
+    company that PRINTED the form, in small type at the foot of the page beside
+    a revision date or form number ("CSI REV 3/12/18", "3380-STMT", "Fiserv").
+    That is a software vendor; never report it. If the only name you can find is
+    in that footer, or the letterhead is a graphic you cannot read, return null.
+  - account_type: one of "checking" | "savings" | "brokerage" | "credit_card" | \
+"retirement" | "hsa" | "loan" | "other"
+  - account_number_last4: string of the last four digits, or null if redacted
+  - account_number_masked: the masked form exactly as printed
+  - name_on_account: string or null
+- period:
+  - start_date / end_date: "YYYY-MM-DD"
+- balances:
+  - beginning_balance / ending_balance: number or null
+  - printed_totals: totals the statement prints, e.g.
+    {"deposits_credits": 202100.41, "checks_debits": -195600.04}
+- printed_counts: counts the statement prints, e.g.
+  {"deposits_credits": 24, "checks_debits": 262}. Omit a key you cannot find;
+  never estimate one.
+
+If the document holds no account statement, return {"statements": []}.
+Respond ONLY with the JSON object. No markdown fences, no explanation.\
+"""
+
+
+_TRANSACTIONS_SYSTEM = """\
+You are extracting transactions from PART of one account statement, for use as
+trial evidence. Accuracy matters more than completeness: never invent a value.
+
+You are given a slice of pages from a statement whose account and period are
+stated below. Extract EVERY transaction ANCHORED on the PRIMARY PAGES named
+there, and nothing else. Do not summarise, do not stop early, and do not skip
+repetitive rows — a run of forty near-identical card purchases must produce
+forty entries.
+
+WHICH PAGE AN ENTRY BELONGS TO. A transaction is **anchored** on the page where
+its AMOUNT is printed. An entry runs to several lines — merchant, city, card,
+reference, timestamp — and those lines routinely continue past a page break, so
+the page an entry starts on is not always the page it is anchored on.
+
+  * Report a transaction whose amount is on a primary page, and give it the
+    whole of its description, including any lines that run on to the page after.
+  * Do NOT report a transaction whose amount is printed in the CONTINUATION
+    CONTEXT at the end of this slice. That page is shown only so you can finish
+    an entry anchored on the last primary page. The next slice reports it.
+  * If the FIRST lines of the first primary page are continuation lines with no
+    amount of their own, skip them. They finish an entry anchored on an earlier
+    page, and the slice that owned that page already reported it in full.
+
+Following those three rules exactly is what keeps each entry reported once, and
+keeps a description from being cut in half at a page break.
+
+Return ONLY a valid JSON object of the form {"transactions": [ ... ]}, in
+printed order. Each transaction has:
+  - transaction_date: "YYYY-MM-DD" or null
+  - posted_date: "YYYY-MM-DD" or null
+  - date_provenance: "printed" if the full date was printed, "derived" if you
+    took the year from the statement period, "unknown" otherwise
+  - description: the printed description as one line
+  - description_lines: the raw printed lines for this entry
+  - counterparty: the merchant or payee with card noise removed, or null
+  - location: trailing "City ST" if present, else null
+  - amount: SIGNED number — see the sign rule below
+  - running_balance: number or null, only if printed per line
+  - check_number: string or null. Set it whenever a check number is printed for
+    the entry, wherever it appears — "ARC CHECK # 2487" in the debit list and a
+    row of the checks table are both checks. As printed, without any trailing
+    asterisk.
+  - physical_page_number: the number from the "<<<PAGE n>>>" marker most
+    recently preceding this transaction
+  - flags: array of {code, severity, field_path, note} objects
+
+SIGN RULE. Sign each amount by how it moves the balance the institution prints:
+  * Deposit, credit, interest earned, dividend  -> POSITIVE
+  * Withdrawal, debit, check, ATM, fee          -> NEGATIVE
+  * Credit card purchase, cash advance, fee     -> POSITIVE (raises what is owed)
+  * Credit card payment or refund               -> NEGATIVE (lowers what is owed)
+
+CHECKS ARE TRANSACTIONS. A table headed "CHECKS IN SERIAL NUMBER ORDER",
+"CHECKS PAID", or similar lists real debits — on many statements it is the ONLY
+place a check appears, and skipping it loses money that left the account.
+Extract every priced row as a transaction:
+  - amount NEGATIVE (a check reduces the balance)
+  - check_number set to the number as printed, without any trailing asterisk
+  - description "Check 2495" when nothing else is printed for it
+
+Two things about that table:
+  * It is laid out in COLUMN GROUPS read left to right — typically
+    Date/Number/Amount, then Date/Number/Amount again on the same rows. The
+    extracted text interleaves them into one long sequence, so read it as
+    repeating triples rather than as one column running down the page.
+  * A row whose amount is not a printed figure — "-See above-", "-See
+    reverse-", blank — is NOT a separate transaction. The statement is telling
+    you it is already itemised in the debit list. Skip those rows; extracting
+    them would double-count. An asterisk beside a number means the numbers
+    before it are missing from the sequence, not that the row is special.
+
+These blocks are NOT transactions. Never turn one into an entry:
+  - DAILY ENDING BALANCE, or any table of dates against running balances
+  - ACCOUNT SUMMARY / SUMMARY OF ACCOUNTS, INTEREST RATE SUMMARY, OVERDRAFT SUMMARY
+  - Checkbook reconciliation worksheets, check images, disclosures, notices
+A date column beside an amount column does not make a table a register. Ask
+whether the row moved the balance. A check did; a running balance did not.
+
+FLAGS — record every inference. severity "info" for a routine derivation, "warn"
+for something a human should look at. Codes: YEAR_INFERRED, LOCATION_INFERRED,
+SIGN_ASSUMED, AMOUNT_UNCLEAR, DESCRIPTION_TRUNCATED.
+
+If these pages carry no transactions at all, return {"transactions": []}.
+Respond ONLY with the JSON object. No markdown fences, no explanation.\
+"""
+
+
+# Above this many pages a document is read in passes rather than in one call.
+# Chosen from where the single call actually fails: a 27-page statement with 286
+# entries came back with 38 of them, well-formed and 87% short, having used a
+# seventh of the output budget it was given. It did not run out of room — it
+# stopped. Below this, one call is both reliable and cheaper.
+_MAX_SINGLE_PASS_PAGES = 6
+
+# Pages per transaction call. A dense page runs to about fifteen entries, so
+# four keeps each answer small enough that finishing is the easy option.
+_PAGES_PER_CHUNK = 4
+
+# Pages of the NEXT chunk shown at the end of each slice, read-only.
+#
+# An entry's lines run past a page break constantly — the merchant is on one
+# page and the city, card, and timestamp on the next — so a slice that stopped
+# dead at its last page would cut those descriptions in half, and neither slice
+# would hold the whole entry. One page of lookahead is enough: a single entry
+# never spans more than a break.
+_PAGE_LOOKAHEAD = 1
+
+
+_DATE_AUDIT_SYSTEM = """\
+You are re-reading ONLY the dates on part of an account statement. Another pass
+already extracted these transactions and got the amounts right; its reading of
+the date column is in doubt.
+
+You are given the pages, and the transactions extracted from them as a numbered
+list IN THE ORDER THEY ARE PRINTED. Report the date printed for each one.
+
+MATCH BY POSITION, NOT BY DESCRIPTION. The list is in printed order, so line 12
+is the twelfth transaction on these pages. Descriptions and amounts repeat
+constantly on a statement — three "Transfer from DDA (Sweep)" of $5,000.00 on
+the same day is ordinary — so they are there to confirm you are on the right
+line, never to identify it. If a description does not seem to match what you
+read, trust the position and say so in the note.
+
+Return ONLY a valid JSON object of the form {"dates": [ ... ]}, one entry per
+numbered line, using the same numbers, omitting none:
+  - index: the line number you were given
+  - transaction_date: "YYYY-MM-DD", or null if the statement prints no date
+    for that entry
+  - posted_date: "YYYY-MM-DD" or null, only when printed separately
+  - date_provenance: "printed" if the full date was printed, "derived" if you
+    took the year from the statement period, "unknown" otherwise
+
+Most of these statements print only month and day, so the year comes from the
+statement period given below. A period that spans a year boundary is the case
+to be careful with: December belongs to the earlier year and January to the
+later one.
+
+Report what is printed. Do not carry a date down from the row above to fill a
+gap, and do not infer one from the rows around it — a missing date is a fact
+about the document, and null is the correct answer for it.
+
+Respond ONLY with the JSON object. No markdown fences, no explanation.\
+"""
+
+
+# How far outside its period a statement may legitimately date a line.
+#
+# Not zero: these statements post an interest deposit after the period closes —
+# 6/02 on a statement running 5/01 to 5/31 — so a hard bound would flag ordinary
+# entries. Ten days tolerates that while still catching a date wrong by a month.
+_PERIOD_MARGIN_DAYS = 10
 
 
 def _strip_fences(text: str) -> str:
@@ -258,6 +476,229 @@ def _is_form_vendor(name: str) -> bool:
     return any(" ".join(words[:n]) in _FORM_VENDORS for n in range(1, min(4, len(words)) + 1))
 
 
+def _date_audit_reason(
+    lines: list[dict[str, Any]],
+    period_start: Optional[date],
+    period_end: Optional[date],
+) -> Optional[str]:
+    """
+    Whether a batch's dates should be read again, and why.
+
+    A missing date is not just a missing value — it is evidence that the call
+    that produced this batch stopped attending to the date column. Ground truth
+    on a 27-page statement bore that out: wrong dates never appeared alone, only
+    ever in batches that also had nulls, and in the worst batch every one of its
+    four pages came back undated. The amounts in those same batches were
+    perfect. So one null condemns every date in the batch, not just itself.
+
+    The other trigger catches a batch with wrong dates and no nulls, which the
+    first cannot see: a date outside the statement period.
+
+    Deliberately sensitive rather than precise. A false trigger costs one small
+    call; a miss puts a wrong date in an exhibit.
+
+    There is no ordering check, though it was considered. These statements list
+    credits and then debits, each section starting again at the beginning of the
+    period, so dates legitimately jump backwards mid-batch — 12/26 to 11/28 in
+    the first batch of every statement of this shape. It would fire on almost
+    every document and catch nothing known.
+
+    :return: The reason to re-read, or None when the dates look sound.
+    :rtype: Optional[str]
+    """
+    if not lines:
+        return None
+
+    missing = sum(1 for line in lines if not _parse_date(line.get("transaction_date")))
+    if missing:
+        return "%d of %d line(s) came back with no date" % (missing, len(lines))
+
+    if period_start and period_end:
+        low = period_start - timedelta(days=_PERIOD_MARGIN_DAYS)
+        high = period_end + timedelta(days=_PERIOD_MARGIN_DAYS)
+        outside = [
+            parsed for parsed in (_parse_date(line.get("transaction_date")) for line in lines)
+            if parsed and not (low <= parsed <= high)
+        ]
+        if outside:
+            return "%d line(s) dated outside %s to %s" % (len(outside), period_start, period_end)
+    return None
+
+
+def _apply_date_audit(
+    lines: list[dict[str, Any]],
+    answers: list[dict[str, Any]],
+) -> int:
+    """
+    Take the re-read dates, recording every one that moved.
+
+    The second read wins. It is the narrower question asked of the same pages,
+    and the first pass has already shown it was distracted — that is why the
+    audit ran at all.
+
+    A change is written onto the line as a flag rather than applied silently.
+    Dates do not enter reconciliation, so nothing downstream would ever reveal
+    that a date had been revised; without the flag the revision would be
+    invisible in a record that ends up in front of a court.
+
+    :param answers: ``[{"index": 1, "transaction_date": ...}, ...]``, matched to
+        ``lines`` by position — descriptions repeat on these statements and
+        cannot identify a row.
+    :return: How many dates changed.
+    :rtype: int
+    """
+    by_index: dict[int, dict[str, Any]] = {}
+    for answer in answers:
+        try:
+            by_index[int(answer.get("index"))] = answer
+        except (TypeError, ValueError):
+            continue
+
+    changed = 0
+    for position, line in enumerate(lines, start=1):
+        answer = by_index.get(position)
+        if answer is None:
+            continue
+
+        before = _parse_date(line.get("transaction_date"))
+        after = _parse_date(answer.get("transaction_date"))
+        if before == after:
+            continue
+
+        line["transaction_date"] = after.isoformat() if after else None
+        line["posted_date"] = answer.get("posted_date") or line.get("posted_date")
+        if answer.get("date_provenance"):
+            line["date_provenance"] = answer["date_provenance"]
+        line.setdefault("flags", []).append({
+            "code": "DATE_REREAD",
+            "severity": "info",
+            "field_path": "transaction_date",
+            "note": "The date column was re-read after this batch showed missing dates. "
+                    "This line changed from %s to %s."
+                    % (before.isoformat() if before else "(none)",
+                       after.isoformat() if after else "(none)"),
+            "from": before.isoformat() if before else None,
+            "to": after.isoformat() if after else None,
+        })
+        changed += 1
+    return changed
+
+
+def _check_number(value: Any) -> Optional[str]:
+    """
+    A check number as printed, minus the asterisk.
+
+    The asterisk in "2493*" is the statement's own footnote marking a break in
+    the serial sequence — "(*) Denotes missing check numbers" — not part of the
+    number. Keeping it would make the number fail to match the check itself in
+    a discovery request.
+    """
+    cleaned = str(value or "").strip().rstrip("*").strip()
+    return cleaned or None
+
+
+def _dedupe_checks(lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """
+    Drop a checks-table row for a check already itemised in the debit list.
+
+    A check can be printed twice: once in the running debits and again in the
+    summary table at the back. This statement marks the repeats itself — the
+    amount column reads "-See above-" — and the prompt skips those, but that
+    convention is one bank's. Banks that repeat the check *with* its amount
+    would double-count it, and a doubled debit is worse than a missing one: it
+    reconciles to a wrong number rather than an obviously wrong one.
+
+    The debit-list entry wins, because it carries the payee and the fuller
+    description; the summary row usually has only a number.
+
+    :return: ``(lines_to_keep, notes)`` — one note per row removed.
+    :rtype: tuple[list[dict[str, Any]], list[str]]
+    """
+    kept: list[dict[str, Any]] = []
+    notes: list[str] = []
+
+    for index, line in enumerate(lines):
+        number = _check_number(line.get("check_number"))
+        if not number:
+            kept.append(line)
+            continue
+
+        duplicate_of = None
+        for other_index, other in enumerate(lines):
+            if other_index == index:
+                continue
+            description = str(other.get("description") or "")
+            same_number = _check_number(other.get("check_number")) == number
+            # Requiring the word "check" near the digits keeps a merchant's
+            # reference number from being read as a check number: "REF#
+            # 334900022500" contains 2500 and has nothing to do with a cheque.
+            named_in_text = bool(re.search(
+                r"(?:check|chk)\W{0,6}%s\b" % re.escape(number), description, re.I,
+            ))
+            if not (same_number or named_in_text):
+                continue
+            richer = len(description) > len(str(line.get("description") or ""))
+            if richer or (same_number and other_index < index and not richer):
+                duplicate_of = description.strip() or "an earlier entry"
+                break
+
+        if duplicate_of is None:
+            kept.append(line)
+        else:
+            notes.append("check %s (already listed as \"%s\")" % (number, duplicate_of[:60]))
+    return kept, notes
+
+
+def _provenance(passes: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Who actually did the work, for the statement's ``extraction`` record.
+
+    The profile name says what was *asked for*. It does not say which model
+    answered, and on a long statement read in passes it cannot: the chain falls
+    through independently on every call, so one document can be part Claude and
+    part OpenAI. When a figure from this statement is put in front of a court,
+    "which tool produced it" has a real answer, and this is where it lives.
+
+    :param passes: One record per LLM call, in the order they were made.
+    :return: The per-pass detail, plus a one-glance summary of the models used
+        and whether the preferred one ever had to be passed over.
+    :rtype: dict[str, Any]
+    """
+    labels = []
+    for entry in passes:
+        label = "%s/%s" % (entry["vendor"], entry["model"])
+        if label not in labels:
+            labels.append(label)
+    return {
+        "passes": passes,
+        "models_used": labels,
+        # True when any pass fell through to a later candidate. A statement
+        # read by the second choice is not wrong, but it is worth being able
+        # to find later — that is how a vendor regression gets noticed.
+        "failed_over": any(entry["attempts"] > 1 for entry in passes),
+    }
+
+
+def _unreadable_pages(raw_text: str) -> list[int]:
+    """
+    Pages ``pdf_service`` could read no text from at all.
+
+    It leaves a marker in place of the page's text when both the text layer and
+    the vision fallback fail, so the loss travels in ``raw_text`` and is still
+    visible in the stored record long afterwards.
+
+    :return: Page numbers, in order. Empty when every page was read, and empty
+        when the text carries no page markers to attribute a loss to.
+    :rtype: list[int]
+    """
+    if "[[PAGE COULD NOT BE READ" not in raw_text:
+        return []
+    return sorted(
+        page for page, text in bates_service.split_pages(raw_text).items()
+        if "[[PAGE COULD NOT BE READ" in text
+    )
+
+
 def _bates_value(stamp: str) -> int:
     """The numeric part of a Bates stamp, for arithmetic on the run."""
     return int("".join(c for c in stamp if c.isdigit()))
@@ -289,6 +730,7 @@ _CORRECTABLE = {
     "amount": "amount",
     "running_balance": "running balance",
     "bates_number": "Bates number",
+    "check_number": "check number",
     "physical_page_number": "page number",
 }
 
@@ -333,6 +775,82 @@ def _serialize(value: Any) -> Any:
         return value.isoformat()
     return value
 
+# How a statement labels its own credit and debit totals varies by bank, so the
+# keys are matched by what they contain rather than by an exact name.
+_CREDIT_WORDS = ("credit", "deposit")
+_DEBIT_WORDS = ("debit", "check", "withdrawal", "payment", "purchase")
+
+# A total is only worth comparing when it is more than rounding apart. Statements
+# print to the cent, so anything above this is a real difference.
+_TOTAL_TOLERANCE = Decimal("0.01")
+
+
+def _printed_side(printed: dict[str, Any], words: tuple[str, ...],
+                  against: tuple[str, ...]) -> Optional[Decimal]:
+    """
+    Pull one side's printed figure out of whatever the statement called it.
+
+    :param words: Substrings that mark the side wanted.
+    :param against: Substrings that mark the other side, checked first — a key
+        like "checks_debits" contains both "check" and "debit", and
+        "deposits_credits" contains "deposit"; whichever list matches more
+        specifically wins, so the other side is excluded explicitly.
+    """
+    for key, value in (printed or {}).items():
+        name = str(key).lower()
+        if any(w in name for w in against):
+            continue
+        if any(w in name for w in words):
+            amount = _money(value)
+            if amount is not None:
+                return abs(amount)
+    return None
+
+
+def _completeness_findings(
+    lines: list[dict[str, Any]],
+    printed_totals: dict[str, Any],
+    printed_counts: dict[str, Any],
+) -> list[str]:
+    """
+    Compare what was extracted against what the statement says about itself.
+
+    A statement states its own answer in the account summary — "24
+    Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and until now
+    that was recorded and never read. Reconciliation alone does catch a short
+    extraction, but only as one large unexplained delta; this says which side
+    fell short and by how much, which is the difference between "something is
+    wrong" and "the debits stopped after fifteen of two hundred sixty-two".
+
+    :return: One sentence per side that does not add up. Empty when it ties, and
+        empty when the statement printed nothing to check against.
+    :rtype: list[str]
+    """
+    amounts = [_money(line.get("amount")) or ZERO for line in lines]
+    got_credits = [a for a in amounts if a > 0]
+    got_debits = [a for a in amounts if a < 0]
+
+    findings: list[str] = []
+    for label, got, total_words, count_words, against in (
+        ("credit", got_credits, _CREDIT_WORDS, _CREDIT_WORDS, _DEBIT_WORDS),
+        ("debit", got_debits, _DEBIT_WORDS, _DEBIT_WORDS, _CREDIT_WORDS),
+    ):
+        printed_total = _printed_side(printed_totals, total_words, against)
+        printed_count = _printed_side(printed_counts, count_words, against)
+        got_total = abs(sum(got, ZERO))
+
+        if printed_count is not None and int(printed_count) != len(got):
+            findings.append(
+                "%d %s line(s) extracted, but the statement prints %d"
+                % (len(got), label, int(printed_count))
+            )
+        if printed_total is not None and abs(printed_total - got_total) > _TOTAL_TOLERANCE:
+            findings.append(
+                "%s lines total %s, but the statement prints %s (short by %s)"
+                % (label.capitalize(), got_total, printed_total, printed_total - got_total)
+            )
+    return findings
+
 def _conflict(code: str, blocking: bool, detail: str) -> dict[str, Any]:
     return {"code": code, "blocking": blocking, "detail": detail}
 
@@ -357,18 +875,265 @@ class StatementService:
         :rtype: dict[str, Any]
         :raises ValueError: If the response is not valid JSON.
         """
+        # A long document is read in passes. One call reliably handles a short
+        # statement and reliably gives up on a long one, so the length decides.
+        pages = bates_service.split_pages(raw_text)
+        if len(pages) > _MAX_SINGLE_PASS_PAGES:
+            return self._extract_chunked(raw_text, pages)
+
         body = raw_text[:_MAX_STATEMENT_CHARS]
         if len(raw_text) > _MAX_STATEMENT_CHARS:
             body += "\n\n[DOCUMENT TRUNCATED — report only the statements above]"
 
-        response = llm_service.complete(_STATEMENT_SYSTEM, body, profile="extract_account_statement")
+        passes: list[dict[str, Any]] = []
+        parsed = self._call_json(
+            _STATEMENT_SYSTEM, body, "statements", "Could not read the statement",
+            passes=passes, label="whole document",
+        )
+        parsed["extraction"] = _provenance(passes)
+        return parsed
+
+
+    def _extract_chunked(self, raw_text: str, pages: dict[int, str]) -> dict[str, Any]:
+        """
+        Read a long document in passes: index it, then walk it.
+
+        One call cannot do a long statement. A 27-page statement of 286 entries
+        came back with 38 — every credit, then fifteen debits, then a closing
+        brace. The JSON was valid and the output used a seventh of its token
+        budget, so nothing failed and nothing was truncated: the model simply
+        decided it was done. No ceiling can be raised to fix that, because no
+        ceiling was reached.
+
+        What does fix it is making each answer small enough that finishing is
+        the easy option. One pass indexes the document — accounts, periods,
+        balances, page ranges — and then each statement's pages are walked a few
+        at a time, asking only for transactions.
+
+        :param raw_text: Page-marked text of the whole document.
+        :param pages: ``{page_number: text}`` from the same.
+        :return: ``{"statements": [...]}`` in the shape a single call produces.
+        :rtype: dict[str, Any]
+        :raises ValueError: If the index pass returns nothing usable.
+        """
+        passes: list[dict[str, Any]] = []
+        index = self._call_json(
+            _METADATA_SYSTEM, raw_text[:_MAX_STATEMENT_CHARS], "statements",
+            "Could not index the document", passes=passes, label="index",
+        )
+        statements = index.get("statements") or []
+        LOGGER.info(
+            "statement_service.extract: %d page(s), %d statement(s) indexed; reading in passes",
+            len(pages), len(statements),
+        )
+
+        last_page = max(pages)
+        for statement in statements:
+            first = _page_number(statement.pop("first_page", None)) or 1
+            last = _page_number(statement.pop("last_page", None)) or last_page
+            first, last = max(1, min(first, last_page)), max(1, min(last, last_page))
+
+            context = self._statement_context(statement)
+            period = statement.get("period") or {}
+            period_start = _parse_date(period.get("start_date"))
+            period_end = _parse_date(period.get("end_date"))
+            collected: list[dict[str, Any]] = []
+            for start in range(first, last + 1, _PAGES_PER_CHUNK):
+                stop = min(start + _PAGES_PER_CHUNK - 1, last)
+                body = self._slice_body(pages, start, stop, last)
+                if not body.strip():
+                    continue
+                found = self._call_json(
+                    _TRANSACTIONS_SYSTEM,
+                    "%s\n\nPRIMARY PAGES: %d to %d.\n\n%s" % (context, start, stop, body),
+                    "transactions",
+                    "Could not read pages %d-%d" % (start, stop),
+                    passes=passes, label="pages %d-%d" % (start, stop),
+                ).get("transactions") or []
+                # A slice can only report what it was given; anything anchored
+                # in its lookahead belongs to the next one. Enforced here as
+                # well as in the prompt, because a duplicated transaction is a
+                # duplicated line in an exhibit.
+                found = [
+                    line for line in found
+                    if (_page_number(line.get("physical_page_number")) or start) <= stop
+                ]
+                # One missing date condemns every date in this batch, not just
+                # itself — see _date_audit_reason. The amounts are left alone:
+                # they were right, and re-running the whole batch to fix one
+                # column would re-roll the dice on data that already ties.
+                reason = _date_audit_reason(found, period_start, period_end)
+                if reason:
+                    LOGGER.info(
+                        "statement_service.extract: pages %d-%d — %s; re-reading the date column",
+                        start, stop, reason,
+                    )
+                    self._audit_dates(found, pages, start, stop, last, context, passes)
+
+                LOGGER.info(
+                    "statement_service.extract: pages %d-%d yielded %d transaction(s)",
+                    start, stop, len(found),
+                )
+                collected.extend(found)
+
+            # Numbered here rather than by the model: it only ever saw a slice,
+            # so every chunk would otherwise start again at one.
+            for index_, line in enumerate(collected, start=1):
+                line["line_no"] = index_
+            statement["transactions"] = collected
+
+        return {"statements": statements, "extraction": _provenance(passes)}
+
+    def _audit_dates(
+        self,
+        lines: list[dict[str, Any]],
+        pages: dict[int, str],
+        start: int,
+        stop: int,
+        last: int,
+        context: str,
+        passes: list[dict[str, Any]],
+    ) -> None:
+        """
+        Read one batch's date column again, and take the second answer.
+
+        Modifies ``lines`` in place. Exactly one attempt: if dates are still
+        missing afterwards the statement carries a flag and a person dates them
+        from the source page, which is a few minutes' work with the page and
+        Bates number already on the line. Looping would only spend calls on a
+        page that genuinely prints no date.
+
+        A failure here is swallowed on purpose. The batch's amounts are sound
+        and already collected; losing the whole statement because a repair pass
+        could not run would be a worse outcome than the doubtful dates it was
+        meant to fix.
+        """
+        listing = "\n".join(
+            "%d. %s  %s" % (
+                position,
+                (line.get("description") or "(no description)")[:80],
+                line.get("amount"),
+            )
+            for position, line in enumerate(lines, start=1)
+        )
+        body = "%s\n\nTRANSACTIONS ON THESE PAGES, IN PRINTED ORDER:\n%s\n\n%s" % (
+            context, listing, self._slice_body(pages, start, stop, last),
+        )
         try:
-            parsed = json.loads(_strip_fences(response))
+            answers = self._call_json(
+                _DATE_AUDIT_SYSTEM, body, "dates",
+                "Could not re-read dates for pages %d-%d" % (start, stop),
+                passes=passes, label="dates, pages %d-%d" % (start, stop),
+            ).get("dates") or []
+        except ValueError as e:
+            LOGGER.warning(
+                "statement_service: date re-read failed for pages %d-%d (%s); keeping the first reading",
+                start, stop, str(e),
+            )
+            return
+
+        changed = _apply_date_audit(lines, answers)
+        LOGGER.info(
+            "statement_service: pages %d-%d — re-read %d date(s), %d changed",
+            start, stop, len(answers), changed,
+        )
+
+    @staticmethod
+    def _slice_body(pages: dict[int, str], start: int, stop: int, last: int) -> str:
+        """
+        The pages for one transaction pass, plus a page of lookahead.
+
+        The lookahead is what stops a description being cut in half. These
+        entries run to several lines — merchant, city, card, reference,
+        timestamp — and a page break falls in the middle of one constantly. A
+        slice that ended at its last page would lose the tail, and the next
+        slice would drop it too, since it belongs to an entry that slice does
+        not own.
+
+        The extra page is fenced off in the text so it can be read but not
+        reported from.
+        """
+        body = "\n\n".join(
+            "<<<PAGE %d>>>\n%s" % (n, pages[n])
+            for n in range(start, stop + 1) if n in pages
+        )
+        lookahead = [n for n in range(stop + 1, min(stop + _PAGE_LOOKAHEAD, last) + 1) if n in pages]
+        if lookahead:
+            body += (
+                "\n\n=== CONTINUATION CONTEXT ===\n"
+                "The page(s) below are shown ONLY so you can finish an entry whose amount is "
+                "printed on page %d. Do not report any transaction anchored here.\n\n%s"
+                % (stop, "\n\n".join("<<<PAGE %d>>>\n%s" % (n, pages[n]) for n in lookahead))
+            )
+        return body
+
+    @staticmethod
+    def _statement_context(statement: dict[str, Any]) -> str:
+        """
+        The line of context a transaction pass needs.
+
+        Chiefly the period: a statement prints "12/04" and the year comes from
+        the period it covers, so a slice read without it cannot date its own
+        rows — and a statement spanning a year boundary would date half of them
+        wrongly.
+        """
+        account = statement.get("account") or {}
+        period = statement.get("period") or {}
+        return (
+            "STATEMENT CONTEXT — these pages belong to:\n"
+            "  Institution: %s\n"
+            "  Account ending: %s\n"
+            "  Account type: %s\n"
+            "  Statement period: %s to %s\n"
+            "Use the period to supply the year on any line that prints only a "
+            "month and day, and flag those YEAR_INFERRED."
+            % (
+                account.get("institution") or "unknown",
+                account.get("account_number_last4") or "unknown",
+                account.get("account_type") or "unknown",
+                period.get("start_date") or "unknown",
+                period.get("end_date") or "unknown",
+            )
+        )
+
+    def _call_json(
+        self,
+        system: str,
+        body: str,
+        expect: str,
+        failure: str,
+        passes: Optional[list[dict[str, Any]]] = None,
+        label: str = "",
+    ) -> dict[str, Any]:
+        """
+        One LLM call that must come back as a JSON object holding ``expect``.
+
+        :param passes: Collected provenance, appended to in place. Which vendor
+            and model answered is recorded per call, not per document: a long
+            statement is read in several passes and the chain can fall through
+            to a different vendor on any of them, so one name for the whole
+            statement would be a guess.
+        :param label: What this pass was for, e.g. ``"pages 5-8"``.
+        :raises ValueError: If the response is not valid JSON, or lacks the key.
+        """
+        result = llm_service.complete_detailed(system, body, profile="extract_account_statement")
+        if passes is not None:
+            passes.append({
+                "pass": label or expect,
+                "vendor": result.vendor,
+                "model": result.model,
+                # Above 1 means the preferred model did not answer. Worth
+                # keeping: it is the difference between "Claude read this" and
+                # "Claude was asked and something else ended up reading it".
+                "attempts": result.attempts,
+            })
+        try:
+            parsed = json.loads(_strip_fences(result.text))
         except json.JSONDecodeError as e:
-            LOGGER.warning("statement_service.extract: parse failure: %s", str(e))
-            raise ValueError("Could not read the statement — the model's response was not valid JSON") from e
-        if not isinstance(parsed, dict) or "statements" not in parsed:
-            raise ValueError("Extraction did not return a statements list")
+            LOGGER.warning("statement_service: %s — parse failure: %s", failure, str(e))
+            raise ValueError("%s — the model's response was not valid JSON" % failure) from e
+        if not isinstance(parsed, dict) or expect not in parsed:
+            raise ValueError("%s — the response had no '%s'" % (failure, expect))
         return parsed
 
     def resolve_missing_institutions(self, extracted: dict[str, Any], pdf_bytes: bytes) -> int:
@@ -601,6 +1366,20 @@ class StatementService:
 
         flags: list[dict[str, Any]] = []
 
+        # A check printed both in the running debits and again in the summary
+        # table at the back is one payment. Removed before anything counts the
+        # lines, so reconciliation and the completeness check both see the true
+        # set — a doubled debit reconciles to a wrong number rather than an
+        # obviously wrong one, which is the harder error to notice.
+        lines, doubled = _dedupe_checks(lines)
+        if doubled:
+            flags.append(_flag(
+                "DUPLICATE_CHECK_ROWS", "info",
+                "%d check(s) appeared twice — once in the debit list and again in the summary "
+                "table — and the repeat was dropped: %s." % (len(doubled), "; ".join(doubled)),
+                "transactions",
+            ))
+
         # 1. Account: match on institution + last four, or create.
         institution = (account_block.get("institution") or "").strip() or "Unknown institution"
         last4 = (account_block.get("account_number_last4") or "").strip() or None
@@ -686,6 +1465,21 @@ class StatementService:
                 "balances.ending_balance",
             ))
 
+        # Does the statement agree that we got all of it? This is a stronger
+        # signal than reconciliation, and a far more useful one: an unreconciled
+        # statement says only that the arithmetic fails, while this says which
+        # side is short and by how much. A 27-page statement whose debits
+        # stopped after 15 of 262 lines reads as one enormous delta otherwise.
+        printed_counts = raw_statement.get("printed_counts") or {}
+        shortfalls = _completeness_findings(lines, balances.get("printed_totals") or {}, printed_counts)
+        if shortfalls:
+            flags.append(_flag(
+                "INCOMPLETE_EXTRACTION", "warn",
+                "This statement does not match the totals it prints for itself: %s. Extraction "
+                "very likely stopped early — re-ingest before relying on it." % "; ".join(shortfalls),
+                "transactions",
+            ))
+
         # A warn-level flag on any line is enough to hold the statement back.
         line_warnings = sum(
             1 for line in lines
@@ -699,6 +1493,42 @@ class StatementService:
             ))
         if not lines:
             flags.append(_flag("NO_TRANSACTIONS", "warn", "No transactions were found in this statement."))
+
+        # An undated line has no effect on reconciliation — the balance check is
+        # pure arithmetic over amounts — so nothing else would ever reveal it.
+        # It matters anyway: a NULL fails both `>=` and `<=`, so the line drops
+        # out of every date-filtered search, and it sorts to the end of the
+        # account's history. The statement would tie while an exhibit built by
+        # date range quietly omitted the line, and nothing would explain the
+        # difference between the two figures.
+        undated = sum(1 for line in lines if not _parse_date(line.get("transaction_date")))
+        if undated:
+            flags.append(_flag(
+                "UNDATED_TRANSACTIONS", "warn",
+                "%d transaction(s) have no date, after the date column was re-read. They count "
+                "toward this statement's balance but are excluded from every date-filtered search, "
+                "so an exhibit built by date range will not contain them. Date them from the "
+                "source page." % undated,
+                "transaction_date",
+            ))
+
+        # A page nobody could read is not a blank page.
+        #
+        # When the text layer is unusable and the vision fallback also fails,
+        # pdf_service leaves a marker where the page's text would have been.
+        # Without this the loss was total and silent: the page contributed an
+        # empty string, the ingest carried on, and no record anywhere said a
+        # page was missing from the extraction.
+        unreadable = _unreadable_pages(raw_text)
+        if unreadable:
+            flags.append(_flag(
+                "PAGE_UNREADABLE", "warn",
+                "Page(s) %s could not be read at all — neither the text layer nor OCR. Any "
+                "transaction printed there is absent from this record. Re-ingest, or check the "
+                "source PDF for a scan that needs redoing."
+                % ", ".join(str(p) for p in unreadable),
+                "transactions",
+            ))
 
         # Bates findings, scoped to the pages this statement actually occupies.
         # The document may hold several statements; a hole in another one's
@@ -809,6 +1639,7 @@ class StatementService:
                 # Provenance the exceptions queue reads back: which file this
                 # came out of, and where it sits in the production.
                 "source_filename": source_filename,
+                "printed_counts": printed_counts,
                 "bates_first": series.by_page.get(statement_pages[0]) if series and statement_pages else None,
                 "bates_last": series.by_page.get(statement_pages[-1]) if series and statement_pages else None,
             },
@@ -864,6 +1695,7 @@ class StatementService:
                 category=(line.get("category") or None),
                 physical_page_number=page,
                 bates_number=bates,
+                check_number=_check_number(line.get("check_number")),
                 flags=line.get("flags") or [],
             ).model_dump())
 
@@ -950,8 +1782,10 @@ class StatementService:
         # The same Bates numbers on both sides means the same pages were
         # ingested twice. Worth stopping for, but forceable: a production can
         # legitimately restamp, and the attorney can see what they are doing.
-        source_bates = {t.bates_number for t in transaction_repo.get_by_account(source_id) if t.bates_number}
-        target_bates = {t.bates_number for t in transaction_repo.get_by_account(target_id) if t.bates_number}
+        source_bates = {t.bates_number for t in transaction_repo.get_by_account(source_id, include_deleted=True)
+                        if t.bates_number}
+        target_bates = {t.bates_number for t in transaction_repo.get_by_account(target_id, include_deleted=True)
+                        if t.bates_number}
         shared = sorted(source_bates & target_bates)
         if shared:
             conflicts.append(_conflict(
@@ -981,7 +1815,7 @@ class StatementService:
             "source_label": _account_label(source),
             "target_label": _account_label(target),
             "statements_to_move": len(source_statements),
-            "transactions_to_move": len(transaction_repo.get_by_account(source_id)),
+            "transactions_to_move": len(transaction_repo.get_by_account(source_id, include_deleted=True)),
             "conflicts": conflicts,
             "can_merge": not blocking,
             "needs_force": not blocking and bool(conflicts),
@@ -1220,7 +2054,8 @@ class StatementService:
         account_id = statement.financial_account_id
         # Counted before the delete: the rows go with the statement, so
         # afterwards there is nothing left to count.
-        line_count = len(transaction_repo.get_by_statement(statement_id))
+        # Every row goes with the statement, so every row is counted.
+        line_count = len(transaction_repo.get_by_statement(statement_id, include_deleted=True))
         statement_repo.delete(statement_id)
 
         account_deleted = False
@@ -1279,6 +2114,204 @@ class StatementService:
         if (account.purpose or "").strip() or (account.notes or "").strip():
             return "it carries notes someone wrote"
         return None
+
+    # ── Dropping a line from a statement ──────────────────────────────────
+
+    def delete_transaction(
+        self,
+        manager: DatabaseManager,
+        transaction_id: int,
+        staff_id: int,
+        staff_name: str,
+        reason: Optional[str] = None,
+    ) -> tuple[Any, Any]:
+        """
+        Drop a line from its statement without destroying it.
+
+        The one legitimate reason to do this is that extraction invented the
+        line — a row read twice, a daily-balance entry read as a transaction.
+        When that is what happened, the statement reconciles BETTER afterwards,
+        because the line was never part of the printed total. If reconciliation
+        gets worse, something real was just removed, and the returned statement
+        says so.
+
+        Nothing is destroyed, because dropping a line is an assertion about the
+        document — "this is not printed there" — and assertions that reach an
+        exhibit need an author. The row is hidden everywhere, excluded from
+        every total, and swept when the matter closes.
+
+        :return: ``(transaction, statement)`` after the change; the statement is
+            re-reconciled without the dropped line.
+        :raises ValueError: If the line does not exist or is already dropped.
+        """
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        statement_repo = FinancialAccountStatementRepository(manager)
+
+        record = transaction_repo.select_one(condition={"id": transaction_id})
+        if record is None:
+            raise ValueError("Transaction not found")
+        if record.deleted_at is not None:
+            raise ValueError("That line has already been removed")
+
+        stamped_at = datetime.now(timezone.utc)
+        flag = {
+            "code": "MANUAL_DELETION",
+            "severity": "info",
+            "field_path": None,
+            "note": "%s removed this line from the statement.%s" % (
+                staff_name, (" %s" % reason) if reason else "",
+            ),
+            "by_staff_id": staff_id,
+            "by": staff_name,
+            "at": stamped_at.isoformat(),
+            "reason": reason or None,
+        }
+        updated = transaction_repo.update(transaction_id, {
+            "deleted_at": stamped_at,
+            "deleted_by_staff_id": staff_id,
+            "deletion_reason": reason or None,
+            "flags": list(record.flags) + [flag],
+        })
+        LOGGER.info(
+            "statement_service.delete_transaction: transaction=%s statement=%s staff=%s",
+            transaction_id, record.statement_id, staff_id,
+        )
+        statement = self._rereconcile(statement_repo, transaction_repo, record.statement_id)
+        return updated, statement
+
+    def restore_transaction(
+        self,
+        manager: DatabaseManager,
+        transaction_id: int,
+        staff_id: int,
+        staff_name: str,
+    ) -> tuple[Any, Any]:
+        """
+        Put a dropped line back on its statement.
+
+        The undo half of :meth:`delete_transaction`, and the reason the deletion
+        is soft at all. Leaves its own flag rather than erasing the deletion's:
+        that a line was removed and restored is part of the record, not a
+        mistake to tidy away.
+
+        :return: ``(transaction, statement)``, re-reconciled with the line back.
+        :raises ValueError: If the line does not exist or was never dropped.
+        """
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        statement_repo = FinancialAccountStatementRepository(manager)
+
+        record = transaction_repo.select_one(condition={"id": transaction_id})
+        if record is None:
+            raise ValueError("Transaction not found")
+        if record.deleted_at is None:
+            raise ValueError("That line has not been removed")
+
+        flag = {
+            "code": "MANUAL_RESTORE",
+            "severity": "info",
+            "field_path": None,
+            "note": "%s put this line back on the statement." % staff_name,
+            "by_staff_id": staff_id,
+            "by": staff_name,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "reason": None,
+        }
+        updated = transaction_repo.update(transaction_id, {
+            "deleted_at": None,
+            "deleted_by_staff_id": None,
+            "deletion_reason": None,
+            "flags": list(record.flags) + [flag],
+        })
+        LOGGER.info("statement_service.restore_transaction: transaction=%s staff=%s",
+                    transaction_id, staff_id)
+        statement = self._rereconcile(statement_repo, transaction_repo, record.statement_id)
+        return updated, statement
+
+    # ── Removing an account and everything under it ───────────────────────
+
+    def preview_account_delete(self, manager: DatabaseManager, account_id: int) -> dict[str, Any]:
+        """
+        Report what deleting an account would take with it.
+
+        Deleting cascades to every statement and every line, so it says so
+        first. The warnings are the same conditions that stop an emptied account
+        being cleaned up automatically — but here they only warn, because this
+        is somebody deliberately removing an account rather than a side effect
+        of rejecting a statement.
+
+        :raises ValueError: If the account does not exist.
+        """
+        account_repo = FinancialAccountRepository(manager)
+        statement_repo = FinancialAccountStatementRepository(manager)
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+
+        account = account_repo.select_one(condition={"id": account_id})
+        if account is None:
+            raise ValueError("Account not found")
+
+        statements = statement_repo.get_by_account(account_id)
+        transactions = transaction_repo.get_by_account(account_id, include_deleted=True)
+
+        warnings: list[str] = []
+        if account.property_character is not None:
+            warnings.append("This account has been characterized as %s."
+                            % account.property_character.value.replace("_", " "))
+        if account.ownership != AccountOwnership.unknown:
+            warnings.append("Ownership is recorded as %s." % account.ownership.value.replace("_", " "))
+        if (account.purpose or "").strip() or (account.notes or "").strip():
+            warnings.append("It carries notes somebody wrote.")
+        for other in account_repo.get_by_matter(account.matter_id):
+            if other.id != account_id and other.antecedent_account_id == account_id:
+                warnings.append(
+                    "%s is recorded as succeeding this account; deleting it breaks that history."
+                    % _account_label(other))
+        tagged = sum(1 for t in transactions if t.deleted_at is None)
+
+        return {
+            "account_id": account_id,
+            "account_label": _account_label(account),
+            "statements": len(statements),
+            "transactions": tagged,
+            "periods": [
+                "%s to %s" % (s.period_start, s.period_end)
+                for s in sorted(statements, key=lambda s: s.period_start)
+            ],
+            "warnings": warnings,
+        }
+
+    def delete_account(self, manager: DatabaseManager, account_id: int) -> dict[str, Any]:
+        """
+        Delete an account, its statements, and their lines.
+
+        Hard, not soft. The Bates-stamped PDFs are still in Storage, so a
+        mistake costs a re-import rather than an evidence problem — and an
+        account that lingers half-deleted in an inventory is worse than one that
+        is gone. The database does the cascade: statements go with the account,
+        transactions with the statements.
+
+        The stored PDFs are deliberately left alone. One upload can back several
+        statements across different accounts.
+
+        :return: What was removed.
+        :raises ValueError: If the account does not exist.
+        """
+        counts = self.preview_account_delete(manager, account_id)
+        account_repo = FinancialAccountRepository(manager)
+
+        account = account_repo.select_one(condition={"id": account_id})
+        # Anything naming this account as its predecessor would be silently
+        # unlinked by ON DELETE SET NULL. Clear it deliberately instead, so the
+        # break is something we did rather than something that happened.
+        for other in account_repo.get_by_matter(account.matter_id):
+            if other.id != account_id and other.antecedent_account_id == account_id:
+                account_repo.update(other.id, {"antecedent_account_id": None})
+
+        account_repo.delete(account_id)
+        LOGGER.info(
+            "statement_service.delete_account: account=%s statements=%d transactions=%d",
+            account_id, counts["statements"], counts["transactions"],
+        )
+        return counts
 
     @staticmethod
     def _coerce_account_type(value: Any) -> AccountType:
