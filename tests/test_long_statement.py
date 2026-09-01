@@ -234,6 +234,33 @@ check("silent on a clean document", _unreadable_pages("<<<PAGE 1>>>\nall good"),
 check("needs a page marker to attribute a loss", _unreadable_pages(_UNREADABLE_MARKER), [])
 check("the marker says what happened", "OCR both failed" in _UNREADABLE_MARKER, True)
 
+# ── 9. A statement that splits its debits across buckets ─────────────────
+# Bank of Texas, account 8098173954, 09-01-25 to 09-30-25. Its summary prints
+# "2 Checks & Withdrawals 159.11" and "Service Fees 2.00" as separate lines,
+# so the three debits we correctly extract exceed the bucket this compares
+# against. Exceeding a printed figure is ordinary; falling short is not.
+print("9. debits split across named buckets")
+bank_of_texas = [
+    {"amount": 147.00},    # INTERNET XFER FROM CHKG
+    {"amount": -12.97},    # MICHAELS STORES
+    {"amount": -146.14},   # SP POPALOCK
+    {"amount": -2.00},     # Service Charge
+]
+check("a bucketed summary raises nothing", _completeness_findings(
+    bank_of_texas,
+    {"deposits": 147.00, "checks_withdrawals": -159.11, "service_fees": -2.00},
+    {"deposits": 1, "checks_withdrawals": 2}), [])
+
+# The shortfall it exists to catch still reports, in both directions.
+short = [{"amount": -12.97}]
+findings = _completeness_findings(
+    short, {"checks_withdrawals": -159.11}, {"checks_withdrawals": 2})
+check("one line where two are printed still reports",
+      any("1 debit line(s) extracted, but the statement prints 2" in f for f in findings), True)
+check("and the money that is missing",
+      any("short by 146.14" in f for f in findings), True)
+
+
 print()
 print("FAILURES: %d" % len(FAILURES))
 for f in FAILURES:

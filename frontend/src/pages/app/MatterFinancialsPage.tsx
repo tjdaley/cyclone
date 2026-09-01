@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getMatter, getOpposingParties,
   ingestStatement, getFinancialAccounts, updateFinancialAccount,
@@ -40,6 +40,23 @@ const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
   mixed: 'Mixed',
   disputed: 'Disputed',
 }
+
+/**
+ * The three jobs this page does.
+ *
+ * They were stacked on one page, which meant every one of them paid the scroll
+ * cost of the other two — after an import you passed two hundred transaction
+ * rows to reach the account list. They share the matter and the account list
+ * and nothing else: importing is an event, curating accounts is bookkeeping,
+ * and searching is analysis.
+ */
+type Tab = 'import' | 'accounts' | 'transactions'
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'import', label: 'Import' },
+  { id: 'accounts', label: 'Accounts' },
+  { id: 'transactions', label: 'Transactions' },
+]
 
 const OWNERSHIPS: AccountOwnership[] = [
   'client_sole', 'opposing_sole', 'joint', 'third_party', 'unknown',
@@ -118,6 +135,18 @@ function ReconcileBadge({ statement }: { statement: AccountStatement }) {
 export default function MatterFinancialsPage() {
   const { matterId: matterIdParam } = useParams<{ matterId: string }>()
   const matterId = Number(matterIdParam)
+
+  // Kept in the URL rather than in state alone: a refresh should land you back
+  // where you were, and a link to a matter's transactions should be a link.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab: Tab = (TABS.find(t => t.id === searchParams.get('tab'))?.id) ?? 'import'
+  function goTo(next: Tab) {
+    setSearchParams(prev => {
+      const params = new URLSearchParams(prev)
+      params.set('tab', next)
+      return params
+    }, { replace: true })
+  }
 
   const [matter, setMatter] = useState<Matter | null>(null)
   const [parties, setParties] = useState<OpposingParty[]>([])
@@ -393,6 +422,35 @@ export default function MatterFinancialsPage() {
         </p>
       </div>
 
+      {/* Counts on the tabs, so what needs attention is legible without opening
+          anything — it used to be visible only if you scrolled to it. */}
+      <div className="flex gap-1 border-b border-border" role="tablist">
+        {TABS.map(({ id, label }) => {
+          const badge = id === 'import' ? exceptions.length
+            : id === 'accounts' ? accounts.filter(a => a.ownership === 'unknown').length
+            : 0
+          const active = tab === id
+          return (
+            <button key={id} type="button" role="tab" aria-selected={active}
+              className={`px-4 py-2 text-sm border-b-2 -mb-px transition-colors ${
+                active
+                  ? 'border-navy text-navy font-medium'
+                  : 'border-transparent text-text-secondary hover:text-navy'}`}
+              onClick={() => goTo(id)}>
+              {label}
+              {badge > 0 && (
+                <span className="ml-2 text-xs rounded-full px-1.5 py-0.5 tabular-nums bg-amber-100 text-amber-800"
+                  title={id === 'import'
+                    ? `${badge} statement(s) need review`
+                    : `${badge} account(s) with no owner recorded`}>
+                  {badge}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
       {error && (
         <div className="card p-3 border border-red-300 bg-red-50 text-sm text-red-700 flex justify-between">
           <span>{error}</span>
@@ -407,6 +465,7 @@ export default function MatterFinancialsPage() {
         </div>
       )}
 
+      {tab === 'import' && (<>
       {/* ── Upload ── */}
       <div
         className={`card p-8 text-center border-2 border-dashed transition-colors ${
@@ -552,6 +611,21 @@ export default function MatterFinancialsPage() {
               </div>
             ))}
           </div>
+
+          {/* An import creates accounts, and characterising them is the next
+              thing to do — but the account list lives on another tab now, and
+              a flag telling you to "merge them from the account editor" is no
+              use if nothing points at where that is. */}
+          <div className="mt-3 pt-3 border-t border-border flex flex-wrap items-baseline gap-3">
+            <button type="button" className="text-sm text-navy underline"
+              onClick={() => goTo('accounts')}>
+              Review accounts →
+            </button>
+            <button type="button" className="text-sm text-navy underline"
+              onClick={() => goTo('transactions')}>
+              Search transactions →
+            </button>
+          </div>
         </div>
       )}
 
@@ -612,6 +686,8 @@ export default function MatterFinancialsPage() {
         </div>
       )}
 
+      </>)}
+
       {correcting && (
         <TransactionEditDialog
           transaction={correcting}
@@ -628,9 +704,11 @@ export default function MatterFinancialsPage() {
           }} />
       )}
 
-      {/* ── Search, categorize, tag ── */}
-      <TransactionSearchPanel matterId={matterId} accounts={accounts} />
+      {tab === 'transactions' && (
+        <TransactionSearchPanel matterId={matterId} accounts={accounts} />
+      )}
 
+      {tab === 'accounts' && (<>
       {/* ── Accounts ── */}
       <div className="card p-5">
         <h2 className="font-semibold text-navy mb-3">
@@ -791,6 +869,7 @@ export default function MatterFinancialsPage() {
           </p>
         </div>
       )}
+      </>)}
     </div>
   )
 }

@@ -822,8 +822,15 @@ def _completeness_findings(
     fell short and by how much, which is the difference between "something is
     wrong" and "the debits stopped after fifteen of two hundred sixty-two".
 
-    :return: One sentence per side that does not add up. Empty when it ties, and
-        empty when the statement printed nothing to check against.
+    Reports a side only when the extraction falls SHORT of what the statement
+    prints — never when it exceeds it. A statement may break its debits into
+    several named buckets and this compares against one of them, so having more
+    lines or a larger total than a single bucket is ordinary. Having fewer is
+    not.
+
+    :return: One sentence per side that comes up short. Empty when the
+        extraction covers what is printed, and empty when the statement printed
+        nothing to check against.
     :rtype: list[str]
     """
     amounts = [_money(line.get("amount")) or ZERO for line in lines]
@@ -839,12 +846,24 @@ def _completeness_findings(
         printed_count = _printed_side(printed_counts, count_words, against)
         got_total = abs(sum(got, ZERO))
 
-        if printed_count is not None and int(printed_count) != len(got):
+        # Only a SHORTFALL is a finding. Exceeding a printed figure is ordinary:
+        # a statement may split its debits across several named buckets and this
+        # compares against one of them. Bank of Texas prints "2 Checks &
+        # Withdrawals 159.11" and "Service Fees 2.00" as separate lines of its
+        # summary, so extracting all three debits — correctly — reads as two
+        # too many and two dollars over.
+        #
+        # The reverse has no innocent explanation: nothing makes a printed
+        # bucket larger than the lines that make it up except lines we failed to
+        # read. And over-counting, the other way this could go wrong, is caught
+        # by reconciliation rather than here — a doubled debit breaks the
+        # balance, where a bucketing artifact does not.
+        if printed_count is not None and len(got) < int(printed_count):
             findings.append(
                 "%d %s line(s) extracted, but the statement prints %d"
                 % (len(got), label, int(printed_count))
             )
-        if printed_total is not None and abs(printed_total - got_total) > _TOTAL_TOLERANCE:
+        if printed_total is not None and (printed_total - got_total) > _TOTAL_TOLERANCE:
             findings.append(
                 "%s lines total %s, but the statement prints %s (short by %s)"
                 % (label.capitalize(), got_total, printed_total, printed_total - got_total)
