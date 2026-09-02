@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getUndisclosedAccounts } from '../../lib/api'
+import { getUndisclosedAccounts, exportUndisclosedAccounts } from '../../lib/api'
+import ExportButtons from '../../components/ExportButtons'
 import { money, formatDate } from '../../lib/money'
 import type { UndisclosedAccount } from '../../types'
 
@@ -31,6 +32,7 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [exhibitName, setExhibitName] = useState('Accounts Referenced But Not Produced')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -142,6 +144,17 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
               </tbody>
             </table>
           </div>
+
+          {/* The exhibit behind a motion to compel: the other side's own
+              statements naming accounts they did not produce. */}
+          <ExportButtons
+            name={exhibitName}
+            onNameChange={setExhibitName}
+            count={rows.length}
+            hint="CSV is data only; MD, DOCX and PDF are exhibits with the case caption"
+            onExport={format => exportUndisclosedAccounts(
+              matterId, format, exhibitName.trim() || 'Accounts Referenced But Not Produced')}
+          />
 
           {/* The reasoning behind the list, stated where the list is read. An
               inference presented without its basis is just an assertion. */}

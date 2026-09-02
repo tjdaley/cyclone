@@ -97,6 +97,8 @@ cyclone/
 │               ├── MatterDetailPage.tsx   # /app/matters/:matterId — parties, staff, children, counsel, claims
 │               ├── MatterIntakePanel.tsx  # Review a dropped pleading → new client + matter
 │               ├── LeadPromotePanel.tsx   # Promote a lead → client + matter (optional pleading)
+│               ├── TagManager.tsx          # Create/edit/retire matter tags; firm tags read-only
+│               ├── UndisclosedAccountsPanel.tsx  # Accounts referenced but never produced
 │               └── AdminPage.tsx
 ├── db/
 │   └── migrations/                # SQL DDL — run in numeric order
@@ -575,6 +577,15 @@ document — caption, selection, table, totals — and four renderers draw it.
 Anything in Cyclone that produces a table worth taking to court builds an
 `Exhibit`; none of them learn to write DOCX.
 
+- **Every report gets the same four formats.** `components/ExportButtons.tsx` is
+  the one control — the caller supplies the request, everything about presenting
+  the result (including the caption warnings) lives there. Two copies would
+  drift, and the copy that quietly stopped showing warnings is the one nobody
+  would notice.
+- **`footnotes` ride with the table**, not in `selection`. A reader meeting a
+  dagger in a cell looks directly below the table for what it means; a mark
+  whose explanation stayed on the screen is worse than no mark, because the
+  reader can see something is hedged and cannot tell what.
 - **CSV is deliberately not an exhibit.** Header row, data rows, nothing else,
   so it opens in a spreadsheet or goes to a model without a preamble to strip.
   The caption and the verification notice live in the other three formats. A
@@ -934,7 +945,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Background job queue (`jobs` table + worker) | ✅ Built — matter intake and statement ingest; see §11a |
 | Account statement ingestion (bank/brokerage/card) | ✅ Built — queued, reconciles itself, exceptions queue |
 | Transaction categories (FIS chart of accounts) | ✅ Built — firm-wide hierarchy, seeded by 024 |
-| Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply |
+| Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply, create/edit/retire/delete UI |
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
 | Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts |
 | Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
@@ -954,7 +965,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
 | Rule 1006 exhibit export | ✅ Built for transaction queries — every exhibit carries the verification notice |
 | Compliance matrix (statements held, by year and month) | ❌ Not started — needs a `matter_preferences` table for the look-back year. Ends with the referenced-but-not-produced list; it is the exhibit behind a motion to compel |
-| Export on the undisclosed-accounts report | ❌ Not started — it is a different shape from a transaction exhibit (accounts, not lines) and needs its own columns rather than being forced through `_EXHIBIT_COLUMNS` |
+| Export on the undisclosed-accounts report | ✅ Built — its own account-shaped columns; the dagger travels with its footnote |
 | OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
 | Large-transaction query (dollar threshold) | ❌ Not started |
 | Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |

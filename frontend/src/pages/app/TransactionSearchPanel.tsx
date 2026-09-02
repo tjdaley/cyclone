@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   searchTransactions, getTransactionCategories, getTransactionTags,
-  categorizeTransactions, tagTransactions, createMatterTag, deleteTransactionTag,
-  exportTransactions, saveFile,
+  categorizeTransactions, tagTransactions,
+  exportTransactions,
 } from '../../lib/api'
 import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
+import ExportButtons from '../../components/ExportButtons'
+import TagManager, { tagClass } from './TagManager'
 import type {
   FinancialAccount, TransactionCategory, TransactionTag,
-  TransactionSearchFilter, TransactionSearchRow, ExportFormat,
+  TransactionSearchFilter, TransactionSearchRow,
 } from '../../types'
 
 const PAGE_SIZE = 200
@@ -17,20 +19,6 @@ const PAGE_SIZE = 200
  * Tag colours. Presentation only — the token is stored on the tag so the same
  * claim reads the same colour everywhere it appears.
  */
-const TAG_COLOR: Record<string, string> = {
-  red:    'bg-red-100 text-red-800 border-red-200',
-  amber:  'bg-amber-100 text-amber-800 border-amber-200',
-  blue:   'bg-blue-100 text-blue-800 border-blue-200',
-  purple: 'bg-purple-100 text-purple-800 border-purple-200',
-  green:  'bg-green-100 text-green-800 border-green-200',
-  gray:   'bg-gray-100 text-gray-700 border-gray-200',
-}
-const TAG_COLORS = Object.keys(TAG_COLOR)
-
-function tagClass(tag: TransactionTag): string {
-  return TAG_COLOR[tag.color ?? 'gray'] ?? TAG_COLOR.gray
-}
-
 /** An empty filter — also what "Clear" resets to. */
 function emptyFilter(): TransactionSearchFilter {
   return {
@@ -514,105 +502,13 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
  * is administered centrally, because a label added to every case in the firm is
  * not a per-matter decision.
  */
-function TagManager({ matterId, tags, onChanged, onError }: {
-  matterId: number
-  tags: TransactionTag[]
-  onChanged: () => Promise<void>
-  onError: (message: string) => void
-}) {
-  const [label, setLabel] = useState('')
-  const [description, setDescription] = useState('')
-  const [color, setColor] = useState('gray')
-  const [busy, setBusy] = useState(false)
-
-  async function create() {
-    if (!label.trim()) return
-    setBusy(true)
-    try {
-      await createMatterTag(matterId, { label: label.trim(), description: description.trim() || null, color })
-      setLabel(''); setDescription('')
-      await onChanged()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Could not create the tag')
-    } finally { setBusy(false) }
-  }
-
-  async function remove(tag: TransactionTag) {
-    setBusy(true)
-    try {
-      await deleteTransactionTag(tag.id)
-      await onChanged()
-    } catch (err) {
-      // The API refuses with a 409 while the tag is in use. That count is the
-      // whole point of the guard, so surface it and make the user confirm.
-      const message = err instanceof Error ? err.message : 'Could not delete the tag'
-      if (message.includes('force=true')) {
-        if (window.confirm(`${message}\n\nDelete it anyway? The lines stay, but this tag comes off all of them.`)) {
-          try {
-            await deleteTransactionTag(tag.id, true)
-            await onChanged()
-          } catch (forced) {
-            onError(forced instanceof Error ? forced.message : 'Could not delete the tag')
-          }
-        }
-      } else {
-        onError(message)
-      }
-    } finally { setBusy(false) }
-  }
-
-  const matterTags = tags.filter(t => t.matter_id !== null)
-
-  return (
-    <div className="border border-border rounded p-3 space-y-3 bg-off-white/50">
-      <div className="grid gap-2 md:grid-cols-[1fr_1.5fr_auto_auto]">
-        <input className="input" placeholder="Waste: Sister's Wedding" value={label}
-          aria-label="Tag label" onChange={e => setLabel(e.target.value)} />
-        <input className="input" placeholder="What this tag means, for whoever tags next" value={description}
-          aria-label="Tag description" onChange={e => setDescription(e.target.value)} />
-        <select className="input" value={color} aria-label="Tag colour"
-          onChange={e => setColor(e.target.value)}>
-          {TAG_COLORS.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <button type="button" className="btn-primary" disabled={busy || !label.trim()} onClick={create}>
-          Add tag
-        </button>
-      </div>
-
-      {matterTags.length === 0 ? (
-        <p className="text-xs text-text-secondary">
-          No tags specific to this matter yet. The firm-wide tags above are available on every case.
-        </p>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {matterTags.map(t => (
-            <span key={t.id} className={`text-xs rounded-full pl-2.5 pr-1 py-1 border flex items-center gap-1.5 ${tagClass(t)}`}>
-              {t.label}
-              {t.usage_count ? <span className="opacity-70 tabular-nums">{t.usage_count}</span> : null}
-              <button type="button" className="px-1 opacity-60 hover:opacity-100" disabled={busy}
-                aria-label={`Delete ${t.label}`} onClick={() => remove(t)}>×</button>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-
 /**
  * Take the current query out of Cyclone.
  *
- * Four formats, one query. The CSV is the clean extraction — no caption, no
- * notice — because it is meant for a spreadsheet or a model, and a preamble
- * above the header row is something every reader has to be told to skip. The
- * other three are court exhibits: they carry the case caption and the Rule 1006
- * verification notice inside the file, which is the only place it is any use
- * once the document has left this screen.
- *
- * The export always covers every matching line, never the page on screen. An
- * exhibit that quietly stopped at 200 of 1,400 would look complete, and that is
- * the failure worth the extra round trips.
+ * The four formats and everything about presenting the result live in
+ * ExportButtons, shared with every other report. What is specific to this one
+ * is the request: the whole filter, so the export is provably the same set the
+ * screen showed, and always every matching line rather than the page on screen.
  */
 function ExportBar({ matterId, filter, total }: {
   matterId: number
@@ -620,63 +516,15 @@ function ExportBar({ matterId, filter, total }: {
   total: number
 }) {
   const [name, setName] = useState('Financial Summary')
-  const [busy, setBusy] = useState<ExportFormat | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [warnings, setWarnings] = useState<string[]>([])
-
-  async function run(format: ExportFormat) {
-    setBusy(format)
-    setError(null)
-    setWarnings([])
-    try {
-      const file = await exportTransactions(matterId, filter, format, name.trim() || 'Financial Summary')
-      saveFile(file)
-      // The caption is built from the matter, and what the matter could not
-      // supply was printed as a blank. Say so — the alternative is a blank
-      // reaching a filing because nobody was told.
-      setWarnings(file.warnings)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Export failed')
-    } finally {
-      setBusy(null)
-    }
-  }
-
   if (total === 0) return null
-
   return (
-    <div className="border-t border-border pt-3 space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-xs text-text-secondary" htmlFor="exhibit-name">Export as</label>
-        <input id="exhibit-name" className="input text-sm py-1 w-56" value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="Financial Summary"
-          aria-label="Exhibit name" />
-        {(['csv', 'md', 'docx', 'pdf'] as ExportFormat[]).map(format => (
-          <button key={format} type="button" className="btn-secondary text-xs px-3 py-1"
-            disabled={busy !== null}
-            onClick={() => void run(format)}>
-            {busy === format ? 'Building…' : format.toUpperCase()}
-          </button>
-        ))}
-        <span className="text-xs text-text-secondary">
-          {total.toLocaleString()} line{total === 1 ? '' : 's'}
-          {' · CSV is data only; MD, DOCX and PDF are exhibits with the case caption'}
-        </span>
-      </div>
-
-      {error && (
-        <div className="p-2 border border-red-300 bg-red-50 text-xs text-red-700 rounded">{error}</div>
-      )}
-
-      {warnings.length > 0 && (
-        <div className="p-2 border border-amber-300 bg-amber-50 text-xs text-amber-900 rounded space-y-1">
-          <p className="font-medium">The exhibit downloaded with blanks in its caption:</p>
-          <ul className="list-disc ml-4">
-            {warnings.map((warning, i) => <li key={i}>{warning}</li>)}
-          </ul>
-        </div>
-      )}
-    </div>
+    <ExportButtons
+      name={name}
+      onNameChange={setName}
+      count={total}
+      hint="CSV is data only; MD, DOCX and PDF are exhibits with the case caption"
+      onExport={format =>
+        exportTransactions(matterId, filter, format, name.trim() || 'Financial Summary')}
+    />
   )
 }

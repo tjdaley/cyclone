@@ -29,6 +29,7 @@ from db.repositories.financial import (
     FinancialAccountTransactionRepository,
 )
 from db_handler import DatabaseManager
+from services.exhibit_service import Column, Exhibit, caption_lines, money
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -50,6 +51,22 @@ _TRANSFER = re.compile(r"\b(?:transfer|xfer)\b", re.I)
 # ``_TRANSFER`` matches, so the query and the parser cannot drift apart: any
 # row the regex would accept is a row one of these searches returns.
 _TRANSFER_TERMS = ("transfer", "xfer")
+
+# What the exhibit shows. The money columns are the point of the document: an
+# account nobody produced that received six figures is a different fact from one
+# mentioned once, and the reader should not have to add the rows up to see it.
+_EXHIBIT_COLUMNS = (
+    Column("Institution"),
+    Column("Last 4"),
+    Column("As printed"),
+    Column("Mentions", numeric=True),
+    Column("Received from", numeric=True, money=True),
+    Column("Sent to", numeric=True, money=True),
+    Column("Net", numeric=True, money=True),
+    Column("First seen"),
+    Column("Last seen"),
+    Column("Referenced on"),
+)
 
 # Confirmation, reference, and transaction numbers sit inside transfer
 # descriptions and look exactly like account numbers. Removed before anything
@@ -295,6 +312,80 @@ class AccountDiscoveryService:
                     entry["seen_on"].append(label_)
             if len(entry["examples"]) < 3 and row.description not in entry["examples"]:
                 entry["examples"].append(row.description)
+
+
+    def build_exhibit(
+        self,
+        manager: DatabaseManager,
+        matter: Any,
+        exhibit_name: str = "Accounts Referenced But Not Produced",
+    ) -> Exhibit:
+        """
+        The same list as an exhibit — the attachment to a motion to compel.
+
+        Deliberately not routed through the transaction exhibit: the rows are
+        accounts, not lines, so forcing them into a Date/Bates/Amount table would
+        leave most columns blank and drop the two figures that make the point,
+        which are how much moved and over what period.
+
+        The dagger is carried into the document with its footnote. A mark whose
+        explanation stayed behind on the screen is worse than no mark — the
+        reader sees a qualification and cannot tell what is being qualified.
+        """
+        found = self.undisclosed(manager, matter.id)
+        caption, warnings = caption_lines(matter, exhibit_name)
+
+        rows = tuple(
+            (
+                "%s%s" % (entry["institution"] or "Unknown institution",
+                          " †" if entry["institution_inferred"] else ""),
+                entry["last4"],
+                entry["reference"],
+                str(entry["mentions"]),
+                str(entry["money_in"]),
+                str(entry["money_out"]),
+                str(entry["net"]),
+                entry["first_seen"].isoformat() if entry["first_seen"] else "",
+                entry["last_seen"].isoformat() if entry["last_seen"] else "",
+                "; ".join(entry["seen_on"]),
+            )
+            for entry in found
+        )
+
+        total_in = sum((entry["money_in"] for entry in found), start=ZERO)
+        total_out = sum((entry["money_out"] for entry in found), start=ZERO)
+        accounts = FinancialAccountRepository(manager).get_by_matter(matter.id)
+
+        footnotes = []
+        if any(entry["institution_inferred"] for entry in found):
+            footnotes.append(
+                "† The description gave an account number but no bank, so the account is assumed "
+                "to be held at the institution whose statement the transfer was printed on. "
+                "That assumption is not evidence and should be confirmed."
+            )
+
+        return Exhibit(
+            name=exhibit_name,
+            caption=caption,
+            columns=_EXHIBIT_COLUMNS,
+            rows=rows,
+            selection=(
+                ("Source", "Transfer descriptions on the statements produced in this matter"),
+                ("Compared against", "The %d account%s currently on this matter"
+                                     % (len(accounts), "" if len(accounts) == 1 else "s")),
+                ("Matched on", "The last four digits of the account number"),
+                ("Direction", "Taken from the sign of each amount, not from the words "
+                              "\"to\" and \"from\" — a description often carries both"),
+                ("Accounts listed", str(len(rows))),
+            ),
+            summary=(
+                ("Accounts referenced but not produced", str(len(rows))),
+                ("Total received from them", money(total_in)),
+                ("Total sent to them", money(total_out)),
+            ),
+            footnotes=tuple(footnotes),
+            warnings=warnings,
+        )
 
 
 account_discovery_service = AccountDiscoveryService()

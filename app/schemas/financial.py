@@ -357,6 +357,28 @@ class TransactionSearchRequest(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class ExhibitExportRequest(BaseModel):
+    """
+    How to render a report that takes no filter.
+
+    Separate from TransactionExportRequest, which inherits the whole search so
+    the export is provably the same set the screen showed. A report with no
+    criteria — the undisclosed-account list is the whole of what was found —
+    needs only the two fields.
+    """
+    format: str = Field(
+        default="csv",
+        pattern="^(csv|md|docx|pdf)$",
+        description="csv is the clean extraction; md, docx, and pdf are full exhibits "
+                    "carrying the caption and the verification notice",
+    )
+    exhibit_name: str = Field(
+        default="Accounts Referenced But Not Produced",
+        max_length=120,
+        description="Titles the exhibit and names the file",
+    )
+
+
 class TransactionExportRequest(TransactionSearchRequest):
     """
     A filter plus how to render it.

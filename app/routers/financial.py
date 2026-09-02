@@ -31,6 +31,7 @@ from schemas.financial import (
     BulkCategorizeRequest,
     BulkResultResponse,
     BulkTagRequest,
+    ExhibitExportRequest,
     FinancialAccountResponse,
     FinancialAccountUpdateRequest,
     StatementIngestJobResponse,
@@ -213,6 +214,48 @@ def list_undisclosed_accounts(
     """
     found = account_discovery_service.undisclosed(manager, matter_id)
     return [UndisclosedAccountResponse(**entry) for entry in found]
+
+
+@router.post("/matters/{matter_id}/undisclosed-accounts/export")
+def export_undisclosed_accounts(
+    matter_id: int,
+    body: ExhibitExportRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> Response:
+    """
+    Export the referenced-but-not-produced list — the attachment to a motion.
+
+    Same four formats and the same rules as the transaction export: ``csv`` is
+    the clean extraction, the other three carry the case caption and the
+    verification notice. The dagger marking an inferred institution travels with
+    its footnote into every exhibit format.
+    """
+    matter = MatterRepository(manager).select_one(condition={"id": matter_id})
+    if matter is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    try:
+        exhibit = account_discovery_service.build_exhibit(
+            manager, matter, body.exhibit_name.strip() or "Accounts Referenced But Not Produced",
+        )
+        content, media_type, filename = exhibit_service.render(exhibit, body.format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a renderer failure must not read as an empty export
+        LOGGER.error("financial.export_undisclosed_accounts: matter=%s format=%s failed: %s",
+                     matter_id, body.format, str(e))
+        raise HTTPException(status_code=500, detail="Could not build the export") from e
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="%s"' % filename,
+        "X-Exhibit-Rows": str(len(exhibit.rows)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Exhibit-Rows, X-Exhibit-Warnings",
+    }
+    if exhibit.warnings:
+        headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
+
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @router.patch("/financial-accounts/{account_id}", response_model=FinancialAccountResponse)

@@ -97,6 +97,11 @@ class Exhibit:
     rows: tuple[tuple[str, ...], ...] = ()
     selection: tuple[tuple[str, str], ...] = ()
     summary: tuple[tuple[str, str], ...] = ()
+    #: Marks that qualify individual rows — "† institution inferred". They ride
+    #: with the table rather than in `selection`, because a reader meeting a
+    #: dagger in a cell looks directly below the table for what it means, and a
+    #: mark whose explanation is missing is worse than no mark at all.
+    footnotes: tuple[str, ...] = ()
     notice: str = NOTICE
     warnings: list[str] = field(default_factory=list)
 
@@ -344,6 +349,11 @@ def to_markdown(exhibit: Exhibit) -> bytes:
             ) + " |")
         out.append("")
 
+    if exhibit.footnotes:
+        for note in exhibit.footnotes:
+            out.append("*%s*" % note)
+            out.append("")
+
     if exhibit.summary:
         out.append("## Totals")
         out.append("")
@@ -489,6 +499,12 @@ def to_docx(exhibit: Exhibit) -> bytes:
                 if column.numeric:
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         document.add_paragraph()
+
+    for note in exhibit.footnotes:
+        paragraph = document.add_paragraph()
+        run = paragraph.add_run(note)
+        run.italic = True
+        run.font.size = Pt(8)
 
     if exhibit.summary:
         heading = document.add_paragraph()
@@ -679,6 +695,8 @@ def to_pdf(exhibit: Exhibit) -> bytes:
         pending = pending[count:]
         guess = max(5, count)
 
+    for note in exhibit.footnotes:
+        flow('<p class="notice">%s</p>' % _esc(note))
     flow(_pdf_list("Totals", exhibit.summary))
     flow(_pdf_list("Selection", exhibit.selection))
     flow('<p>&#160;</p><p class="notice">%s</p>' % _esc(exhibit.notice))

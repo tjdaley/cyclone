@@ -428,3 +428,14 @@ export interface UndisclosedAccount {
  * carrying the case caption and the Rule 1006 verification notice.
  */
 export type ExportFormat = 'csv' | 'md' | 'docx' | 'pdf'
+
+/**
+ * A file the server built for us: the bytes, the name it chose, and anything it
+ * needs the user told. Mirrors DownloadedFile in lib/api.ts, re-declared here so
+ * components import their types from `types` like everything else.
+ */
+export interface DownloadedFile {
+  blob: Blob
+  filename: string
+  warnings: string[]
+}
