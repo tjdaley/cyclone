@@ -10,6 +10,7 @@ import {
 } from '../../lib/api'
 import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
+import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
   Matter, OpposingParty,
@@ -869,6 +870,8 @@ export default function MatterFinancialsPage() {
           </p>
         </div>
       )}
+
+      <UndisclosedAccountsPanel matterId={matterId} />
       </>)}
     </div>
   )

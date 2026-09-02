@@ -137,7 +137,13 @@ def main() -> None:
             try:
                 _tick()
             except Exception as e:  # noqa: BLE001 — never let the loop die
-                LOGGER.error("crm_worker: tick failed err=%s", str(e))
+                # With the traceback, because this handler catches everything
+                # the tick touches — the poller lock, the landing-pages
+                # database, IMAP, SMTP, and the LLM. "Connection refused" on its
+                # own names none of them, and the tick repeats once a minute
+                # forever, so the one line that would identify it is worth the
+                # width. Jobs are unaffected: _run_jobs runs outside this.
+                LOGGER.error("crm_worker: tick failed err=%s", str(e), exc_info=True)
         time.sleep(job_interval)
 
 

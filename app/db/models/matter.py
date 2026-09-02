@@ -24,6 +24,50 @@ class DiscoveryLevel(str, Enum):
     level_3 = "level_3"
 
 
+class ClientAlignment(str, Enum):
+    """
+    Which side our client is on, in the vocabulary a caption uses.
+
+    This titles every exhibit the matter produces — "Petitioner's Financial
+    Summary" — so it is caption language, not an internal role. The counter-
+    forms appear once a counter-petition is filed and the same person is both
+    respondent and counter-petitioner; the caption names the posture the
+    exhibit is offered in.
+    """
+    petitioner = "petitioner"
+    respondent = "respondent"
+    counter_petitioner = "counter_petitioner"
+    counter_respondent = "counter_respondent"
+    intervenor = "intervenor"
+    plaintiff = "plaintiff"
+    defendant = "defendant"
+    applicant = "applicant"
+    movant = "movant"
+    other = "other"
+
+    @property
+    def caption(self) -> str:
+        """How the alignment is written on a document."""
+        return _ALIGNMENT_CAPTIONS[self]
+
+
+# Hyphenated in a caption, underscored in the database. Spelled out rather than
+# derived from the enum name so "Counter-Petitioner" keeps its hyphen and its
+# interior capital.
+_ALIGNMENT_CAPTIONS = {
+    ClientAlignment.petitioner: "Petitioner",
+    ClientAlignment.respondent: "Respondent",
+    ClientAlignment.counter_petitioner: "Counter-Petitioner",
+    ClientAlignment.counter_respondent: "Counter-Respondent",
+    ClientAlignment.intervenor: "Intervenor",
+    ClientAlignment.plaintiff: "Plaintiff",
+    ClientAlignment.defendant: "Defendant",
+    ClientAlignment.applicant: "Applicant",
+    ClientAlignment.movant: "Movant",
+    ClientAlignment.other: "Party",
+}
+
+
 class MatterType(str, Enum):
     """Broad category of legal matter — drives fee agreement templates."""
     divorce = "divorce"
@@ -211,6 +255,17 @@ class Matter(BaseModel):
         description="Texas TRCP 190 discovery level for this matter",
     )
     notes: Optional[str] = Field(default=None, description="Internal matter notes; not visible to the client")
+    case_style: Optional[str] = Field(
+        default=None,
+        description="Formal style of the case as written on a filing, e.g. 'IN THE MATTER OF THE "
+                    "MARRIAGE OF JANE DOE AND JOHN DOE'. Distinct from matter_name, which is the "
+                    "internal short name — it heads every exhibit this matter produces",
+    )
+    client_alignment: Optional[ClientAlignment] = Field(
+        default=None,
+        description="Which side our client is on, in caption vocabulary. Titles every exhibit: "
+                    "\"Petitioner's Financial Summary\"",
+    )
 
     @field_validator("refresh_trigger_pct")
     @classmethod

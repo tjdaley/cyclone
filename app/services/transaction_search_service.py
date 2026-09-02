@@ -31,6 +31,7 @@ from db.repositories.financial import (
     TransactionTagRepository,
 )
 from db_handler import DatabaseManager
+from services.exhibit_service import Column, Exhibit, caption_lines, money
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -40,6 +41,36 @@ _ZERO = Decimal("0.00")
 # A page of results. Generous because the common move is to filter down to an
 # exhibit and then tag the whole thing at once.
 MAX_PAGE_SIZE = 1000
+
+# The most lines one exhibit will carry. Well past any summary a court would
+# accept, and there to stop a filter that selected the whole production from
+# building a document nobody can open. Hitting it is reported, never silent.
+_EXPORT_CAP = 5000
+
+# What an exhibit row shows. Bates and page identify the source document, which
+# is the column that makes a summary checkable against the originals.
+_EXHIBIT_COLUMNS = (
+    Column("Date"),
+    Column("Bates"),
+    Column("Account"),
+    Column("Check No."),
+    Column("Description"),
+    Column("Category"),
+    Column("Amount", numeric=True, money=True),
+)
+
+
+def _label(account: Any) -> str:
+    """An account as a person refers to it: the bank and the last four."""
+    last4 = getattr(account, "account_number_last4", None)
+    return "%s%s" % (account.institution, " x%s" % last4 if last4 else "")
+
+
+def _account_label(row: dict[str, Any]) -> str:
+    """The same, from a search result row that already carries the context."""
+    institution = row.get("institution") or "Unknown"
+    last4 = row.get("account_last4")
+    return "%s%s" % (institution, " x%s" % last4 if last4 else "")
 
 
 class TransactionSearchService:
@@ -179,6 +210,189 @@ class TransactionSearchService:
             matter_id, len(scope), total, len(rows),
         )
         return {"total": total, "items": items, "sum_amount": str(page_sum)}
+
+    # ── Export ────────────────────────────────────────────────────────────
+
+    def build_exhibit(
+        self,
+        manager: DatabaseManager,
+        matter: Any,
+        exhibit_name: str,
+        criteria: dict[str, Any],
+    ) -> Exhibit:
+        """
+        Run a filter over every matching line and describe it as an exhibit.
+
+        **The export is not the page.** The screen shows 200 rows because that
+        is what a person reads; an exhibit that silently stopped at 200 of 1,400
+        would be a summary of nothing, and would look complete. This pages
+        through the whole result set, and if it hits ``_EXPORT_CAP`` it says so
+        both in ``warnings`` and in the exhibit's own Selection block, where a
+        reader of the finished document will see it.
+
+        :param matter: The matter, for the caption. Passed in rather than
+            re-read so the caller's access check is the only one that matters.
+        :param exhibit_name: Titles the document — "Financial Summary".
+        :param criteria: The same filter ``search`` takes, minus paging.
+        :return: An exhibit ready for any renderer.
+        :rtype: Exhibit
+        """
+        filters = {k: v for k, v in criteria.items() if k not in ("limit", "offset")}
+
+        rows: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        while True:
+            page = self.search(
+                manager, matter.id, **filters,
+                limit=MAX_PAGE_SIZE, offset=len(rows),
+            )
+            total = page["total"]
+            if not page["items"]:
+                break
+            rows.extend(page["items"])
+            if len(rows) >= total:
+                break
+            if len(rows) >= _EXPORT_CAP:
+                truncated = True
+                break
+
+        caption, warnings = caption_lines(matter, exhibit_name)
+        if truncated:
+            warnings.append(
+                "This matter matched %d lines; the exhibit holds the first %d. "
+                "Narrow the filter and export again." % (total, len(rows))
+            )
+
+        categories = {
+            c.id: c.description
+            for c in TransactionCategoryRepository(manager).get_all(include_inactive=True)
+        }
+
+        table: list[tuple[str, ...]] = []
+        credits = debits = _ZERO
+        undated = 0
+        for row in rows:
+            amount = Decimal(str(row["amount"]))
+            if amount < 0:
+                debits += -amount
+            else:
+                credits += amount
+            if not row.get("transaction_date"):
+                undated += 1
+            table.append((
+                row.get("transaction_date") or "",
+                row.get("bates_number") or "",
+                _account_label(row),
+                row.get("check_number") or "",
+                (row.get("description") or "").replace("\n", " ").strip(),
+                categories.get(row.get("category_id")) or "",
+                str(amount),
+            ))
+
+        summary = [
+            ("Transactions", str(len(table))),
+            ("Total credits", money(credits)),
+            ("Total debits", money(debits)),
+            ("Net", money(credits - debits)),
+        ]
+        if undated:
+            # A line with no date still carries its amount into the totals, so
+            # the reader needs to know the date column is incomplete.
+            summary.append(("Lines with no date", str(undated)))
+
+        selection = self._describe(manager, matter, filters, total, len(table), truncated)
+
+        return Exhibit(
+            name=exhibit_name,
+            caption=caption,
+            columns=_EXHIBIT_COLUMNS,
+            rows=tuple(table),
+            selection=tuple(selection),
+            summary=tuple(summary),
+            warnings=warnings,
+        )
+
+    def _describe(
+        self,
+        manager: DatabaseManager,
+        matter: Any,
+        filters: dict[str, Any],
+        total: int,
+        shown: int,
+        truncated: bool,
+    ) -> list[tuple[str, str]]:
+        """
+        State in words what this set of transactions is.
+
+        A table of forty rows means nothing without the criteria that produced
+        it — not to a judge, not to opposing counsel, and not to a model asked
+        to lay it out. Every filter that narrowed the set is named; filters that
+        were not applied are left out rather than listed as "none", so the block
+        reads as a description and not as a form.
+        """
+        described: list[tuple[str, str]] = []
+
+        accounts = FinancialAccountRepository(manager).get_by_matter(matter.id)
+        chosen = filters.get("account_ids")
+        if chosen:
+            named = [a for a in accounts if a.id in set(chosen)]
+            described.append(("Accounts", ", ".join(_label(a) for a in named) or "none"))
+        else:
+            described.append((
+                "Accounts",
+                "All %d account%s on this matter" % (len(accounts), "" if len(accounts) == 1 else "s"),
+            ))
+
+        date_from, date_to = filters.get("date_from"), filters.get("date_to")
+        if date_from and date_to:
+            described.append(("Period", "%s through %s" % (date_from, date_to)))
+        elif date_from:
+            described.append(("Period", "On or after %s" % date_from))
+        elif date_to:
+            described.append(("Period", "On or before %s" % date_to))
+
+        if filters.get("uncategorized"):
+            described.append(("Category", "Lines with no category assigned"))
+        elif filters.get("category_ids"):
+            names = {
+                c.id: c.description
+                for c in TransactionCategoryRepository(manager).get_all(include_inactive=True)
+            }
+            chosen_names = [names.get(i, "#%d" % i) for i in filters["category_ids"]]
+            described.append((
+                "Categories",
+                "%s%s" % (", ".join(chosen_names),
+                          " (including sub-categories)" if filters.get("include_subcategories", True) else ""),
+            ))
+
+        if filters.get("untagged"):
+            described.append(("Tags", "Lines carrying no tag"))
+        elif filters.get("tag_ids"):
+            tags = TransactionTagRepository(manager).available_for_matter(matter.id)
+            names = {t.id: t.label for t in tags}
+            described.append((
+                "Tags",
+                "%s (%s)" % (", ".join(names.get(i, "#%d" % i) for i in filters["tag_ids"]),
+                             "all" if filters.get("tag_match_all") else "any"),
+            ))
+
+        if filters.get("text"):
+            described.append(("Description contains", filters["text"]))
+        if filters.get("check_number"):
+            described.append(("Check number", filters["check_number"]))
+        elif filters.get("checks_only"):
+            described.append(("Restricted to", "Checks only"))
+
+        if filters.get("include_deleted"):
+            # Never silent. These lines were removed on purpose.
+            described.append(("Includes", "Lines removed from their statements"))
+
+        described.append((
+            "Lines",
+            "%d of %d matching" % (shown, total) if truncated else str(shown),
+        ))
+        return described
 
     @staticmethod
     def _tagged_ids(

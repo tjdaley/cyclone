@@ -6,8 +6,10 @@ a document that may hold several months, which is far too long to hold a
 request open. The upload returns a job id; the worker does the work.
 """
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 
 from db.models.financial import StatementReviewStatus, TransactionCategory, TransactionTag
 from db.models.job import JobStatus
@@ -43,13 +45,17 @@ from schemas.financial import (
     TransactionCorrectionResponse,
     TransactionDeleteRequest,
     TransactionResponse,
+    TransactionExportRequest,
     TransactionSearchRequest,
     TransactionSearchResponse,
     TransactionTagResponse,
     TransactionTagWriteRequest,
     TransactionUpdateRequest,
+    UndisclosedAccountResponse,
 )
+from services.account_discovery_service import account_discovery_service
 from services.audit_logger import AuditLogger
+from services import exhibit_service
 from services.job_service import job_service
 from services.statement_service import statement_service
 from services.transaction_search_service import transaction_search_service
@@ -188,6 +194,25 @@ def list_accounts(
     """List the accounts on a matter — the financial section of the inventory."""
     records = FinancialAccountRepository(manager).get_by_matter(matter_id)
     return [FinancialAccountResponse(**r.model_dump()) for r in records]
+
+
+@router.get("/matters/{matter_id}/undisclosed-accounts",
+            response_model=list[UndisclosedAccountResponse])
+def list_undisclosed_accounts(
+    matter_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[UndisclosedAccountResponse]:
+    """
+    Accounts the produced transactions name but no produced statement covers.
+
+    Read-only and derived on demand — nothing is stored, so the answer always
+    reflects the accounts and statements as they stand right now. Adding the
+    missing account to the matter makes it disappear from this list, which is
+    the workflow: the list is the outstanding question, not a record.
+    """
+    found = account_discovery_service.undisclosed(manager, matter_id)
+    return [UndisclosedAccountResponse(**entry) for entry in found]
 
 
 @router.patch("/financial-accounts/{account_id}", response_model=FinancialAccountResponse)
@@ -833,6 +858,60 @@ def search_transactions(
         offset=body.offset,
     )
     return TransactionSearchResponse(**result)
+
+
+@router.post("/matters/{matter_id}/transactions/export")
+def export_transactions(
+    matter_id: int,
+    body: TransactionExportRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> Response:
+    """
+    Export the current query as a CSV extraction or a court exhibit.
+
+    The export covers **every** matching line, not the page on screen — a
+    summary that stopped at the page size would look complete and be wrong. It
+    is a synchronous request because the work is a database read and a document
+    write: no LLM, no OCR, so haproxy's limit is not in play (§11a).
+
+    ``csv`` is the clean extraction — header row and data, nothing else.
+    ``md``, ``docx``, and ``pdf`` are full exhibits carrying the case caption
+    and the Rule 1006 verification notice.
+
+    Anything the caption needed and the matter could not supply is printed as a
+    blank and named in the ``X-Exhibit-Warnings`` header, so the UI can say so
+    rather than letting a blank reach a filing unnoticed.
+    """
+    matter = MatterRepository(manager).select_one(condition={"id": matter_id})
+    if matter is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    criteria = body.model_dump(exclude={"format", "exhibit_name"})
+    try:
+        exhibit = transaction_search_service.build_exhibit(
+            manager, matter, body.exhibit_name.strip() or "Financial Summary", criteria,
+        )
+        content, media_type, filename = exhibit_service.render(exhibit, body.format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a renderer failure must not read as an empty export
+        LOGGER.error("financial.export_transactions: matter=%s format=%s failed: %s",
+                     matter_id, body.format, str(e))
+        raise HTTPException(status_code=500, detail="Could not build the export") from e
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="%s"' % filename,
+        # Read by the browser, which cannot see a JSON body on a file download.
+        "X-Exhibit-Rows": str(len(exhibit.rows)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Exhibit-Rows, X-Exhibit-Warnings",
+    }
+    if exhibit.warnings:
+        # Header values are latin-1 on the wire; a caption warning quoting a
+        # matter name with a curly apostrophe would otherwise fail the response.
+        headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
+
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @router.post("/matters/{matter_id}/transactions/categorize", response_model=BulkResultResponse)

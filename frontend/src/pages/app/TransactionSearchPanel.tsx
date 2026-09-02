@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   searchTransactions, getTransactionCategories, getTransactionTags,
   categorizeTransactions, tagTransactions, createMatterTag, deleteTransactionTag,
+  exportTransactions, saveFile,
 } from '../../lib/api'
 import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
   FinancialAccount, TransactionCategory, TransactionTag,
-  TransactionSearchFilter, TransactionSearchRow,
+  TransactionSearchFilter, TransactionSearchRow, ExportFormat,
 } from '../../types'
 
 const PAGE_SIZE = 200
@@ -348,6 +349,9 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
         </span>
       </div>
 
+      {/* ── Export ── */}
+      <ExportBar matterId={matterId} filter={filter} total={total} />
+
       {/* ── Bulk actions ── */}
       {selected.size > 0 && (
         <div className="flex flex-wrap items-center gap-3 bg-navy/5 border border-navy/20 rounded p-3">
@@ -589,6 +593,88 @@ function TagManager({ matterId, tags, onChanged, onError }: {
                 aria-label={`Delete ${t.label}`} onClick={() => remove(t)}>×</button>
             </span>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+/**
+ * Take the current query out of Cyclone.
+ *
+ * Four formats, one query. The CSV is the clean extraction — no caption, no
+ * notice — because it is meant for a spreadsheet or a model, and a preamble
+ * above the header row is something every reader has to be told to skip. The
+ * other three are court exhibits: they carry the case caption and the Rule 1006
+ * verification notice inside the file, which is the only place it is any use
+ * once the document has left this screen.
+ *
+ * The export always covers every matching line, never the page on screen. An
+ * exhibit that quietly stopped at 200 of 1,400 would look complete, and that is
+ * the failure worth the extra round trips.
+ */
+function ExportBar({ matterId, filter, total }: {
+  matterId: number
+  filter: TransactionSearchFilter
+  total: number
+}) {
+  const [name, setName] = useState('Financial Summary')
+  const [busy, setBusy] = useState<ExportFormat | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [warnings, setWarnings] = useState<string[]>([])
+
+  async function run(format: ExportFormat) {
+    setBusy(format)
+    setError(null)
+    setWarnings([])
+    try {
+      const file = await exportTransactions(matterId, filter, format, name.trim() || 'Financial Summary')
+      saveFile(file)
+      // The caption is built from the matter, and what the matter could not
+      // supply was printed as a blank. Say so — the alternative is a blank
+      // reaching a filing because nobody was told.
+      setWarnings(file.warnings)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (total === 0) return null
+
+  return (
+    <div className="border-t border-border pt-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-xs text-text-secondary" htmlFor="exhibit-name">Export as</label>
+        <input id="exhibit-name" className="input text-sm py-1 w-56" value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="Financial Summary"
+          aria-label="Exhibit name" />
+        {(['csv', 'md', 'docx', 'pdf'] as ExportFormat[]).map(format => (
+          <button key={format} type="button" className="btn-secondary text-xs px-3 py-1"
+            disabled={busy !== null}
+            onClick={() => void run(format)}>
+            {busy === format ? 'Building…' : format.toUpperCase()}
+          </button>
+        ))}
+        <span className="text-xs text-text-secondary">
+          {total.toLocaleString()} line{total === 1 ? '' : 's'}
+          {' · CSV is data only; MD, DOCX and PDF are exhibits with the case caption'}
+        </span>
+      </div>
+
+      {error && (
+        <div className="p-2 border border-red-300 bg-red-50 text-xs text-red-700 rounded">{error}</div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="p-2 border border-amber-300 bg-amber-50 text-xs text-amber-900 rounded space-y-1">
+          <p className="font-medium">The exhibit downloaded with blanks in its caption:</p>
+          <ul className="list-disc ml-4">
+            {warnings.map((warning, i) => <li key={i}>{warning}</li>)}
+          </ul>
         </div>
       )}
     </div>

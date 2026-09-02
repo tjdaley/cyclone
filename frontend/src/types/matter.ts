@@ -52,7 +52,34 @@ export interface Matter {
   matter_number: string | null
   discovery_level: 'level_1' | 'level_2' | 'level_3' | null
   notes: string | null
+  /** Formal style of the case, as written on a filing. Heads every exhibit. */
+  case_style: string | null
+  /** Which side our client is on, in caption vocabulary. Titles every exhibit. */
+  client_alignment: ClientAlignment | null
 }
+
+/**
+ * Caption vocabulary for our client's side of the case.
+ *
+ * Stored underscored, written hyphenated — the backend owns that mapping, so a
+ * label here is display only. See ClientAlignment in app/db/models/matter.py.
+ */
+export type ClientAlignment =
+  | 'petitioner' | 'respondent' | 'counter_petitioner' | 'counter_respondent'
+  | 'intervenor' | 'plaintiff' | 'defendant' | 'applicant' | 'movant' | 'other'
+
+export const CLIENT_ALIGNMENTS: { value: ClientAlignment; label: string }[] = [
+  { value: 'petitioner', label: 'Petitioner' },
+  { value: 'respondent', label: 'Respondent' },
+  { value: 'counter_petitioner', label: 'Counter-Petitioner' },
+  { value: 'counter_respondent', label: 'Counter-Respondent' },
+  { value: 'intervenor', label: 'Intervenor' },
+  { value: 'plaintiff', label: 'Plaintiff' },
+  { value: 'defendant', label: 'Defendant' },
+  { value: 'applicant', label: 'Applicant' },
+  { value: 'movant', label: 'Movant' },
+  { value: 'other', label: 'Other' },
+]
 
 /** Mirrors MatterCreateRequest in app/schemas/matter.py */
 export interface MatterCreatePayload {

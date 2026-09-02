@@ -391,3 +391,40 @@ export interface AccountDeletePreview {
   /** Reasons to stop and look. Warnings, not blocks. */
   warnings: string[]
 }
+
+/**
+ * An account the produced transactions name but no produced statement covers.
+ *
+ * Money amounts arrive as strings and stay strings — see `lib/money.ts`. The
+ * account itself is an inference from a printed reference, so `institution`
+ * comes with `institution_inferred` rather than standing as fact.
+ */
+export interface UndisclosedAccount {
+  /** Last four digits — the identity, and how two spellings merge into one. */
+  last4: string
+  /** The longest form of the number seen, for quoting back to its line. */
+  reference: string
+  institution: string | null
+  /** True when the institution was assumed from the statement, not read off it. */
+  institution_inferred: boolean
+  mentions: number
+  money_in: string
+  money_out: string
+  /** money_in − money_out. Negative means the matter funded this account. */
+  net: string
+  first_seen: string | null
+  last_seen: string | null
+  /** Produced accounts whose statements name this one. */
+  seen_on: string[]
+  /** Up to three descriptions, verbatim, so a finding traces to its page. */
+  examples: string[]
+}
+
+/**
+ * How an export is rendered.
+ *
+ * `csv` is the clean extraction — header row and data, nothing else, so it can
+ * go straight into a spreadsheet or a model. The other three are full exhibits
+ * carrying the case caption and the Rule 1006 verification notice.
+ */
+export type ExportFormat = 'csv' | 'md' | 'docx' | 'pdf'

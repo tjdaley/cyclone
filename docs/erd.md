@@ -4,9 +4,13 @@ Eight subject-area diagrams. Split deliberately: one ERD covering every table is
 unreadable, and crossings grow much faster than node count. `MATTERS` and
 `STAFF` repeat across frames so each frame can stay small.
 
-Vetted line by line against the deployed schema after migration 028. Every
+Vetted line by line against the deployed schema after migration 030. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
+
+Migrations 029 and 030 add columns only — `transactions.check_number`, and
+`matters.case_style` / `matters.client_alignment` — so no relationship on any
+frame below changed.
 
 ## Notation
 

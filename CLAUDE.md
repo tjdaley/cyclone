@@ -124,6 +124,7 @@ cyclone/
 │       ├── 027_purge_rejected_statements.sql   # ⚠ deletes data — old soft-rejected rows
 │       ├── 028_transaction_soft_delete.sql    # deleted_at on transactions
 │       ├── 029_transaction_check_number.sql  # check_number on transactions
+│       ├── 030_matter_caption.sql          # matters.case_style, matters.client_alignment
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -526,6 +527,181 @@ So it runs in Python over the page-marked text, never through the model. Exact, 
 
 Covered by `tests/test_bates_service.py` and `tests/test_statement_bates_commit.py` — run them directly with the venv interpreter; there is no runner wired up yet.
 
+### Account Discovery Service (`account_discovery_service.py`)
+
+**A production names the accounts it does not contain.** Money moves between
+accounts, and the statement you *do* have prints the number of the one you do
+not — `Transfer from XXX4070 to XXX9260`, `INTERNET XFER FROM CHKG 8098386837`.
+Matching those against `financial_accounts` leaves the accounts nobody produced.
+
+- **Direction comes from the sign of the amount, never the words "to" and
+  "from".** One description carries both, so reading the words means guessing
+  which number the sentence is about. Money that left the account went to the
+  other one; there is nothing to guess.
+- **Identity is the last four.** `86110018909-D` and `XXX8909` are one account;
+  deduping on the printed string reports two. It also means an account already
+  on the matter is never reported — including the statement's own number, which
+  it names constantly, so self-reference needs no special case.
+- **Banks disagree about the mask character.** First Financial prints
+  `XXX4070`, Chase prints `Chk ...9323` with no space before the digits, others
+  use `****1234` or `####5678`. The rule is "two or more mask characters, then
+  digits", never a literal `XX` — the dot form shipped unmatched and an account
+  referenced by name in a produced statement never reached the list. Two or more
+  matters: a single dot is the one in "Acct No." and in every decimal amount,
+  and a single hyphen is in every date.
+- **Three patterns, and each run of digits is claimed once**, by the most
+  specific pattern that reaches it. `Acct No. 86110018909` matches both the
+  explicit-account pattern and "a label, then a number"; counting both doubles
+  the money the account appears to have moved.
+- **The institution is an inference and says so.** A name in the description is
+  read off the page; without one, the transfer is assumed to stay inside the
+  bank whose statement it was printed on, flagged `institution_inferred`, and
+  carries a dagger in the UI. A later mention that names the bank outright
+  upgrades an earlier inference.
+- `_NOT_AN_INSTITUTION` is stripped from both ends of a label rather than
+  matched as a phrase: what sits before an account number is account-type words
+  in any combination (`DDA Acct No`, `CHKG`, `SVGS`), and enumerating
+  combinations is a losing game. What survives is a name, or nothing.
+- The gate (`transfer|xfer`) is pushed to the database as two text searches, so
+  the scan fetches transfer lines rather than every line on the matter. The
+  query terms and the regex are deliberately the same two words.
+
+Covered by `tests/test_account_discovery.py`.
+
+### Exhibit Service (`exhibit_service.py`)
+
+Turns any query result into a court exhibit. One `Exhibit` describes the
+document — caption, selection, table, totals — and four renderers draw it.
+Anything in Cyclone that produces a table worth taking to court builds an
+`Exhibit`; none of them learn to write DOCX.
+
+- **CSV is deliberately not an exhibit.** Header row, data rows, nothing else,
+  so it opens in a spreadsheet or goes to a model without a preamble to strip.
+  The caption and the verification notice live in the other three formats. A
+  UTF-8 BOM is written because Excel reads a plain UTF-8 CSV as the system
+  codepage and mangles any non-ASCII payee name.
+- **The caption is a template, not renderer code.** `_SYSTEM_CAPTION` is a few
+  format strings using `**bold**` / `__underline__` and `{placeholders}`.
+  Firms disagree about captions, and always about wording and order — never
+  about how bold text is written into a .docx. `caption_lines()` already takes
+  the template as an argument, so the future per-firm override is a stored list
+  of strings and no renderer changes. **FUTURE:** that override belongs in a
+  table keyed the way `matter_preferences` will be — NULL user id means the
+  firm's, a row means that user's.
+- **Parse the markup first, substitute after.** Interpolating before parsing
+  lets a *value* be read as markup: the blank rule is a row of underscores and
+  gets eaten as an `__underline__` marker, and a case style containing `**`
+  corrupts the rest of the caption. A value is content; only the template
+  carries style.
+- **A missing caption field is a printed blank and a warning, never "None".**
+  An attorney wants the numbers long before a cause number exists. Warnings ride
+  back on `X-Exhibit-Warnings` so the UI can say what was left blank instead of
+  a blank reaching a filing unnoticed.
+- Markdown coalesces adjacent runs of the same weight before emitting markers —
+  per-run emission closes and reopens emphasis mid-phrase
+  (`**Cause No: ****DF-24-01234**`), which renders as literal asterisks.
+  Underline has no markdown spelling and is dropped.
+- **PDF goes through PyMuPDF's `Story`**, which is already a dependency because
+  it reads the statements. WeasyPrint renders richer CSS but needs native Pango
+  and Cairo in the image — a real cost for a caption and a ruled table.
+- **Story has no page model, so `<thead>` does not repeat.** Handed 120 rows it
+  emits four pages and pages two to four begin mid-data, leaving the reader to
+  count columns to find the amount. The table is therefore not one story: rows
+  are measured a page at a time — try a batch, shrink until `place()` reports it
+  fitted, then grow while it still does — and each page gets its own small table
+  carrying its own header. The fit is exact, not conservative. Page numbers are
+  stamped after layout, because the total is not known until then.
+- **MuPDF's built-in fonts substitute ligature glyphs, and this is accepted.**
+  The PDF's text layer holds `oﬀered` where the page reads `offered`, so Ctrl-F
+  and text extraction miss words containing ff/fi/fl. The page itself is correct.
+  `font-variant-ligatures`, `font-feature-settings`, serif and sans were all
+  tested and none suppress it; only monospace does, which is wrong for an
+  exhibit. Fixing it means vendoring a TTF into the repo. **Tom's call,
+  2026-09-01: not worth it — searchability does not matter in a Rule 1006
+  exhibit, and the DOCX is fully searchable anyway.** Tests that search PDF text
+  normalise ligatures rather than pretending the substitution is not happening.
+- Every exhibit carries the Rule 1006 notice, and it names automated extraction
+  explicitly. A wrong date inside a statement period reconciles cleanly and
+  reaches an exhibit unflagged; that is measured, not hypothetical.
+
+Covered by `tests/test_exhibit_service.py` and `tests/test_transaction_export.py`.
+
+### Account Number Service (`account_number_service.py`)
+
+**The account number is a pattern, not a comprehension task** — the same
+argument as Bates. It is the one long digit run printed on *every page* of a
+statement; a barcode is regenerated per mailing, a transaction reference is
+unique to its line, a check number appears once, a mail-routing line prints on
+the first sheet only.
+
+Measured on twelve months of Chase statements from one production, same model
+(`claude-opus-5`), no failover on any of the 24 runs:
+
+| Account | Read the number | Returned null |
+| ------- | --------------- | ------------- |
+| x4448 (checking) | 9 | 3 |
+| x5410 (savings) | 3 | 9 |
+
+Chase prints the number in a text object that extracts **fourteen lines above
+its own "Account Number:" label**, past a barcode and a mail-routing line, so
+the model sees an empty label. Two runs stored the literal string
+`"Account Number:"` as the masked value — the model landing on the label and
+finding nothing after it. Sometimes it scans up and finds the orphan; sometimes
+it does not.
+
+- **A coin flip on the dedup key is worse than a clean failure.** `find_match`
+  returns None without a last four, by design, so nine null reads opened nine
+  separate accounts for one savings account — one per month, each holding a
+  single statement, and invisible as a problem until somebody asks for the
+  balance history.
+- **`reconcile()` is deliberately not the Bates rule.** There the pattern owns
+  the field outright, because a model asked for a stamp on an unstamped page
+  invents a plausible one. An account number is also printed in prose ("your
+  Chase Savings account ...5410"), so a model answer that *disagrees* with the
+  pattern is a real conflict, not a hallucination: keep the extracted value and
+  raise `ACCOUNT_NUMBER_CONFLICT` (warn). A null read is filled from the pattern
+  (`ACCOUNT_NUMBER_DERIVED`, info); agreement is silent.
+- **"Most pages", not "every page".** Every page was the first rule shipped and
+  it was wrong: statements open with pages carrying no account number at all —
+  a brokerage package leads with a cover sheet and often a letter about a change
+  of terms, and disclosures or inserts turn up anywhere. One such page vetoed
+  the real answer and the detector went silent on the documents it was built
+  for. Length is never the tiebreak either: the barcode is the longer run.
+- **`ask()` is the failover when repetition cannot settle it** — the single
+  question to a `fast` model over the first three pages
+  (`find_account_number`), because the full prompt asks for twenty fields and
+  this one gets a line of its attention. **The answer is verified against the
+  printed text before it is accepted**, comparing each printed run separately so
+  a "match" cannot straddle two unrelated numbers. The model locates a value; it
+  never produces one. It is offered only pages known to belong to this statement
+  — on a two-statement PDF with no page span, asking would find the other
+  account's number and file this statement against it.
+- **A statement's transaction pages are not its extent** — the same rule as the
+  Bates gap scan, relearned here the hard way. Every Chase transaction prints on
+  page 1 and page 2 carries only disclosures, so scoping the search to
+  transaction pages showed the detector a single page. One page cannot
+  demonstrate repetition, so it declined, and the lookup then saw one page
+  holding both the account number and a barcode and chose the barcode on twelve
+  statements running. **When the document holds one statement, the document is
+  the statement.** Only a multi-statement document is scoped by page, and one
+  with no page numbers on its lines is skipped entirely rather than searched
+  whole — that would find another statement's number and file this one under it.
+- **`ask()` carries the same length bound as `detect()`.** It is the only reason
+  `detect` never picked a barcode: a Chase mail barcode is 20 digits where the
+  account number is 15. And "printed on the page" is too weak a test on its own,
+  because a barcode is printed on the page — so when several pages were
+  examined, an answer appearing on one loses to a run appearing on more. An
+  account number repeats; a barcode is regenerated per mailing.
+- **One page proves nothing about repetition** and returns None — a lone page's
+  longest digit run is a guess dressed as a pattern. A document holding two
+  statements likewise has no run on every page; detection is scoped to the
+  statement's own page span, and falls back to the extraction when that is
+  unknown.
+- `looks_like_a_number()` rejects a masked form carrying no digits. A caption
+  stored as a value makes a wrong answer look like a recorded fact.
+
+Covered by `tests/test_account_number.py`.
+
 ### Transaction Search Service (`transaction_search_service.py`)
 
 Everything downstream of ingestion. Two classification axes, deliberately different mechanisms:
@@ -534,6 +710,19 @@ Everything downstream of ingestion. Two classification axes, deliberately differ
 - **Tags** — many-to-many, two layers in one table (`matter_id` NULL is firm-wide). Drives the Rule 1006 summaries. One line is routinely evidence in several exhibits at once.
 
 **A matter's accounts are the search scope.** Transactions carry no `matter_id`, so every query resolves the matter's accounts first and intersects any account filter against them — that is what stops a crafted request reaching another matter's records. `_verify_on_matter()` does the same for every mutation.
+
+**An export is not a page.** `build_exhibit()` pages through every matching
+line, because the screen shows 200 rows and an exhibit that stopped there would
+be a summary of the wrong set — and would look complete. Hitting `_EXPORT_CAP`
+is reported both in `warnings` and in the exhibit's own Selection block, where
+a reader of the finished document sees it.
+
+**`selection` is what makes an exhibit usable by someone who did not run the
+query.** A table of forty transactions means nothing without the criteria that
+produced it — not to a judge, not to opposing counsel, and not to a model asked
+to lay it out. Filters that were not applied are omitted rather than listed as
+"none", so the block reads as a description and not as a form. `include_deleted`
+is always stated when on.
 
 `FinancialAccountTransactionRepository.search()` is the one place that builds a PostgREST query by hand instead of passing a condition dict: the dict supports equality, `IN`, and null checks only, so a date window and an `ILIKE` cannot be expressed through it at all. The "untagged" filter is expressed as *exclude the tagged ids*, never as the complement — the complement is the whole production and would blow both the URI limit and PostgREST's max-rows cap.
 
@@ -747,10 +936,15 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Transaction categories (FIS chart of accounts) | ✅ Built — firm-wide hierarchy, seeded by 024 |
 | Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply |
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
+| Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts |
+| Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
+| Export query results: CSV / MD / DOCX / PDF | ✅ Built — CSV is a clean extraction; the rest are full exhibits |
 | Financial Information Statement generation | ❌ Not started — the chart and `include_in_fis` are in place |
 | Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks |
 | Extraction completeness check | ✅ Built — extracted counts and totals vs the statement's own |
 | Bates detection + gap reporting | ✅ Built — pattern-based, per-page, with production-gap flags |
+| Account-number detection by pattern | ✅ Built — the digit run on every page; fills a null read, flags a conflict |
+| Repairing accounts split by a null account number | ❌ Not started — derive from stored `raw_text`, then merge into the real account |
 | Account merge (two rows, one real account) | ✅ Built — previewed, with blocking and forceable conflicts |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
 | Reject a statement (discards it and its lines) | ✅ Built — deletes; removes an emptied, uncharacterized account too |
@@ -758,7 +952,11 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Reassign an account to another matter | ❌ Not started — needs `ON UPDATE CASCADE` on the statements→accounts FK, as 026 did for transactions |
 | Matter-close workflow | ❌ Not started — must purge soft-deleted transactions |
 | Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
-| Rule 1006 exhibit export | ❌ Not started — tagging and Bates capture are in place |
+| Rule 1006 exhibit export | ✅ Built for transaction queries — every exhibit carries the verification notice |
+| Compliance matrix (statements held, by year and month) | ❌ Not started — needs a `matter_preferences` table for the look-back year. Ends with the referenced-but-not-produced list; it is the exhibit behind a motion to compel |
+| Export on the undisclosed-accounts report | ❌ Not started — it is a different shape from a transaction exhibit (accounts, not lines) and needs its own columns rather than being forced through `_EXHIBIT_COLUMNS` |
+| OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
+| Large-transaction query (dollar threshold) | ❌ Not started |
 | Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Standard privileges/objections lookup tables | ✅ Seeded |
@@ -869,11 +1067,29 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Raise `max_tokens` when an extraction comes back short | Check what it actually used first. A model that stops at a seventh of its budget did not run out of room — split the work instead |
 | Trust a well-formed extraction because it parsed | Valid JSON says nothing about completeness. Compare it against the totals the statement prints for itself |
 | Gate Bates detection on perfect one-per-page steps | That rejects exactly the incomplete productions worth flagging. Gate on monotonicity |
+| Export the page the user is looking at | An export covers every matching line. A summary that stopped at the page size looks complete and is wrong |
+| Put a preamble above a CSV's header row | CSV is the clean extraction. The caption and the notice belong in the exhibit formats |
+| Interpolate a value into a caption before parsing its markup | The value gets read as markup — a blank rule of underscores becomes an underline marker. Parse, then substitute |
+| Print "None" onto a caption a matter cannot fill | Print the blank rule and return a warning. The attorney wants numbers before a cause number exists |
+| Hardcode the caption in a renderer | It is a template (`_SYSTEM_CAPTION`). Firms disagree about wording, never about how .docx stores bold |
+| Format a CSV amount as currency | A spreadsheet reads `-$2,500.00` as text and will not sum it. Currency is for the exhibit formats; the CSV carries the raw figure |
+| Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
+| Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
+| Report an inferred institution as though it were read off the page | Flag it. The dagger is the difference between a finding and an assertion |
+| Take a model's null account number at face value | It is the dedup key. Find it by pattern — the one long digit run on every page — or a form the model reads half the time opens one account per statement |
+| Let the pattern override an extracted account number | Unlike a Bates stamp, the number is printed in prose too. Disagreement is a real conflict: keep the extraction and flag it |
+| Derive an account number from a single page | Repetition is the whole signal. One page cannot demonstrate it |
+| Scope an account-number search to a statement's transaction pages | Those are not its extent — disclosures and continuation pages carry no lines. One statement in a document means the whole document |
+| Let a narrow LLM lookup answer without the bounds the pattern uses | It chose a 20-digit barcode twelve times. Same length limits, plus "does it repeat across pages" |
+| Require an account number on every page | A cover sheet, a terms-of-service letter, or an insert carries none, and one such page vetoes the real answer. Most pages wins |
+| Accept a model's account number without checking it against the page | Compare each printed run separately. An answer that is not printed there was invented |
+| Store a masked account number with no digits in it | It is the caption, scraped. `"Account Number:"` reached production twice |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
 | Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |
 | Add a model field without a migration in the same change | The startup schema check will log an `ERROR`, but the insert is already broken |
 | Persist PDF-extracted text straight from PyMuPDF | It can contain NULs; Postgres rejects the row (`22P05`). `pdf_service` sanitizes — use its output |
 | Decide "opposing" without knowing our client | `intake_service`/`pleading_service` take the client name; a pleading names *our* attorney too |
+| Assume a bank masks an account with X's | Chase uses dots and no space (`Chk ...9323`). Match a run of mask characters, not a literal XX |
 | Match people on surname alone | Adverse parties share surnames — require first **and** last (`_match_confidence`) |
 
 ---

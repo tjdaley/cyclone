@@ -110,6 +110,12 @@
     "extends": "default",
     "temperature": 0.0
   },
+  "find_account_number": {
+    "description": "Ask only for the account number, over the first pages of a statement",
+    "extends": "fast",
+    "temperature": 0.0,
+    "max_tokens": 300
+  },
   "extract_account_statement": {
     "description": "Read a bank/brokerage/card statement into signed transactions",
     "extends": "default",

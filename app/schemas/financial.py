@@ -357,6 +357,28 @@ class TransactionSearchRequest(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class TransactionExportRequest(TransactionSearchRequest):
+    """
+    A filter plus how to render it.
+
+    Inherits every field of the search so the export is provably the same set
+    the screen showed — a divergence between the two would be invisible and
+    would surface as an exhibit nobody can reproduce. ``limit`` and ``offset``
+    are inherited but ignored: an export covers every matching line.
+    """
+    format: str = Field(
+        default="csv",
+        pattern="^(csv|md|docx|pdf)$",
+        description="csv is the clean extraction; md, docx, and pdf are full exhibits "
+                    "carrying the caption and the verification notice",
+    )
+    exhibit_name: str = Field(
+        default="Financial Summary",
+        max_length=120,
+        description="Titles the exhibit — \"Petitioner's Financial Summary\". Also the filename",
+    )
+
+
 class TransactionSearchRow(TransactionResponse):
     """A transaction plus the context a result row displays."""
     tag_ids: list[int] = Field(default_factory=list[int], description="All tags on this line, for the tag cloud and bulk tagging")
@@ -459,3 +481,41 @@ class AccountDeletePreview(BaseModel):
                     "somebody wrote, or a place in an account history. Warnings, not blocks — "
                     "this is a deliberate act, not an automatic cleanup",
     )
+
+
+class UndisclosedAccountResponse(BaseModel):
+    """
+    An account the produced transactions name but no produced statement covers.
+
+    Every figure here is derived from lines that *are* in the production. The
+    account itself is not: it is an inference from a printed reference, which
+    is why the institution carries its own confidence flag rather than being
+    presented as fact.
+    """
+    last4: str = Field(..., description="Last four digits — the identity, and how two spellings of "
+                                        "the same account are merged")
+    reference: str = Field(..., description="The longest form of the number seen in a description, "
+                                            "for quoting back to the line it came from")
+    institution: Optional[str] = Field(
+        default=None,
+        description="Named in the description when one appears there; otherwise the institution of "
+                    "the account the transfer was printed on",
+    )
+    institution_inferred: bool = Field(
+        ...,
+        description="True when the institution was assumed from the statement rather than read off "
+                    "it. Carries the dagger in the UI — this is the part that could be wrong",
+    )
+    mentions: int = Field(..., description="Transfer lines referencing this account")
+    money_in: Decimal = Field(..., description="Total that arrived from this account, from the sign "
+                                               "of the amounts, not the words to/from")
+    money_out: Decimal = Field(..., description="Total that went to this account")
+    net: Decimal = Field(..., description="money_in − money_out. Negative means the matter's "
+                                          "accounts are a net source of funds to this one")
+    first_seen: Optional[date] = Field(default=None, description="Earliest dated reference")
+    last_seen: Optional[date] = Field(default=None, description="Latest dated reference")
+    seen_on: list[str] = Field(default_factory=list,
+                               description="Produced accounts whose statements name this one")
+    examples: list[str] = Field(default_factory=list,
+                                description="Up to three descriptions, verbatim, so the finding can "
+                                            "be traced to the page it came from")

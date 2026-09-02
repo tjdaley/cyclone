@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   getMatter, getClients, getStaff,
+  updateMatter,
   getMatterStaff, addMatterStaff, updateMatterStaff, deleteMatterStaff,
   getMatterChildren, createMatterChild, updateMatterChild, deleteMatterChild,
   getMatterClaims, createMatterClaim, updateMatterClaim, deleteMatterClaim,
@@ -13,8 +14,9 @@ import {
 import type {
   Matter, Client, Staff, MatterStaff, MatterStaffRole, OpposingParty,
   MatterChild, ChildSex, MatterClaim, ClaimKind, MatterPleading, PleadingStatus,
-  OpposingCounsel, MatterCounselLink, CounselRole, FullName,
+  OpposingCounsel, MatterCounselLink, CounselRole, FullName, ClientAlignment,
 } from '../../types'
+import { CLIENT_ALIGNMENTS } from '../../types'
 
 const STAFF_ROLES: MatterStaffRole[] = ['originating', 'billing_reviewer', 'assigned']
 const COUNSEL_ROLES: CounselRole[] = ['lead', 'co_counsel', 'local_counsel', 'prior_counsel']
@@ -454,6 +456,9 @@ export default function MatterDetailPage() {
           </p>
         )}
       </div>
+
+      {/* ── Exhibit caption ── */}
+      <CaptionSection matter={matter} onSaved={setMatter} />
 
       {/* ── Opposing parties ── */}
       <Section title="Opposing parties" count={parties.length}
@@ -910,5 +915,112 @@ export default function MatterDetailPage() {
         )}
       </Section>
     </div>
+  )
+}
+
+
+/**
+ * The two caption fields nothing else in Cyclone can supply.
+ *
+ * Everything else a court caption needs is already on the matter — cause
+ * number, court, county, state. These two are not derivable: `matter_name` is
+ * the internal short name ("Salmons divorce"), which is not how a caption
+ * reads, and which side we are on is captured at intake only for the OTHER
+ * parties.
+ *
+ * They live here rather than in the export dialog because they are facts about
+ * the case, not about one document. Set once, and every exhibit the matter ever
+ * produces is headed correctly.
+ */
+function CaptionSection({ matter, onSaved }: {
+  matter: Matter
+  onSaved: (m: Matter) => void
+}) {
+  const [style, setStyle] = useState(matter.case_style ?? '')
+  const [alignment, setAlignment] = useState<ClientAlignment | ''>(matter.client_alignment ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const dirty = style !== (matter.case_style ?? '') || alignment !== (matter.client_alignment ?? '')
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    try {
+      onSaved(await updateMatter(matter.id, {
+        case_style: style.trim() || null,
+        client_alignment: alignment || null,
+      }))
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const alignmentLabel = CLIENT_ALIGNMENTS.find(a => a.value === alignment)?.label
+
+  return (
+    <Section title="Exhibit caption">
+      <p className="text-sm text-text-secondary mb-3">
+        Heads every exhibit generated from this matter. The cause number, court, and
+        county come from the matter itself; these two do not exist anywhere else.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="md:col-span-2">
+          <label className="label" htmlFor="case-style">Case style</label>
+          <textarea id="case-style" className="input text-sm w-full" rows={2}
+            placeholder="IN THE MATTER OF THE MARRIAGE OF JANE DOE AND JOHN DOE"
+            value={style} onChange={e => setStyle(e.target.value)} />
+          <p className="text-xs text-text-secondary mt-1">
+            As written on a filing — not the short name.
+          </p>
+        </div>
+        <div>
+          <label className="label" htmlFor="alignment">We represent the</label>
+          <select id="alignment" className="input text-sm w-full"
+            value={alignment} onChange={e => setAlignment(e.target.value as ClientAlignment | '')}>
+            <option value="">— not set —</option>
+            {CLIENT_ALIGNMENTS.map(a => (
+              <option key={a.value} value={a.value}>{a.label}</option>
+            ))}
+          </select>
+          <p className="text-xs text-text-secondary mt-1">
+            Titles the exhibit.
+          </p>
+        </div>
+      </div>
+
+      {/* What the caption will actually say. Cheaper to check here than to
+          find out from a document already handed to someone. */}
+      <div className="mt-4 border border-border rounded bg-off-white px-4 py-3 text-center space-y-1">
+        <p className="text-sm font-bold text-navy">
+          Cause No: <span className="underline">{matter.matter_number || '__________'}</span>
+        </p>
+        <p className="text-sm font-bold text-navy">
+          In the {matter.court_name || '__________'} of {matter.county} County, {matter.state}
+        </p>
+        <p className="text-sm text-text-primary">
+          {style.trim() || <span className="text-text-secondary italic">{matter.matter_name} — set a case style</span>}
+        </p>
+        <p className="text-sm font-bold text-navy pt-1">
+          {alignmentLabel ? `${alignmentLabel}'s ` : ''}[exhibit name]
+        </p>
+      </div>
+
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+
+      <div className="flex items-center gap-3 mt-3">
+        <button type="button" className="btn-primary text-sm"
+          disabled={!dirty || busy} onClick={() => void save()}>
+          {busy ? 'Saving…' : 'Save caption'}
+        </button>
+        {saved && <span className="text-xs text-success">Saved</span>}
+      </div>
+    </Section>
   )
 }

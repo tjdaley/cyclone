@@ -39,7 +39,7 @@ from db.repositories.financial import (
     FinancialAccountTransactionRepository,
 )
 from db_handler import DatabaseManager
-from services import bates_service
+from services import account_number_service, bates_service
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 
@@ -1323,6 +1323,12 @@ class StatementService:
         claimed_pages: list[dict[str, Any]] = []
 
         results: list[dict[str, Any]] = []
+        # Whether this document holds exactly one statement. It decides whether
+        # the whole document may be searched for an account number when the
+        # statement's own page span is unknown — on a two-statement PDF that
+        # would find the OTHER account's number and file this statement against
+        # it, which is worse than leaving it unmatched.
+        only_statement = len(extracted.get("statements") or []) == 1
         for raw_statement in (extracted.get("statements") or []):
             try:
                 results.append(self._commit_one(
@@ -1337,6 +1343,7 @@ class StatementService:
                     series=series,
                     source_filename=source_filename,
                     claimed_pages=claimed_pages,
+                    only_statement=only_statement,
                 ))
             except Exception as e:  # noqa: BLE001 — one bad statement must not lose the rest
                 LOGGER.error("statement_service.commit: statement failed: %s", str(e))
@@ -1371,6 +1378,7 @@ class StatementService:
         series: Optional[bates_service.BatesSeries] = None,
         source_filename: Optional[str] = None,
         claimed_pages: Optional[list[dict[str, Any]]] = None,
+        only_statement: bool = True,
     ) -> dict[str, Any]:
         """Write one statement, its account, and its lines."""
         account_block = raw_statement.get("account") or {}
@@ -1399,9 +1407,59 @@ class StatementService:
                 "transactions",
             ))
 
+        # Which pages this statement was printed on. Needed here as well as
+        # further down, because the account number is looked for on the pages
+        # of THIS statement — a document holding two accounts would otherwise
+        # have no number on every page and give up for no reason.
+        statement_pages = sorted({p for p in (_page_number(l.get("physical_page_number")) for l in lines) if p})
+
         # 1. Account: match on institution + last four, or create.
         institution = (account_block.get("institution") or "").strip() or "Unknown institution"
         last4 = (account_block.get("account_number_last4") or "").strip() or None
+
+        # The account number is a pattern — the one long digit run printed on
+        # every page — and the extraction reads it only about half the time on
+        # some bank forms. Institution plus last four is the dedup key, so a
+        # coin flip there opens a fresh account per statement. See
+        # account_number_service for the measurements behind this.
+        document_pages = bates_service.split_pages(raw_text)
+
+        # **A statement's transaction pages are not its extent.** Every Chase
+        # transaction prints on page 1 and page 2 carries only disclosures, so
+        # scoping to transaction pages showed the detector a single page — and a
+        # single page cannot demonstrate repetition, which is the entire signal.
+        # It then fell through to the lookup, which saw one page containing both
+        # the account number and the barcode and chose the barcode, twelve times.
+        # When the document holds one statement, the document IS the statement.
+        if only_statement:
+            scope: Optional[list[int]] = None
+        elif statement_pages:
+            scope = statement_pages
+        else:
+            # Several statements in one document and no page numbers on the
+            # lines. Searching the whole document would find another statement's
+            # account number and file this one against it.
+            scope = []
+
+        found = None
+        if scope != []:
+            found = account_number_service.detect(
+                document_pages, only=scope, expected_last4=last4,
+            )
+            if last4 is None and (found is None or not found.unambiguous):
+                # Repetition could not settle it and the extraction did not read
+                # it. Put the single question to a fast model — the full prompt
+                # asks for twenty fields and this one gets a line of its
+                # attention. The answer is checked against the printed text, and
+                # against how it behaves across pages, before it is believed.
+                asked = account_number_service.ask(document_pages, only=scope)
+                if asked is not None:
+                    found = asked
+
+        last4, number_flag = account_number_service.reconcile(last4, found)
+        if number_flag:
+            flags.append(number_flag)
+
         account = account_repo.find_match(matter_id, institution, last4)
         if account is None:
             # About to open a second account for a number the matter already
@@ -1424,7 +1482,15 @@ class StatementService:
                 institution=institution,
                 account_type=self._coerce_account_type(account_block.get("account_type")),
                 account_number_last4=last4,
-                account_number_masked=account_block.get("account_number_masked"),
+                # Two Chase runs stored the literal string "Account Number:"
+                # here — the model reached the label, found the value missing,
+                # and returned the caption. A masked form always carries digits.
+                account_number_masked=(
+                    account_block.get("account_number_masked")
+                    if account_number_service.looks_like_a_number(
+                        account_block.get("account_number_masked"))
+                    else None
+                ),
                 name_on_account=account_block.get("name_on_account"),
             ).model_dump())
             LOGGER.info("statement_service: created account id=%s for matter=%s", account.id, matter_id)
@@ -1551,8 +1617,8 @@ class StatementService:
 
         # Bates findings, scoped to the pages this statement actually occupies.
         # The document may hold several statements; a hole in another one's
-        # page range is not this statement's problem.
-        statement_pages = sorted({p for p in (_page_number(l.get("physical_page_number")) for l in lines) if p})
+        # page range is not this statement's problem. `statement_pages` was
+        # computed before the account lookup, which needs the same span.
         bates_gaps: list[str] = []
         if series is None:
             guessed = sum(1 for l in lines if (l.get("bates_number") or "").strip())

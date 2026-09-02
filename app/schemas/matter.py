@@ -6,7 +6,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from db.models.matter import DiscoveryLevel, MatterStatus, MatterType, RateCard
+from db.models.matter import (
+    ClientAlignment, DiscoveryLevel, MatterStatus, MatterType, RateCard,
+)
 
 
 class MatterCreateRequest(BaseModel):
@@ -50,6 +52,8 @@ class MatterUpdateRequest(BaseModel):
     matter_number: Optional[str] = None
     discovery_level: Optional[DiscoveryLevel] = None
     notes: Optional[str] = None
+    case_style: Optional[str] = None
+    client_alignment: Optional[ClientAlignment] = None
 
 
 class MatterResponse(BaseModel):
@@ -74,6 +78,8 @@ class MatterResponse(BaseModel):
     matter_number: Optional[str]
     discovery_level: Optional[DiscoveryLevel]
     notes: Optional[str]
+    case_style: Optional[str]
+    client_alignment: Optional[ClientAlignment]
 
 
 class MatterRateOverrideRequest(BaseModel):
