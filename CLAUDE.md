@@ -127,6 +127,8 @@ cyclone/
 │       ├── 028_transaction_soft_delete.sql    # deleted_at on transactions
 │       ├── 029_transaction_check_number.sql  # check_number on transactions
 │       ├── 030_matter_caption.sql          # matters.case_style, matters.client_alignment
+│       ├── 031_fis_category_settings.sql  # payment schedules per category, per person
+│       ├── 032_category_rules.sql        # keyword rules + category provenance on transactions
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -582,6 +584,17 @@ Anything in Cyclone that produces a table worth taking to court builds an
   the result (including the caption warnings) lives there. Two copies would
   drift, and the copy that quietly stopped showing warnings is the one nobody
   would notice.
+- **`Row` carries hierarchy**: `depth`, `heading`, `rule`. Added for the FIS,
+  where the indentation *is* the form — "Airfare" under "Travel" under
+  "Entertainment" is what the line means. A bare tuple still works everywhere it
+  did, because `Row` iterates, indexes, and measures as its cells, so no flat
+  report opts in to a hierarchy it does not have. Normalised in `__post_init__`
+  **and** at each renderer, because assigning `exhibit.rows` after construction
+  is reasonable and skips the former.
+- **`show_headers=False` for a form.** A Financial Information Statement prints
+  no column headings; its columns are self-evident. The CSV prints them anyway —
+  that file is data, and data without a header row is a puzzle. Markdown still
+  emits the separator row, or the block stops being a table.
 - **`footnotes` ride with the table**, not in `selection`. A reader meeting a
   dagger in a cell looks directly below the table for what it means; a mark
   whose explanation stayed on the screen is worse than no mark, because the
@@ -713,10 +726,129 @@ it does not.
 
 Covered by `tests/test_account_number.py`.
 
+### FIS Service (`fis_service.py`)
+
+Averages a person's income and expenses over a window of **whole months**, one
+line per category. Three things make it harder than dividing by the month count,
+and all three are the same failure: a document that looks complete and
+understates.
+
+- **Recurrence is arithmetic, not a label.** A payment made quarterly or
+  annually buys coverage past the window: $3,600 of property tax paid once in
+  January reads as $1,800/month over Jan-Feb and $1,200 over Jan-Mar. Same facts,
+  a different sworn figure every time the report re-runs — *"Counsel, which
+  figure did your client swear to?"* Sub-monthly lines are therefore computed
+  from the **trailing twelve months over twelve**, chosen over counting
+  occurrences because it also sums two tax parcels correctly (occurrence-
+  averaging halves them) and still finds a payment made *outside* the window,
+  where window-only arithmetic prints a blank line — as wrong as an inflated one.
+- **A liability account's sign is inverted, here and only here.** Everywhere
+  else an amount is signed by how it moves the balance the institution prints —
+  which is what makes `beginning + sum == ending` hold for every account type,
+  and which makes a credit card purchase POSITIVE because it raises the balance
+  owed. The FIS asks a different question: what did this household earn and
+  spend. Under the printed convention those answers are opposites for a card or
+  a loan, so $500 of groceries on debit (-500) and $500 on credit (+500)
+  **cancelled to nothing**, and a month lived on plastic reported as income.
+  `household_amount()` negates `credit_card` and `loan`; the stored value is
+  untouched, because reconciliation still needs the printed sign and the
+  transaction exhibit still shows what the statement shows. A card PAYMENT
+  inverts to positive under this rule, which is right only because the payment
+  must be excluded anyway — it is the same money as the withdrawal from
+  checking, and that is the double-count `include_in_fis` exists to prevent.
+- **The window is whole months, by construction.** There is no way to ask for a
+  part-month, because "average monthly" over three-and-a-bit months cannot be
+  explained on the stand.
+- **The denominator is a claim about coverage.** Dividing by eight months asserts
+  eight months of statements. `_coverage` checks that per account and reports the
+  missing ones by name; the warning travels onto the exhibit, not just the screen.
+- **Uncategorized money gets its own row** with a count, outside the form. A line
+  nobody filed appears in no category while the net still looks authoritative.
+- **`include_in_fis=False` categories are excluded but listed**, so an
+  interaccount transfer reads as set aside rather than lost.
+- **The net sums the ROUNDED lines**, so the printed column adds up to the total
+  beneath it. A net that differs from the visible column by three cents is a
+  question nobody wants asked on the stand.
+- **Compression is computed server-side** (`_mark_empty`), so the screen and the
+  exhibit cannot disagree about which lines a condensed statement shows. A
+  heading survives on its own figure *or* a surviving descendant — a transaction
+  can be filed straight to a heading, and dropping it would drop the money.
+- The scan is deliberately **uncapped**, unlike an export: an exhibit that stops
+  at five thousand rows says so on its face; an FIS that stopped would silently
+  understate every line.
+
+Payment schedules live in `fis_category_settings` and are **scoped to the person,
+not the matter** — a schedule is a fact about someone's finances, and the same
+client may have matters in several counties from successive marriages. Two
+layers, as with tags: no party set is the firm-wide default, a party row
+overrides it. `stated_annual_amount` is the attorney's own figure and wins over
+anything derived, signed like every other amount here because the reason to
+state it is that the transactions show none.
+
+Covered by `tests/test_fis_service.py` and `tests/test_fis_exhibit.py`.
+
+### Category Rule Service (`category_rule_service.py`)
+
+Files transactions by keyword at ingest, so a paralegal meets the ambiguous
+lines rather than the thousandth grocery run. Three rules make an automatic
+assignment defensible rather than merely convenient:
+
+- **A rule never overwrites a person.** It fills a line nobody categorized, or
+  replaces one the machine itself set. A category with `category_source` NULL
+  but a `category_id` is treated as human work — it almost certainly is,
+  predating the provenance columns, and guessing wrong in that direction
+  destroys real judgment.
+- **Every assignment records `category_source` and `category_rule_id`.** That is
+  what makes the review queue possible, a bad rule reversible in one query, and
+  *"why is this Household Supplies?"* answerable in one sentence.
+  `category_rule_id` is deliberately **not** a foreign key: the trail has to
+  outlive the rule, and it is most wanted right after somebody deletes the rule
+  that caused the problem they are investigating.
+- **Matching is punctuation- and case-blind**, both sides flattened to
+  uppercase alphanumerics, so `WALMART` finds `WAL-MART #1234`,
+  `WAL MART SUPERCENTER` and `WALMART.COM`. It is a **substring** match, so
+  `ATM WITHDRAWAL` finds `IN PERSON ATM WITHDRAWAL AT 5700 W PLANO PKY`.
+- **But flattening erases the word boundaries, so they are kept and enforced.**
+  A plain substring test on the flattened text matches `TARGET` inside
+  `STARGETTER LLC`, `ROSS` inside `CROSSROADS MARKET`, and `MARTS` inside
+  `WAL MART SUPERCENTER` — each a confident, silent mis-filing of evidence.
+  `prepare()` returns the offsets where words begin and end, and a match must
+  land on them at both ends. Every occurrence is tested, not just the first:
+  `MART` sits inside `SMART` at one offset and starts a real word at another.
+- Description and counterparty are searched **separately**, never concatenated,
+  so a match cannot straddle the two and invent a merchant nobody paid.
+
+Ordering is `(priority, -len(pattern), id)`. The length tiebreak is load-bearing:
+two rules at equal priority where one pattern contains the other — `WALMART` and
+`WALMART PHARMACY` — must try the longer first or the general rule wins every
+time and the specific one may as well not exist. `applies_to` constrains a rule
+by sign, because PAYROLL arriving is income and PAYROLL leaving is an expense.
+
+**This does not weaken the rule that extraction never sets `category_id`.** What
+that forbids is the *model's guess*, which is unexplainable and varies run to
+run. A keyword rule is firm-authored, deterministic, and answerable on the
+stand. The provenance is what keeps the distinction visible.
+
+**A failure to load rules never fails an ingest.** The statement is the evidence;
+filing it is a convenience laid on top, and the table may not exist yet on a node
+where 032 has not been applied. Logged at WARNING, because rules that quietly
+stopped firing would look exactly like rules nobody wrote.
+
+Covered by `tests/test_category_rules.py`.
+
 ### Transaction Search Service (`transaction_search_service.py`)
 
 Everything downstream of ingestion. Two classification axes, deliberately different mechanisms:
 
+- **`display_order` orders SIBLINGS, not the whole tree.** It was documented as
+  a key across the tree and that cannot express nesting: in the deployed chart
+  Utilities and Lawn/Landscaping both sit at 115 while Utilities' children start
+  at 120, so a flat sort put Electricity and Telephone *after* Pool and Other
+  Staff — indented under a branch they do not belong to, which reads as no
+  hierarchy at all on the FIS and in every picker. `get_ordered()` walks the
+  tree depth-first, siblings by `(display_order, id)`. Use it, not `get_all()`,
+  anywhere a person will read the result. A child whose parent is filtered out
+  is appended rather than dropped: it may still have transactions filed to it.
 - **Category** — one per transaction, from the firm-wide `transaction_categories` hierarchy. Drives the Financial Information Statement, where a line in two buckets double-counts. `include_in_fis` is what keeps a stock split off an income statement. Extraction never sets `category_id`; the free-text `category` column is the model's guess and is only ever a hint.
 - **Tags** — many-to-many, two layers in one table (`matter_id` NULL is firm-wide). Drives the Rule 1006 summaries. One line is routinely evidence in several exhibits at once.
 
@@ -950,7 +1082,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts |
 | Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
 | Export query results: CSV / MD / DOCX / PDF | ✅ Built — CSV is a clean extraction; the rest are full exhibits |
-| Financial Information Statement generation | ❌ Not started — the chart and `include_in_fis` are in place |
+| Financial Information Statement generation | ✅ Built — whole-month averaging, recurrence-aware, three-panel UI, four-format export. Chart of accounts still to be populated |
 | Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks |
 | Extraction completeness check | ✅ Built — extracted counts and totals vs the statement's own |
 | Bates detection + gap reporting | ✅ Built — pattern-based, per-page, with production-gap flags |
@@ -976,7 +1108,12 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Phase 2 conflict checking (pg_trgm) | ⏳ SQL ready, Python wiring uses substring match only |
 | Re-extract / delete a pleading | ❌ Not started — `raw_text` is stored, so re-extraction needs no re-upload |
 | Moving the intake PDF onto the matter at commit | ❌ Not started — lands at `intake/{job_id}.pdf`; `StorageService.move()` exists |
-| Client Portal (separate from staff) | ❌ Not started — `client` role exists but redirects to `/access-denied` |
+| Client Portal (separate from staff) | ❌ Not started — `client` role exists but redirects to `/access-denied`. Intended functions are listed below |
+| — Client re-categorizes their own transactions | ❌ Not started. **Depends on auditing category changes, which does not exist yet** (see below). Staff then review "changes since <date>" — the point is not convenience, it is catching a client who spreads gambling across a dozen categories or parks a disclosable transfer under an off-FIS bucket like Interaccount Transfers |
+| Audit trail for category changes | ⏳ **Half built.** 032 adds `category_source`, `category_rule_id`, and set/reviewed by-whom-and-when, and the rule engine writes them. `set_category` (the manual path) still writes nothing — that is the remaining half, and the one the client portal needs. Was: `set_category` writes `category_id` and nothing else — no flag, no `audit_log` row, no who/when/from/to. `correct_transaction` does all three for a field edit, and a category change is the bigger act: it moves money between lines of a sworn document. Needed before any client touches classification, and worth having for staff regardless |
+| Detail schedule behind the FIS (by category, with provenance) | ✅ Built — backend and export; UI not yet |
+| Auto-categorize by keyword rule | ✅ Built — at ingest and re-runnable; never overwrites a person |
+| Auto-categorize by similarity to a curated library | ❌ Not started — pg_trgm via RPC. Must record the matched exemplar, or the classification is unexplainable on the stand |
 | PDF bill generation (WeasyPrint) | ❌ Not started |
 | Stripe checkout / webhooks | ❌ Keys configured, no handler |
 | Email notifications | ❌ Not started |
@@ -984,6 +1121,65 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Client intake form / StepWizard | ❌ Not started |
 | Shared components (DataTable, ConfirmDialog) | ❌ Pages use inline tables |
 | Test suite | ❌ No unit or integration tests |
+
+
+---
+
+## 16a. Backlog — asked for, not yet built
+
+Kept here rather than in the status table because these are small, specific, and
+were asked for in passing while something else was being built. Roughly in the
+order they came up.
+
+### The FIS detail panel
+
+| # | Item |
+| - | ---- |
+| 1 | **Select-all checkbox** on the transaction list. Today every line is ticked individually. |
+| 2 | **Match the detail pane's scroll height to the left pane.** The statement scrolls with the window; the transaction list scrolls independently, which is right, but it is much shorter. Sizing it to the viewport would fix it. Tom: "if not, it's not that big of a deal." |
+| 3 | **"Expanded view" checkbox** in the transaction list header, showing account, Bates number and source filename beneath each line in grey. The data is already returned by the schedule endpoint. |
+
+### Reaching the source document — everywhere a transaction or statement is listed
+
+| # | Item |
+| - | ---- |
+| 4 | **Open the source statement PDF in a new tab** from any transaction row. A small icon with a "show statement" tooltip rather than making the whole row a target. The same on every statement list. `matter_pleadings` already does this: return a **signed URL as JSON** and let the browser navigate — a redirect or a plain link cannot carry the bearer token. `financial_account_statements.storage_path` is the handle. |
+| 5 | **Say so plainly when the PDF is gone.** A popup, not a dead link or a 404 page. Which raises the next item. |
+| 6 | **A retention policy for stored PDFs**, deliberately less generous than the eternal retention of transaction data — a statement's numbers stay long after the scan needs to. Plus a user-requested purge for data hygiene. Interacts with the matter-close workflow, which is also unbuilt. |
+
+### Tell it what to do, rather than learn another menu
+
+Make every UI function addressable as a **tool**, put a chat box at the foot of
+the app, and let an agent dispatch: *"Show an FIS in the Miller matter"*, *"Add
+Quic Trip to the auto-assignment list pointed at Transportation > Fuel."* Voice
+follows from the same plumbing, and demonstrates well. The real argument is that
+once you know what a system can do, saying it should be enough — a menu is a
+lookup table you have to memorize first.
+
+Most of the work is already done: every function here is a versioned endpoint
+with a Pydantic schema, and `llm_profiles.json` is the established way to name a
+task without naming a model. What is missing is a tool catalogue and a
+dispatcher.
+
+Three things to get right when it is built:
+
+| | |
+| - | - |
+| **Disambiguation asks, it never guesses.** | "Miller" may be three matters. Picking one and acting is the same class of confident-wrong this codebase spends its effort preventing — a wrong account number, a wrong institution, a rule that files the wrong merchant. A follow-up question costs a second. |
+| **Reads execute; writes confirm first.** | "Show me the FIS" can just happen. "Add Quic Trip to Fuel" is a **firm-wide** rule change touching every matter and every FIS built afterwards, and it should be shown before it is done. The `preview_merge` / `merge` split is the pattern already in the codebase. |
+| **The transcript is a record.** | If an agent re-files transactions or writes a rule, the existing provenance has to name it as the actor — not the staff member who spoke — or the audit trail says a person did something a machine did. `category_source` would need a fourth value. |
+
+### Larger, already noted elsewhere
+
+- Client portal, and the client re-categorization workflow that depends on
+  auditing category changes (§16).
+- `set_category` still writes no audit trail — the manual half of what 032
+  started (§16).
+- Similarity-based categorization against a curated library, once keyword rules
+  and review have produced one to curate from (§11).
+- OCR fallback for an account number on a single-page statement (§16).
+- Compliance matrix, and the `matter_preferences` table it needs (§16).
+- Large-transaction query with a dollar threshold (§16).
 
 ---
 
@@ -1083,6 +1279,17 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Interpolate a value into a caption before parsing its markup | The value gets read as markup — a blank rule of underscores becomes an underline marker. Parse, then substitute |
 | Print "None" onto a caption a matter cannot fill | Print the blank rule and return a warning. The attorney wants numbers before a cause number exists |
 | Hardcode the caption in a renderer | It is a template (`_SYSTEM_CAPTION`). Firms disagree about wording, never about how .docx stores bold |
+| Sum raw amounts on the FIS without checking the account type | A card purchase is positive by the printed convention. Debit and credit spending then cancel out. `household_amount()` |
+| Average a quarterly or annual bill over the report window | It buys coverage past the window, so the figure moves every time the report runs. Trailing twelve months over twelve |
+| Divide by "months that had activity" | An annual premium would read as its full amount per month. Always the window's months |
+| Sort a category tree by `display_order` alone | It orders siblings. Two branches sharing a number strands one branch's children under the other. Use `get_ordered()` |
+| Indent an `<option>` with ordinary spaces | HTML collapses them and the list renders flat. `lib/categories.categoryLabel` uses non-breaking spaces |
+| Let an FIS window include a part-month | "Average monthly" over three-and-a-bit months cannot be explained on the stand |
+| Let a rule overwrite a category a person set | Fill the empty and the machine-filed only. A tool that undoes judgment is worse than no tool |
+| Assign a category without recording what assigned it | The review queue, the undo, and the answer to "why is this here?" all depend on it |
+| Substring-match a flattened description without checking word boundaries | `TARGET` matches `STARGETTER LLC`. Flattening removes the separators that told you where words end |
+| Order rules by priority alone | `WALMART` and `WALMART PHARMACY` at equal priority: the longer pattern must be tried first or the specific rule never fires |
+| Let a rule-loading failure break an ingest | The statement is evidence; filing it is convenience. Log and carry on unfiled |
 | Format a CSV amount as currency | A spreadsheet reads `-$2,500.00` as text and will not sum it. Currency is for the exhibit formats; the CSV carries the raw figure |
 | Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |

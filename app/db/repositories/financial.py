@@ -12,6 +12,8 @@ from db.models.financial import (
     TransactionCategoryInDB,
     TransactionTagInDB,
     TransactionTagLinkInDB,
+    FisCategorySettingInDB,
+    TransactionCategoryRuleInDB,
 )
 from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
@@ -403,6 +405,49 @@ class TransactionCategoryRepository(BaseRepository[TransactionCategoryInDB]):
         condition: dict = {} if include_inactive else {"is_active": True}
         return self.select_many(condition=condition, sort_by="display_order")[0]
 
+    def get_ordered(self, include_inactive: bool = False) -> list[TransactionCategoryInDB]:
+        """
+        The chart in reading order: depth-first, siblings by display_order.
+
+        ``display_order`` was documented as a sort key across the whole tree,
+        and that cannot express nesting. In the firm's real chart Utilities and
+        Lawn/Landscaping both sit at 115 while Utilities' own children start at
+        120 — so a flat sort put Electricity, Gas and Telephone *after* Pool and
+        Other Staff, separated from the parent they belong to and indented under
+        whatever happened to precede them.
+
+        Walking the tree makes display_order mean "order among siblings", which
+        is the only thing a single integer can honestly mean, and it stops
+        mattering whether two branches happen to share a number.
+
+        Orphans — a child whose parent is inactive and filtered out — are
+        appended rather than dropped. A category with transactions filed under
+        it has to appear somewhere.
+        """
+        categories = self.get_all(include_inactive=include_inactive)
+
+        children: dict[Optional[int], list[TransactionCategoryInDB]] = {}
+        for category in categories:
+            children.setdefault(category.parent_id, []).append(category)
+        for group in children.values():
+            group.sort(key=lambda c: (c.display_order, c.id))
+
+        ordered: list[TransactionCategoryInDB] = []
+        seen: set[int] = set()
+
+        def walk(parent_id: Optional[int]) -> None:
+            for category in children.get(parent_id, []):
+                # A cycle from a bad edit would otherwise recurse forever.
+                if category.id in seen:
+                    continue
+                seen.add(category.id)
+                ordered.append(category)
+                walk(category.id)
+
+        walk(None)
+        ordered.extend(c for c in categories if c.id not in seen)
+        return ordered
+
     def expand(self, category_ids: list[int]) -> list[int]:
         """
         Widen a selection to include every descendant.
@@ -529,3 +574,147 @@ class TransactionTagLinkRepository(BaseRepository[TransactionTagLinkInDB]):
     def find_link(self, transaction_id: int, tag_id: int) -> Optional[TransactionTagLinkInDB]:
         """The existing link for a pair, if the tag is already applied."""
         return self.select_one(condition={"transaction_id": transaction_id, "tag_id": tag_id})
+
+
+class FisCategorySettingRepository(BaseRepository[FisCategorySettingInDB]):
+    """Payment schedules per category, in two layers: firm default and person."""
+
+    def __init__(self, manager: DatabaseManager):
+        super().__init__(manager, "fis_category_settings", FisCategorySettingInDB)
+
+    def resolve(
+        self,
+        client_id: Optional[int] = None,
+        opposing_party_id: Optional[int] = None,
+    ) -> dict[int, FisCategorySettingInDB]:
+        """
+        The effective schedule for every category, for one person.
+
+        Two queries rather than one: the firm-wide defaults, then that person's
+        overrides laid on top. Resolving in Python keeps the precedence rule in
+        one readable place — PostgREST cannot express "the narrower row wins"
+        without a view, and a view would put the rule somewhere nobody reading
+        this service would think to look.
+
+        :param client_id: Our client, when the statement is theirs.
+        :param opposing_party_id: The other side, when it is theirs.
+        :return: Category id to the setting that applies. Categories with no
+            setting at either layer are absent — the caller treats that as
+            "average over the window", which is what the FIS did before any of
+            this existed.
+        :rtype: dict[int, FisCategorySettingInDB]
+        """
+        effective: dict[int, FisCategorySettingInDB] = {}
+
+        firm = (
+            self.manager.client.table(self.table_name)
+            .select("*")
+            .is_("client_id", "null")
+            .is_("opposing_party_id", "null")
+            .execute()
+        )
+        for row in (firm.data or []):
+            record = FisCategorySettingInDB(**row)
+            effective[record.category_id] = record
+
+        if client_id is not None:
+            rows = self.select_many(condition={"client_id": client_id})[0]
+        elif opposing_party_id is not None:
+            rows = self.select_many(condition={"opposing_party_id": opposing_party_id})[0]
+        else:
+            rows = []
+
+        for record in rows:
+            effective[record.category_id] = record
+
+        return effective
+
+    def find_for(
+        self,
+        category_id: int,
+        client_id: Optional[int] = None,
+        opposing_party_id: Optional[int] = None,
+    ) -> Optional[FisCategorySettingInDB]:
+        """
+        One person's own row for one category, or None.
+
+        Deliberately does **not** fall back to the firm default: this is what an
+        editor reads before saving, and it must be able to tell "this person has
+        no setting" from "this person inherited one". Writing an inherited value
+        back would silently pin a default that should have kept moving with it.
+        """
+        condition: dict[str, Any] = {"category_id": category_id}
+        if client_id is not None:
+            condition["client_id"] = client_id
+        elif opposing_party_id is not None:
+            condition["opposing_party_id"] = opposing_party_id
+        else:
+            condition["client_id"] = None
+            condition["opposing_party_id"] = None
+        return self.select_one(condition=condition)
+
+
+class TransactionCategoryRuleRepository(BaseRepository[TransactionCategoryRuleInDB]):
+    """Keyword rules that file a transaction under a category."""
+
+    def __init__(self, manager: DatabaseManager):
+        super().__init__(manager, "transaction_category_rules", TransactionCategoryRuleInDB)
+
+    def active_for_matter(self, matter_id: int) -> list[TransactionCategoryRuleInDB]:
+        """
+        Every rule in force on a matter: the firm's, plus this matter's own.
+
+        Two queries rather than one. PostgREST cannot express "matter_id is null
+        OR matter_id = x" through a condition dict, and pushing it into a hand
+        built query would put the two-layer rule somewhere nobody reading the
+        service would look for it.
+
+        Ordering is the caller's job — priority alone is not enough, because two
+        rules at the same priority where one pattern contains the other have to
+        try the longer first.
+        """
+        firm = (
+            self.manager.client.table(self.table_name)
+            .select("*")
+            .is_("matter_id", "null")
+            .eq("is_active", True)
+            .execute()
+        )
+        rules = [TransactionCategoryRuleInDB(**row) for row in (firm.data or [])]
+        rules.extend(self.select_many(
+            condition={"matter_id": matter_id, "is_active": True},
+        )[0])
+        return rules
+
+    def for_scope(self, matter_id: Optional[int] = None) -> list[TransactionCategoryRuleInDB]:
+        """
+        One layer, for editing rather than matching.
+
+        An editor must be able to tell a firm-wide rule from this matter's, or
+        it would offer to change a rule that governs every other case.
+        """
+        if matter_id is None:
+            rows = (
+                self.manager.client.table(self.table_name)
+                .select("*")
+                .is_("matter_id", "null")
+                .execute()
+            )
+            return [TransactionCategoryRuleInDB(**row) for row in (rows.data or [])]
+        return self.select_many(condition={"matter_id": matter_id})[0]
+
+    def in_use(self, rule_id: int) -> int:
+        """
+        How many transactions this rule filed.
+
+        Asked before deleting one: the count is what tells you whether removing
+        it is tidying up or unpicking three hundred assignments.
+        """
+        result = (
+            self.manager.client.table("financial_account_transactions")
+            .select("id", count="exact")
+            .eq("category_rule_id", rule_id)
+            .limit(1)
+            .execute()
+        )
+        return result.count or 0

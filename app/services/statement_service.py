@@ -40,6 +40,7 @@ from db.repositories.financial import (
 )
 from db_handler import DatabaseManager
 from services import account_number_service, bates_service
+from services.category_rule_service import category_rule_service
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 
@@ -1329,6 +1330,22 @@ class StatementService:
         # would find the OTHER account's number and file this statement against
         # it, which is worse than leaving it unmatched.
         only_statement = len(extracted.get("statements") or []) == 1
+        # Loaded once for the document: the table is small but the round trip is
+        # not free, and the rules cannot change part-way through an import.
+        #
+        # A failure here must never fail the ingest. The statement is the
+        # evidence; filing it by keyword is a convenience laid on top, and the
+        # table may not even exist yet on a node where 032 has not been applied.
+        # Logged rather than swallowed, because rules that quietly stop firing
+        # would look exactly like rules nobody wrote.
+        try:
+            rules = category_rule_service.rules_for(manager, matter_id)
+        except Exception as e:  # noqa: BLE001 — convenience must not break evidence
+            LOGGER.warning(
+                "statement_service.commit: category rules unavailable (%s); "
+                "transactions will be ingested unfiled", str(e),
+            )
+            rules = []
         for raw_statement in (extracted.get("statements") or []):
             try:
                 results.append(self._commit_one(
@@ -1344,6 +1361,7 @@ class StatementService:
                     source_filename=source_filename,
                     claimed_pages=claimed_pages,
                     only_statement=only_statement,
+                    rules=rules,
                 ))
             except Exception as e:  # noqa: BLE001 — one bad statement must not lose the rest
                 LOGGER.error("statement_service.commit: statement failed: %s", str(e))
@@ -1379,6 +1397,7 @@ class StatementService:
         source_filename: Optional[str] = None,
         claimed_pages: Optional[list[dict[str, Any]]] = None,
         only_statement: bool = True,
+        rules: Optional[list[Any]] = None,
     ) -> dict[str, Any]:
         """Write one statement, its account, and its lines."""
         account_block = raw_statement.get("account") or {}
@@ -1773,16 +1792,30 @@ class StatementService:
                 location=line.get("location"),
                 amount=_money(line.get("amount")) or ZERO,
                 running_balance=_money(line.get("running_balance")),
-                # Extraction never sets category_id. The free-text `category`
-                # below is the model's guess and is only ever a hint to whoever
-                # categorizes; the FK is set by a human, because an FIS total is
-                # only as defensible as the person who can testify to it.
+                # Extraction still never sets category_id. The free-text
+                # `category` below is the model's guess and remains a hint only:
+                # it is unexplainable and varies run to run, which is no basis
+                # for a figure on a sworn document.
+                #
+                # A keyword RULE is a different thing and may set it, applied
+                # just below — written by the firm, deterministic, and
+                # answerable in a sentence ("the description contains WALMART").
+                # What keeps that defensible is the provenance travelling with
+                # it: category_source says a rule filed the line, and
+                # category_rule_id says which.
                 category=(line.get("category") or None),
                 physical_page_number=page,
                 bates_number=bates,
                 check_number=_check_number(line.get("check_number")),
                 flags=line.get("flags") or [],
-            ).model_dump())
+            ).model_dump() | category_rule_service.assignment(
+                category_rule_service.match(
+                    rules or [],
+                    line.get("description"),
+                    line.get("counterparty"),
+                    _money(line.get("amount")) or ZERO,
+                )
+            ))
 
         return {
             "status": status.value,

@@ -1,16 +1,17 @@
 # Cyclone — Entity Relationship Diagrams
 
-Eight subject-area diagrams. Split deliberately: one ERD covering every table is
+Nine subject-area diagrams. Split deliberately: one ERD covering every table is
 unreadable, and crossings grow much faster than node count. `MATTERS` and
 `STAFF` repeat across frames so each frame can stay small.
 
-Vetted line by line against the deployed schema after migration 030. Every
+Vetted line by line against the deployed schema after migration 032. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
 
-Migrations 029 and 030 add columns only — `transactions.check_number`, and
-`matters.case_style` / `matters.client_alignment` — so no relationship on any
-frame below changed.
+Migrations 029 and 030 added columns only. **031 and 032 add tables**, and with
+them the ninth frame: `fis_category_settings` records how often a category is
+paid, and `transaction_category_rules` files a transaction by keyword. 032 also
+puts categorization provenance on the transaction itself.
 
 ## Notation
 
@@ -21,7 +22,7 @@ frame below changed.
 | `}o` | zero or more |
 | `}\|` | one or more |
 | `--` | enforced by a foreign key |
-| `..` | reference with **no** foreign key (cross-database join) |
+| `..` | reference with **no** foreign key — a cross-database join, or a link deliberately left unenforced |
 
 Two rules that account for nearly every error worth catching:
 
@@ -244,6 +245,10 @@ erDiagram
     TRANSACTION_TAGS                    ||--o{ FINANCIAL_ACCOUNT_TRANSACTION_TAGS : "applied to"
     MATTERS                             |o--o{ TRANSACTION_TAGS : "scopes"
     STAFF                               ||--o{ FINANCIAL_ACCOUNT_TRANSACTION_TAGS : "tagged"
+    TRANSACTION_CATEGORIES              ||--o{ TRANSACTION_CATEGORY_RULES : "files into"
+    MATTERS                             |o--o{ TRANSACTION_CATEGORY_RULES : "scopes"
+    TRANSACTION_CATEGORY_RULES          |o..o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "filed (no FK)"
+    STAFF                               |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "filed or reviewed"
 ```
 
 Two axes over the same rows, deliberately built from different mechanisms
@@ -275,6 +280,70 @@ because they answer different questions. Added by migration 024.
 - The join table also carries a surrogate `id` on top of its natural
   `(transaction_id, tag_id)` key, purely so `BaseRepository`'s update and
   delete by id work unchanged.
+
+Migration 032 adds keyword rules and, first, the provenance that makes them
+answerable.
+
+- **`transaction_category_rules` uses the same two layers as tags**: `matter_id`
+  NULL is a firm-wide rule, a value scopes it to the client whose EXXON lines are
+  revenue rather than fuel. `applies_to` constrains a rule by sign, because
+  PAYROLL arriving is income and PAYROLL leaving is an expense.
+- **`category_rule_id` is drawn `..`, with no foreign key, on purpose.** A rule
+  is editable and deletable; the record that a rule filed this line has to
+  outlive it. The moment that record is most wanted is right after somebody
+  deletes the rule that caused the problem they are investigating — a real FK
+  would either block that delete or erase the evidence of it.
+- `category_source` says whether a person, a rule, or a similarity match filed
+  the line. NULL means never categorized, which is **not** the same as a person
+  deciding it belongs nowhere; that case is a human source with a null
+  `category_id`.
+- `category_reviewed_at` exists so reviewed-and-correct is distinguishable from
+  never-looked-at. Without it the work queue never empties, because confirming
+  an automatic assignment would leave no trace.
+- Both staff references are nullable and point at the same table, which is why
+  `STAFF |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS` appears once for two columns:
+  who filed it, and who later confirmed it.
+
+---
+
+## 9. The Financial Information Statement
+
+```mermaid
+erDiagram
+    TRANSACTION_CATEGORIES ||--o{ FIS_CATEGORY_SETTINGS : "scheduled by"
+    CLIENTS                |o--o{ FIS_CATEGORY_SETTINGS : "pays on this schedule"
+    OPPOSING_PARTIES       |o--o{ FIS_CATEGORY_SETTINGS : "pays on this schedule"
+    MATTERS                ||--o{ OPPOSING_PARTIES : "has"
+    CLIENTS                ||--o{ MATTERS : "brings"
+```
+
+How often a category is paid, which is arithmetic rather than decoration. The
+FIS reports an average **monthly** figure, and for anything paid less often than
+monthly, dividing the window total by the window's months is wrong in a way that
+moves: $3,600 of property tax paid once in January reads as $1,800/month over
+January–February and $1,200 over January–March. Same facts, a different sworn
+figure every time the report is re-run. Added by migration 031.
+
+- **Scoped to the person, not the matter.** A payment schedule is a fact about
+  someone's finances, not about a lawsuit — the same client may have matters in
+  several counties from successive marriages and pays property taxes on the same
+  schedule in all of them. Both party columns are nullable and at most one is
+  set; **neither set is the firm-wide default** ("property taxes are usually
+  annual"), the same two-layer shape as tags and category rules.
+- A `CHECK` enforces that `client_id` and `opposing_party_id` are never both
+  set. Three partial unique indexes give one row per category at each of the
+  three scopes — a plain unique index would not, because NULL is not distinct
+  from NULL.
+- **`opposing_parties` is itself matter-scoped**, so settings for the other side
+  stay with that matter while a client's follow the client across cases. That
+  falls out of the existing schema rather than being chosen here, and it is why
+  the two edges look symmetrical but do not behave alike.
+- `stated_annual_amount` is the attorney's own figure and overrides anything
+  derived. It is **signed**, like every other amount in the schema, because the
+  reason to state a figure at all is that the transactions do not show one — so
+  there is no sign to borrow.
+- No table records the statement itself. It is computed on demand from the
+  transactions as they stand, which is what lets re-filing one line change it.
 
 ---
 

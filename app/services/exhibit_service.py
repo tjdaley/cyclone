@@ -81,6 +81,36 @@ class Column:
     money: bool = False
 
 
+@dataclass(frozen=True)
+class Row:
+    """
+    One row of a table, with how it sits in a hierarchy.
+
+    Added for the Financial Information Statement, where the indentation **is**
+    the form: "Airfare" under "Travel" under "Entertainment" is not decoration,
+    it is what the line means. Everything that was a bare tuple of strings still
+    works — Row iterates, indexes, and measures as its cells — so a flat report
+    never has to know this exists.
+    """
+    cells: tuple[str, ...]
+    #: Indent level. 0 is a top-level heading on the form.
+    depth: int = 0
+    #: A section heading. Bold, and usually carrying no figure of its own —
+    #: though it may, because a transaction can be filed straight to a heading.
+    heading: bool = False
+    #: A total: ruled off above, and bold.
+    rule: bool = False
+
+    def __iter__(self):
+        return iter(self.cells)
+
+    def __len__(self) -> int:
+        return len(self.cells)
+
+    def __getitem__(self, index):
+        return self.cells[index]
+
+
 @dataclass
 class Exhibit:
     """
@@ -94,7 +124,7 @@ class Exhibit:
     name: str
     caption: tuple[Line, ...] = ()
     columns: tuple[Column, ...] = ()
-    rows: tuple[tuple[str, ...], ...] = ()
+    rows: tuple[Any, ...] = ()
     selection: tuple[tuple[str, str], ...] = ()
     summary: tuple[tuple[str, str], ...] = ()
     #: Marks that qualify individual rows — "† institution inferred". They ride
@@ -104,6 +134,30 @@ class Exhibit:
     footnotes: tuple[str, ...] = ()
     notice: str = NOTICE
     warnings: list[str] = field(default_factory=list)
+    landscape: bool = False
+    """
+    Turn the page sideways, in every format that has one.
+
+    A property of the document, not of the renderer: a seven-column schedule is
+    cramped in portrait whether it is a PDF or a .docx, while a two-column
+    statement is wrong sideways in both.
+    """
+    show_headers: bool = True
+    """
+    Whether the exhibit formats print a header row.
+
+    A Financial Information Statement has none — it is a form, and its columns
+    are self-evident. The CSV prints them regardless: that file is data, and
+    data without a header row is a puzzle.
+    """
+
+    def __post_init__(self) -> None:
+        # Callers may pass plain tuples. Normalising here means every renderer
+        # sees one shape and no report has to opt in to the hierarchy it does
+        # not use.
+        self.rows = tuple(
+            row if isinstance(row, Row) else Row(tuple(row)) for row in self.rows
+        )
 
     @property
     def filename_stem(self) -> str:
@@ -265,6 +319,17 @@ def caption_lines(
     return tuple(lines), warnings
 
 
+def _as_rows(rows: tuple[Any, ...]) -> tuple[Row, ...]:
+    """
+    Every row as a Row, whatever the caller handed over.
+
+    ``__post_init__`` covers construction, but assigning ``exhibit.rows`` after
+    the fact is reasonable and skips it. Normalising where the rows are read
+    means the invariant holds however they arrived.
+    """
+    return tuple(row if isinstance(row, Row) else Row(tuple(row)) for row in rows)
+
+
 def _plain(line: Line) -> str:
     return "".join(run.text for run in line.runs)
 
@@ -318,7 +383,9 @@ def to_csv(exhibit: Exhibit) -> bytes:
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, lineterminator="\r\n")
     writer.writerow([column.heading for column in exhibit.columns])
-    writer.writerows(exhibit.rows)
+    # Cells only. Depth is presentation, and leading whitespace in a CSV cell is
+    # something every reader then has to strip.
+    writer.writerows(row.cells for row in _as_rows(exhibit.rows))
     return buffer.getvalue().encode("utf-8-sig")
 
 
@@ -340,13 +407,25 @@ def to_markdown(exhibit: Exhibit) -> bytes:
     # exhibit's substance is the evidence, and how it was selected is the
     # methodology note a reader turns to afterwards.
     if exhibit.columns:
-        out.append("| " + " | ".join(c.heading for c in exhibit.columns) + " |")
+        # The separator row is required even when the headings are blank:
+        # without it the block is not a table, just lines with pipes in them.
+        headings = [c.heading if exhibit.show_headers else "" for c in exhibit.columns]
+        out.append("| " + " | ".join(headings) + " |")
         out.append("| " + " | ".join("---:" if c.numeric else "---" for c in exhibit.columns) + " |")
-        for row in exhibit.rows:
-            out.append("| " + " | ".join(
+        for row in _as_rows(exhibit.rows):
+            cells = [
                 _md_cell(_cell(value, column))
-                for value, column in zip(row, exhibit.columns)
-            ) + " |")
+                for value, column in zip(row.cells, exhibit.columns)
+            ]
+            if cells:
+                # Non-breaking spaces: a markdown table parser strips ordinary
+                # leading whitespace, and here the indentation is the form.
+                cells[0] = ("  " * row.depth) + cells[0]
+                if row.heading or row.rule:
+                    cells[0] = "**%s**" % cells[0]
+                    if len(cells) > 1 and cells[-1].strip():
+                        cells[-1] = "**%s**" % cells[-1]
+            out.append("| " + " | ".join(cells) + " |")
         out.append("")
 
     if exhibit.footnotes:
@@ -456,13 +535,51 @@ def _docx_repeat_header(table: Any) -> None:
     properties.append(repeat)
 
 
+def _docx_light_borders(table: Any) -> None:
+    """
+    Horizontal hairlines only.
+
+    The Table Grid style boxes every cell, which makes an exhibit read as a
+    spreadsheet and competes with the figures for attention. A printed financial
+    table separates its rows and leaves the columns to alignment.
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    properties = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge, style, size, colour in (
+        ("top", "none", 0, "auto"),
+        ("left", "none", 0, "auto"),
+        ("bottom", "none", 0, "auto"),
+        ("right", "none", 0, "auto"),
+        ("insideH", "single", 2, "D8D8D8"),   # 2 eighths of a point
+        ("insideV", "none", 0, "auto"),
+    ):
+        element = OxmlElement("w:%s" % edge)
+        element.set(qn("w:val"), style)
+        element.set(qn("w:sz"), str(size))
+        element.set(qn("w:color"), colour)
+        borders.append(element)
+    properties.append(borders)
+
+
 def to_docx(exhibit: Exhibit) -> bytes:
     """The exhibit as a Word document, caption centred and table ruled."""
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Pt
+    from docx.shared import Inches, Pt
 
     document = Document()
+
+    if exhibit.landscape:
+        # Word needs both: the flag and the swapped dimensions. Setting the
+        # orientation alone leaves a portrait-shaped page labelled landscape.
+        from docx.enum.section import WD_ORIENT
+
+        section = document.sections[0]
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
 
     footer = document.sections[0].footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -483,19 +600,26 @@ def to_docx(exhibit: Exhibit) -> bytes:
             document.add_paragraph()
 
     if exhibit.columns:
-        table = document.add_table(rows=1, cols=len(exhibit.columns))
+        table = document.add_table(rows=1 if exhibit.show_headers else 0,
+                                   cols=len(exhibit.columns))
         table.style = "Table Grid"
-        for cell, column in zip(table.rows[0].cells, exhibit.columns):
-            cell.text = ""
-            run = cell.paragraphs[0].add_run(column.heading)
-            run.bold = True
-        _docx_repeat_header(table)
-        for row in exhibit.rows:
+        _docx_light_borders(table)
+        if exhibit.show_headers:
+            for cell, column in zip(table.rows[0].cells, exhibit.columns):
+                cell.text = ""
+                run = cell.paragraphs[0].add_run(column.heading)
+                run.bold = True
+            _docx_repeat_header(table)
+        for row in _as_rows(exhibit.rows):
             cells = table.add_row().cells
-            for cell, value, column in zip(cells, row, exhibit.columns):
+            for index, (cell, value, column) in enumerate(
+                    zip(cells, row.cells, exhibit.columns)):
                 cell.text = ""
                 paragraph = cell.paragraphs[0]
-                paragraph.add_run(_cell(value, column))
+                drawn = paragraph.add_run(_cell(value, column))
+                drawn.bold = row.heading or row.rule
+                if index == 0 and row.depth:
+                    paragraph.paragraph_format.left_indent = Inches(0.2 * row.depth)
                 if column.numeric:
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         document.add_paragraph()
@@ -537,9 +661,11 @@ def to_docx(exhibit: Exhibit) -> bytes:
 _PDF_STYLE = ("<style>"
               "body{font-family:serif;font-size:10pt}"
               "table{width:100%;border-collapse:collapse}"
-              "th,td{border:1px solid #666;padding:3px;font-size:8.5pt;text-align:left}"
-              "th{background:#eee;font-weight:bold}"
+              "th,td{border:0;border-bottom:0.5px solid #d8d8d8;padding:3.5px 4px;"
+              "font-size:8.5pt;text-align:left}"
+              "th{border-bottom:1px solid #999;font-weight:bold}"
               "td.n,th.n{text-align:right}"
+              "td.r{border-top:1px solid #666;border-bottom:0}"
               "p{margin:2pt 0}"
               ".c{text-align:center}"
               ".notice{font-size:7.5pt;font-style:italic;color:#333}"
@@ -577,6 +703,10 @@ def _pdf_list(title: str, entries: tuple[tuple[str, str], ...]) -> str:
 
 
 def _pdf_header_row(exhibit: Exhibit) -> str:
+    # A form has no column headings; its columns are self-evident. Returning an
+    # empty string leaves each per-page chunk table headerless too.
+    if not exhibit.show_headers:
+        return ""
     return "<tr>%s</tr>" % "".join(
         '<th class="n">%s</th>' % _esc(c.heading) if c.numeric else "<th>%s</th>" % _esc(c.heading)
         for c in exhibit.columns
@@ -585,13 +715,19 @@ def _pdf_header_row(exhibit: Exhibit) -> str:
 
 def _pdf_rows(exhibit: Exhibit) -> list[str]:
     rows = []
-    for row in exhibit.rows:
-        cells = "".join(
-            '<td class="n">%s</td>' % _esc(_cell(value, column)) if column.numeric
-            else "<td>%s</td>" % _esc(_cell(value, column))
-            for value, column in zip(row, exhibit.columns)
-        )
-        rows.append("<tr>%s</tr>" % cells)
+    for row in _as_rows(exhibit.rows):
+        drawn = []
+        for index, (value, column) in enumerate(zip(row.cells, exhibit.columns)):
+            text = _esc(_cell(value, column))
+            if row.heading or row.rule:
+                text = "<b>%s</b>" % text
+            classes = "n" if column.numeric else ""
+            if row.rule:
+                classes = (classes + " r").strip()
+            style = (' style="padding-left:%dpt"' % (4 + row.depth * 12)
+                     if index == 0 and row.depth else "")
+            drawn.append('<td class="%s"%s>%s</td>' % (classes, style, text))
+        rows.append("<tr>%s</tr>" % "".join(drawn))
     return rows
 
 
@@ -616,7 +752,7 @@ def to_pdf(exhibit: Exhibit) -> bytes:
     """
     import pymupdf
 
-    page_rect = pymupdf.paper_rect("letter")
+    page_rect = pymupdf.paper_rect("letter-l" if exhibit.landscape else "letter")
     # One-inch margins, with the bottom pulled up to leave the footer its band.
     content = page_rect + (72, 72, -72, -90)
     header = _pdf_header_row(exhibit)

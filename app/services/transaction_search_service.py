@@ -17,7 +17,7 @@ scope**. Transactions carry no matter_id, so every query resolves the matter's
 accounts first. That is not just plumbing — it is what stops a crafted request
 from reaching another matter's records.
 """
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -470,6 +470,40 @@ class TransactionSearchService:
             "transaction_search.set_category: matter=%s count=%d category=%s",
             matter_id, len(transaction_ids), category_id,
         )
+        return len(transaction_ids)
+
+    def mark_reviewed(
+        self,
+        manager: DatabaseManager,
+        matter_id: int,
+        transaction_ids: list[int],
+        staff_id: int,
+    ) -> int:
+        """
+        Record that a person checked an automatic assignment and let it stand.
+
+        Confirming is a decision, and it needs its own mark: without one,
+        reviewed-and-correct is indistinguishable from never-looked-at and the
+        queue never empties. It also stops a later rule change silently
+        reversing a judgment somebody already made.
+
+        The category is untouched — agreeing with a rule is not the same act as
+        filing a line, and overwriting the source would erase the fact that a
+        rule got it right, which is the evidence that the rules are working.
+
+        :return: How many rows were marked.
+        :rtype: int
+        :raises ValueError: If any transaction is not on this matter.
+        """
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        now = datetime.now(timezone.utc)
+        for transaction_id in self._verify_on_matter(manager, matter_id, transaction_ids):
+            transaction_repo.update(transaction_id, {
+                "category_reviewed_at": now,
+                "category_reviewed_by_staff_id": staff_id,
+            })
+        LOGGER.info("transaction_search.mark_reviewed: matter=%s count=%d staff=%s",
+                    matter_id, len(transaction_ids), staff_id)
         return len(transaction_ids)
 
     # ── Tagging ───────────────────────────────────────────────────────────

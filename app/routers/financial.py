@@ -45,6 +45,7 @@ from schemas.financial import (
     TransactionCategoryWriteRequest,
     TransactionCorrectionResponse,
     TransactionDeleteRequest,
+    ReviewRequest,
     TransactionResponse,
     TransactionExportRequest,
     TransactionSearchRequest,
@@ -666,7 +667,7 @@ def list_categories(
     Not matter-scoped on purpose: a Financial Information Statement is only
     comparable across cases when every case buckets to the same chart.
     """
-    return _decorate(TransactionCategoryRepository(manager).get_all(include_inactive=include_inactive))
+    return _decorate(TransactionCategoryRepository(manager).get_ordered(include_inactive=include_inactive))
 
 
 @router.post("/transaction-categories", response_model=TransactionCategoryResponse, status_code=201)
@@ -901,6 +902,30 @@ def search_transactions(
         offset=body.offset,
     )
     return TransactionSearchResponse(**result)
+
+
+@router.post("/matters/{matter_id}/transactions/review", response_model=BulkResultResponse)
+def review_transactions(
+    matter_id: int,
+    body: ReviewRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> BulkResultResponse:
+    """
+    Confirm automatic assignments a person has checked and agreed with.
+
+    Leaves the category alone. Agreeing with a rule is not the same act as
+    filing a line, and rewriting the source would erase the fact that the rule
+    got it right — which is the evidence that the rules are working.
+    """
+    try:
+        changed = transaction_search_service.mark_reviewed(
+            manager, matter_id, body.transaction_ids, _staff_id(request, manager),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return BulkResultResponse(updated=changed)
 
 
 @router.post("/matters/{matter_id}/transactions/export")

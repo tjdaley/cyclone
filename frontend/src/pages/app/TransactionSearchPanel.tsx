@@ -5,6 +5,7 @@ import {
   exportTransactions,
 } from '../../lib/api'
 import { money, isNegative, formatDate } from '../../lib/money'
+import { categoryLabel } from '../../lib/categories'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import ExportButtons from '../../components/ExportButtons'
 import TagManager, { tagClass } from './TagManager'
@@ -221,7 +222,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
             <option value="none">Uncategorized</option>
             {categories.map(c => (
               <option key={c.id} value={c.id}>
-                {'  '.repeat(c.depth)}{c.description}{c.include_in_fis ? '' : ' (not on FIS)'}
+                {categoryLabel(c, { markOffStatement: true })}
               </option>
             ))}
           </select>
@@ -351,7 +352,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
             <option value="none">— clear category —</option>
             {categories.map(c => (
               <option key={c.id} value={c.id}>
-                {'  '.repeat(c.depth)}{c.description}
+                {categoryLabel(c)}
               </option>
             ))}
           </select>

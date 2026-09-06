@@ -11,6 +11,7 @@ import {
 import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
 import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
+import FisPanel from './FisPanel'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
   Matter, OpposingParty,
@@ -51,12 +52,13 @@ const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
  * and nothing else: importing is an event, curating accounts is bookkeeping,
  * and searching is analysis.
  */
-type Tab = 'import' | 'accounts' | 'transactions'
+type Tab = 'import' | 'accounts' | 'transactions' | 'fis'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'import', label: 'Import' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'transactions', label: 'Transactions' },
+  { id: 'fis', label: 'FIS' },
 ]
 
 const OWNERSHIPS: AccountOwnership[] = [
@@ -708,6 +710,8 @@ export default function MatterFinancialsPage() {
       {tab === 'transactions' && (
         <TransactionSearchPanel matterId={matterId} accounts={accounts} />
       )}
+
+      {tab === 'fis' && <FisPanel matterId={matterId} accounts={accounts} />}
 
       {tab === 'accounts' && (<>
       {/* ── Accounts ── */}

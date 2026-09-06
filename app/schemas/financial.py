@@ -442,6 +442,11 @@ class BulkTagRequest(BaseModel):
     remove: bool = Field(default=False, description="Remove the tag instead of applying it")
 
 
+class ReviewRequest(BaseModel):
+    """Confirm that automatic assignments were checked and left standing."""
+    transaction_ids: list[int] = Field(..., min_length=1)
+
+
 class BulkResultResponse(BaseModel):
     changed: int = Field(..., description="Rows actually altered; re-applying an existing tag is a no-op")
 

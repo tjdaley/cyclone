@@ -81,6 +81,20 @@ class StatementReviewStatus(str, Enum):
     rejected = "rejected"      # Bad extraction, discarded so the PDF can be re-run
 
 
+class CategorySource(str, Enum):
+    """
+    Who filed a transaction under its category.
+
+    None of these is a quality judgment; they are provenance. A rule assignment
+    is not worse than a human one, it is *answerable differently* — "the
+    description contains WALMART" rather than "a paralegal read it" — and a
+    reviewer needs to know which answer they are relying on.
+    """
+    human = "human"
+    rule = "rule"
+    similarity = "similarity"
+
+
 class DateProvenance(str, Enum):
     """Whether a date was printed on the statement or derived from context."""
     printed = "printed"
@@ -245,6 +259,25 @@ class FinancialAccountTransaction(BaseModel):
         default_factory=list[dict[str, Any]],
         description="Per-line findings: YEAR_INFERRED, LOCATION_INFERRED, SIGN_ASSUMED",
     )
+    category_source: Optional[CategorySource] = Field(
+        default=None,
+        description="Who filed this line: human, rule, or similarity. None means it has never "
+                    "been categorized — which is not the same as a person deciding it belongs "
+                    "nowhere, and that case is a human source with a null category_id",
+    )
+    category_rule_id: Optional[int] = Field(
+        default=None,
+        description="The rule that filed it. Not a foreign key on purpose: the trail must "
+                    "outlive the rule, including when the rule is deleted for being wrong",
+    )
+    category_set_by_staff_id: Optional[int] = Field(default=None)
+    category_set_at: Optional[datetime] = Field(default=None)
+    category_reviewed_by_staff_id: Optional[int] = Field(default=None)
+    category_reviewed_at: Optional[datetime] = Field(
+        default=None,
+        description="When a person confirmed an automatic assignment. Reviewed-and-correct has "
+                    "to be distinguishable from never-looked-at or the queue never empties",
+    )
     deleted_at: Optional[datetime] = Field(
         default=None,
         description="Set when a person drops the line from the statement. Hidden everywhere by "
@@ -351,4 +384,169 @@ class TransactionTagLink(BaseModel):
 class TransactionTagLinkInDB(TransactionTagLink):
     id: int = Field(..., description="Primary key, set by the database")
     created_at: datetime = Field(..., description="Set by the database")
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ── The Financial Information Statement ──────────────────────────────────────
+#
+# The FIS reports an average MONTHLY figure over a window of whole months. For
+# anything paid monthly that is the window total over the window's length. For
+# anything paid less often it is wrong, and wrong in a way that moves: $3,600 of
+# property tax paid once in January reads as $1,800/month over a Jan–Feb window
+# and $1,200/month over Jan–Mar. Same facts, different sworn figure every time
+# the report is re-run.
+
+
+class FisRecurrence(str, Enum):
+    """
+    How often money moves in a category, for one person.
+
+    Splits the averaging in two. At monthly or more often, the window total
+    already spans the right number of payments and is divided by the window's
+    months. Less often than monthly, the payment buys coverage that extends past
+    the window, so the figure comes from the trailing twelve months over twelve.
+
+    ``irregular`` computes like monthly and exists for the legend: genuinely
+    unscheduled spending — medical, repairs — is honestly described as incurred
+    rather than as a schedule it does not keep.
+    """
+    weekly = "weekly"
+    biweekly = "biweekly"
+    semimonthly = "semimonthly"
+    monthly = "monthly"
+    quarterly = "quarterly"
+    semiannual = "semiannual"
+    annual = "annual"
+    irregular = "irregular"
+
+    @property
+    def periods_per_year(self) -> Optional[int]:
+        """How many times a year money moves. None for ``irregular``."""
+        return _PERIODS_PER_YEAR[self]
+
+    @property
+    def is_sub_monthly(self) -> bool:
+        """True when a payment covers more than the month it falls in."""
+        periods = self.periods_per_year
+        return periods is not None and periods < 12
+
+    @property
+    def legend(self) -> str:
+        """How the FIS describes the line, so a witness can explain it."""
+        return _RECURRENCE_LEGEND[self]
+
+
+_PERIODS_PER_YEAR: dict[FisRecurrence, Optional[int]] = {
+    FisRecurrence.weekly: 52,
+    FisRecurrence.biweekly: 26,
+    FisRecurrence.semimonthly: 24,
+    FisRecurrence.monthly: 12,
+    FisRecurrence.quarterly: 4,
+    FisRecurrence.semiannual: 2,
+    FisRecurrence.annual: 1,
+    FisRecurrence.irregular: None,
+}
+
+# Spelled out rather than derived from the enum name: these are printed on a
+# document a witness reads aloud, and "paid semiannually" is not how anyone
+# says it.
+_RECURRENCE_LEGEND: dict[FisRecurrence, str] = {
+    FisRecurrence.weekly: "paid weekly",
+    FisRecurrence.biweekly: "paid every two weeks",
+    FisRecurrence.semimonthly: "paid twice monthly",
+    FisRecurrence.monthly: "paid monthly",
+    FisRecurrence.quarterly: "paid quarterly",
+    FisRecurrence.semiannual: "paid twice yearly",
+    FisRecurrence.annual: "paid annually",
+    FisRecurrence.irregular: "as incurred",
+}
+
+
+class FisCategorySetting(BaseModel):
+    """
+    One person's payment schedule for one category.
+
+    **Scoped to the person, not the matter.** A schedule is a fact about
+    somebody's finances, not about a lawsuit — the same client may have matters
+    in several counties from successive marriages and pays property taxes on the
+    same schedule in all of them. Two layers, as with tags: neither party set is
+    the firm-wide default, and a row naming a party overrides it.
+    """
+    client_id: Optional[int] = Field(
+        default=None,
+        description="Our client this applies to. None with opposing_party_id None means "
+                    "the firm-wide default",
+    )
+    opposing_party_id: Optional[int] = Field(
+        default=None,
+        description="The other side this applies to. Matter-scoped, because opposing_parties "
+                    "is — so these stay with the matter while a client's follow the client",
+    )
+    category_id: int = Field(..., description="FK to transaction_categories")
+    recurrence: FisRecurrence = Field(
+        default=FisRecurrence.monthly,
+        description="How often money moves in this category. Drives the averaging and the "
+                    "legend printed beside the line",
+    )
+    stated_annual_amount: Optional[Decimal] = Field(
+        default=None,
+        description="The attorney's own annual figure, which wins over anything derived. "
+                    "Needed when the production does not reach back a full year: the "
+                    "statements can show what was paid, but only a person can say what the "
+                    "bill is",
+    )
+    note: Optional[str] = Field(
+        default=None,
+        description="Extra legend beside the line when the recurrence alone does not explain "
+                    "it — 'escrowed with the mortgage', 'paid by employer'",
+    )
+
+
+class FisCategorySettingInDB(FisCategorySetting):
+    id: int = Field(..., description="Primary key, set by the database")
+    created_at: datetime = Field(..., description="Set by the database")
+    updated_at: Optional[datetime] = Field(default=None)
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ── Filing by rule ───────────────────────────────────────────────────────────
+
+
+class TransactionCategoryRule(BaseModel):
+    """
+    A keyword that files a transaction under a category.
+
+    Two layers, as with tags: ``matter_id`` of None is a firm-wide rule; a value
+    scopes it to one case, for the client whose EXXON lines are revenue rather
+    than fuel.
+    """
+    matter_id: Optional[int] = Field(
+        default=None,
+        description="None for a firm-wide rule; a matter id scopes it to that case",
+    )
+    pattern: str = Field(
+        ...,
+        min_length=3,
+        description="Matched case- and punctuation-insensitively against the description and "
+                    "the counterparty, so WALMART finds 'WAL-MART #1234' and 'WALMART.COM'",
+    )
+    category_id: int = Field(..., description="Where a matching line is filed")
+    priority: int = Field(
+        default=100,
+        description="Lower fires first. WALMART PHARMACY must beat WALMART, or medical "
+                    "spending lands in household supplies",
+    )
+    applies_to: str = Field(
+        default="any",
+        description="any | credit | debit. PAYROLL arriving is income; PAYROLL leaving is a "
+                    "business expense",
+    )
+    is_active: bool = Field(default=True, description="Retire a rule without losing its history")
+    note: Optional[str] = Field(default=None, description="Why the rule exists, for whoever inherits it")
+
+
+class TransactionCategoryRuleInDB(TransactionCategoryRule):
+    id: int = Field(..., description="Primary key, set by the database")
+    created_at: datetime = Field(..., description="Set by the database")
+    updated_at: Optional[datetime] = Field(default=None)
     model_config = ConfigDict(from_attributes=True)
