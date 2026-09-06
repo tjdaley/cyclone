@@ -7,6 +7,7 @@ image and uses the LLM's multimodal vision capability for OCR.
 """
 import base64
 import io
+import re
 import time
 from typing import Optional
 from PIL import ImageFile, Image
@@ -26,6 +27,22 @@ _MIN_TEXT_LENGTH = 20  # Pages shorter than this are treated as image-only
 # them routinely.
 _CONTROL_CHARS = {c: None for c in range(0x20) if c not in (0x09, 0x0A, 0x0D)}
 _CONTROL_CHARS[0x7F] = None
+
+
+# A statement's own pagination, restarted. Two spellings cover nearly every
+# statement seen so far: "Page 1 of 8", and a bare "Page 1".
+#
+# THE WORD BOUNDARY IS THE WHOLE PATTERN. Without it, "PAGE 1" also matches
+# inside "PAGE 10", "PAGE 19" and "PAGE 142" — so a single long statement reads
+# as dozens of first pages and every upload gets warned about. `\b` after the
+# digit fails on "10" because a digit is a word character, which is exactly the
+# distinction wanted.
+_PAGE_ONE = re.compile(r"\bpage\s+1\b(?!\d)", re.I)
+
+# The most pages a survey reads. It is a warning, not an extraction: a document
+# past this is already far beyond the threshold that triggers the warning, so
+# reading more would change nothing but the number quoted.
+_SURVEY_CAP = 250
 
 
 def _sanitize(text: str) -> str:
@@ -67,6 +84,57 @@ class PDFService:
     rendered to 300 DPI, enhanced for contrast/sharpness, and sent to the
     LLM's vision endpoint for extraction.
     """
+
+    def survey(self, pdf_bytes: bytes, max_pages: int = _SURVEY_CAP) -> dict:
+        """
+        How long a PDF is, and how many statements it looks like it holds.
+
+        Cheap on purpose: the page count is free and the text comes straight off
+        the text layer with **no OCR fallback**, so this runs inside the upload
+        request where `extract_text` could not. An image-only page yields
+        nothing and is simply not counted, which is the honest answer — the
+        survey is a warning, and a warning that had to render pages would cost
+        more than the mistake it prevents.
+
+        The signal is the page-1 marker. Almost every statement prints its own
+        pagination, and a document holding twenty-four months restarts at one
+        twenty-four times; nothing else on a statement behaves that way. Counted
+        by **page**, not by occurrence — a statement that prints "Page 1 of 8"
+        in both the header and the footer is still one statement.
+
+        :param max_pages: Stop reading after this many. A survey is not an
+            extraction, and the count it reports is a lower bound anyway.
+        :return: ``{"pages", "scanned", "first_pages"}`` — total pages, pages
+            actually read, and how many of them look like a statement's first.
+        :rtype: dict
+        """
+        import pymupdf
+
+        try:
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        except Exception as e:
+            LOGGER.error("pdf_service.survey: failed to open PDF: %s", str(e))
+            raise ValueError("Could not open PDF — file may be corrupted or password-protected") from e
+
+        try:
+            total = doc.page_count
+            scanned = min(total, max(1, max_pages))
+            first_pages = 0
+            for index in range(scanned):
+                try:
+                    text = doc.load_page(index).get_text() or ""
+                except Exception:  # noqa: BLE001 — one bad page must not fail a warning
+                    continue
+                if _PAGE_ONE.search(text):
+                    first_pages += 1
+        finally:
+            doc.close()
+
+        LOGGER.info(
+            "pdf_service.survey: %d page(s), read %d, %d look like a statement's first page",
+            total, scanned, first_pages,
+        )
+        return {"pages": total, "scanned": scanned, "first_pages": first_pages}
 
     def extract_text(self, pdf_bytes: bytes, page_markers: bool = False) -> str:
         """

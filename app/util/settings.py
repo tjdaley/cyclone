@@ -104,6 +104,18 @@ class Settings(BaseSettings):
     # Background job worker. Short, because somebody is watching a spinner
     # while an intake extraction runs.
     job_poll_interval_seconds: int = 3
+    #: How many background jobs one worker runs at once.
+    #:
+    #: Statement ingestion is almost entirely waiting on an LLM, so a worker
+    #: running them one at a time is idle nearly all of it. Five is a bribe with
+    #: a purpose: a production split into a file per month finishes in about the
+    #: time the slowest five take, where before it was the sum of all of them.
+    #:
+    #: Raising it trades against vendor rate limits — a 429 fails the candidate
+    #: over to the next model in the chain rather than waiting, so too much
+    #: concurrency quietly changes which model reads the evidence. Lower it
+    #: before raising it.
+    job_concurrency: int = 5
 
     # CRM agent poller
     lead_poll_interval_seconds: int = 60

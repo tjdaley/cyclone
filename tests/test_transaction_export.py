@@ -16,7 +16,7 @@ from decimal import Decimal
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
 from db.models.matter import ClientAlignment  # noqa: E402
-from services.exhibit_service import to_csv, to_markdown  # noqa: E402
+from services.exhibit_service import to_csv, to_markdown, to_pdf  # noqa: E402
 from services.transaction_search_service import TransactionSearchService  # noqa: E402
 
 FAILURES: list[str] = []
@@ -90,6 +90,38 @@ class FakeTagRepo:
         return [FakeTag(3, "Waste")]
 
 
+class FakeStatement:
+    """One ingested statement, as the sources block reads it."""
+
+    def __init__(self, id, job, filename, first=None, last=None):
+        self.id = id
+        self.source_job_id = job
+        self.storage_path = "intake/%s.pdf" % job
+        self.extraction = {
+            "source_filename": filename,
+            "bates_first": first,
+            "bates_last": last,
+        }
+
+
+class FakeStatementRepo:
+    def __init__(self, statements):
+        self._statements = statements
+
+    def get_by_matter(self, matter_id):
+        return self._statements
+
+
+# Two statements out of one upload, and a second upload — the shape that makes
+# grouping matter, because a combined statement holds one per account.
+STATEMENTS = [
+    FakeStatement(1, "job-aaaa1111", "Salmons_FFB_2023.pdf", "KF000100", "KF000148"),
+    FakeStatement(2, "job-aaaa1111", "Salmons_FFB_2023.pdf", "KF000149", "KF000160"),
+    FakeStatement(3, "job-bbbb2222", "Salmons_BOT_2023.pdf", "KF000161", "KF000175"),
+    FakeStatement(4, "job-cccc3333", "unstamped_scan.pdf", None, None),
+]
+
+
 class StubService(TransactionSearchService):
     """Replaces the database read with a fixed result set, paged the same way."""
 
@@ -104,34 +136,37 @@ class StubService(TransactionSearchService):
         return {"total": len(self.rows), "items": window, "sum_amount": "0.00"}
 
 
-def row(n, amount, description="Transfer to XXX4070", date="2023-03-04", category_id=None):
+def row(n, amount, description="Transfer to XXX4070", date="2023-03-04",
+        category_id=None, statement_id=1):
     return {
         "id": n, "transaction_date": date, "bates_number": "KF%06d" % (100 + n),
         "description": description, "check_number": None, "amount": amount,
         "category_id": category_id, "institution": "First Financial Bank",
-        "account_last4": "9260",
+        "account_last4": "9260", "statement_id": statement_id,
     }
 
 
-def build(rows, page_size=1000, criteria=None, name="Financial Summary"):
+def build(rows, page_size=1000, criteria=None, name="Financial Summary",
+          statements=None):
     """Run build_exhibit against fakes."""
     import services.transaction_search_service as mod
 
     service = StubService(rows, page_size)
     original = (mod.FinancialAccountRepository, mod.TransactionCategoryRepository,
-                mod.TransactionTagRepository)
+                mod.TransactionTagRepository, mod.FinancialAccountStatementRepository)
     mod.FinancialAccountRepository = lambda m: FakeAccountRepo(
         [FakeAccount(1, "First Financial Bank", "9260"), FakeAccount(2, "Bank of Texas", "6837")]
     )
     mod.TransactionCategoryRepository = lambda m: FakeCategoryRepo()
     mod.TransactionTagRepository = lambda m: FakeTagRepo()
+    mod.FinancialAccountStatementRepository = lambda m: FakeStatementRepo(statements or STATEMENTS)
     try:
         return service, service.build_exhibit(
             object(), FakeMatter(), name, criteria or {"limit": 200, "offset": 0},
         )
     finally:
         (mod.FinancialAccountRepository, mod.TransactionCategoryRepository,
-         mod.TransactionTagRepository) = original
+         mod.TransactionTagRepository, mod.FinancialAccountStatementRepository) = original
 
 
 # ── The fakes must agree with the real models ────────────────────────────────
@@ -273,6 +308,82 @@ check("Totals precedes Selection in the exhibit",
 
 print("\nFilename follows the exhibit name")
 check("stem", exhibit.filename_stem, "Undisclosed_Transfers")
+
+
+# ── The documents behind the summary ─────────────────────────────────────────
+#
+# Rule 1006 lets a summary stand in for voluminous records only if the records
+# themselves are available. The notice at the foot of every exhibit says they
+# are; this block says which ones, in the terms somebody uses to go and pull
+# them — the file as produced, and the stamp on it.
+
+print("\nDocuments summarized in this exhibit")
+
+_, exhibit = build([
+    row(1, "-100.00", statement_id=1),   # Salmons_FFB_2023.pdf, job-aaaa1111
+    row(2, "-200.00", statement_id=2),   # the SAME upload, second statement
+    row(3, "-300.00", statement_id=3),   # Salmons_BOT_2023.pdf, job-bbbb2222
+])
+
+check("one entry per upload, not per statement", len(exhibit.sources), 2)
+check("named as produced",
+      [name for name, _ in exhibit.sources],
+      ["Salmons_FFB_2023.pdf", "Salmons_BOT_2023.pdf"])
+# Two statements out of one PDF give the span across both, not two entries.
+check("the range spans the whole document",
+      dict(exhibit.sources)["Salmons_FFB_2023.pdf"], "KF000100 – KF000160")
+check("a single-statement document reads the same way",
+      dict(exhibit.sources)["Salmons_BOT_2023.pdf"], "KF000161 – KF000175")
+
+# A document nothing was selected from must not appear: this is a list of what
+# to pull for THIS exhibit, not an inventory of the production.
+_, exhibit = build([row(1, "-100.00", statement_id=3)])
+check("only the documents actually summarized",
+      [name for name, _ in exhibit.sources], ["Salmons_BOT_2023.pdf"])
+
+# An unstamped production is ordinary. Saying so is the difference between "no
+# stamp" and "nobody looked", and a reader cannot tell those apart from a blank.
+_, exhibit = build([row(1, "-100.00", statement_id=4)])
+check("an unstamped document says so",
+      exhibit.sources, (("unstamped_scan.pdf", "no Bates stamp detected"),))
+
+# Bates order, so the block reads the way the production is filed — and an
+# unstamped document falls to the end rather than into the middle.
+_, exhibit = build([
+    row(1, "-1.00", statement_id=4),
+    row(2, "-1.00", statement_id=3),
+    row(3, "-1.00", statement_id=1),
+])
+check("listed in Bates order, unstamped last",
+      [name for name, _ in exhibit.sources],
+      ["Salmons_FFB_2023.pdf", "Salmons_BOT_2023.pdf", "unstamped_scan.pdf"])
+
+print("\nWhere the block appears")
+
+_, exhibit = build([row(1, "-100.00", statement_id=1)])
+md = to_markdown(exhibit).decode("utf-8")
+check_true("in the markdown", "## Documents summarized in this exhibit" in md)
+check_true("the filename is there", "Salmons_FFB_2023.pdf" in md)
+# It sits between the criteria and the notice on purpose: the notice promises
+# the records are available, and this names them.
+check("after Selection",
+      md.index("## Selection") < md.index("## Documents summarized"), True)
+check("and before the Rule 1006 notice",
+      md.index("## Documents summarized") < md.index("offered in court"), True)
+
+# The CSV is the clean extraction — the caption, the notice and this block all
+# stay out of it, for the same reason.
+csv_text = to_csv(exhibit).decode("utf-8-sig")
+check("not in the CSV", "Documents summarized" in csv_text, False)
+check("nor the filename", "Salmons_FFB_2023.pdf" in csv_text, False)
+
+pdf = to_pdf(exhibit)
+import pymupdf  # noqa: E402
+
+with pymupdf.open(stream=pdf, filetype="pdf") as document:
+    text = "\n".join(page.get_text() for page in document)
+check_true("in the PDF", "Documents summarized in this exhibit" in text)
+check_true("with its Bates range", "KF000100" in text)
 
 print("")
 if FAILURES:

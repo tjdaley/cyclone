@@ -261,6 +261,230 @@ check("and the money that is missing",
       any("short by 146.14" in f for f in findings), True)
 
 
+# ── 10. A pass whose answer will not parse ───────────────────────────────
+#
+# The real failure: one chunk of a five-account Capital One upload came back as
+# invalid JSON, and the ValueError propagated out of extract(), out of the
+# worker, and failed the job. Four accounts that had read perfectly were never
+# committed, and nothing on screen suggested the file would fare any better on
+# a second attempt.
+print("10. one chunk comes back malformed")
+
+
+class BrokenOnce:
+    """Bad JSON on the first read of a chunk, good on the retry."""
+
+    def __init__(self, break_pages, always=False):
+        self.break_pages = break_pages
+        self.always = always
+        self.calls = []
+        self.seen = set()
+
+    def complete_detailed(self, system, body, profile=None, **kwargs):
+        self.calls.append((system, body))
+        if "indexing" in system:
+            return reply(
+                '{"statements": [{"first_page": 1, "last_page": 8,'
+                ' "header_text": "ACCOUNT NUMBER 848579260",'
+                ' "account": {"institution": "First Financial Bank", "account_type": "checking",'
+                ' "account_number_last4": "9260"},'
+                ' "period": {"start_date": "2023-11-28", "end_date": "2023-12-26"},'
+                ' "balances": {"beginning_balance": 0, "ending_balance": 0}}]}'
+            )
+        marker = next((p for p in self.break_pages if "PRIMARY PAGES: %d" % p in body), None)
+        if marker is not None and (self.always or marker not in self.seen):
+            self.seen.add(marker)
+            # A description with an unescaped quote in it — the shape the real
+            # failure took, and not something json.loads can be talked into.
+            return reply('{"transactions": [{"description": "PAYMENT TO "THE GROVE"",')
+        page = int(body.split("PRIMARY PAGES: ")[1].split(" ")[0])
+        return reply(
+            '{"transactions": [{"line_no": 1, "transaction_date": "2023-12-04",'
+            ' "description": "LINE p%d", "amount": -1.00,'
+            ' "physical_page_number": %d}]}' % (page, page)
+        )
+
+
+llm = BrokenOnce(break_pages=[5])
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+
+# Eight pages walk as two chunks of four, and this fake answers one
+# transaction per chunk — so a whole document is two, not eight.
+check("the malformed pass is asked again",
+      sum(1 for s, b in llm.calls if "PRIMARY PAGES: 5" in b), 2)
+check("the retry says the previous answer was rejected",
+      any("NOT VALID JSON" in b for s, b in llm.calls if "PRIMARY PAGES: 5" in b), True)
+check("and the document is whole", len(statement["transactions"]), 2)
+check("nothing is flagged when the retry works", "unread_pages" in statement, False)
+
+# Now the same chunk fails both times.
+print("11. and when the retry fails too")
+llm = BrokenOnce(break_pages=[5], always=True)
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+
+check("the job is not abandoned", len(result["statements"]), 1)
+check("the chunk that read cleanly still committed", len(statement["transactions"]), 1)
+# The unit of loss is the CHUNK, not the page: the pass covering 5-8 is the one
+# that could not be parsed, so all four of its pages are unaccounted for and the
+# flag has to say so rather than understate it.
+check("every page of the failed pass is named", statement["unread_pages"], [5, 6, 7, 8])
+check("it gave up after two attempts",
+      sum(1 for s, b in llm.calls if "PRIMARY PAGES: 5" in b), 2)
+
+# ── 12. A reply that stops mid-array ─────────────────────────────────────
+#
+# The second real failure, and the opposite of a bad escape: two dense pages of
+# a Capital One register produced about forty entries and seventeen thousand
+# characters of JSON, cut off mid-array. `max_tokens` was 32,000 and the answer
+# used a fraction of it — nothing hit a ceiling, the reply simply stopped.
+#
+# Asking again gets an answer the same length. The range has to get smaller.
+print("12. a reply that runs off the end")
+
+
+class Truncates:
+    """Cuts the reply short for any range wider than `fits` pages."""
+
+    def __init__(self, fits=1):
+        self.fits = fits
+        self.ranges = []
+
+    def complete_detailed(self, system, body, profile=None, **kwargs):
+        if "indexing" in system:
+            return reply(
+                '{"statements": [{"first_page": 1, "last_page": 8,'
+                ' "header_text": "ACCOUNT NUMBER 848579260",'
+                ' "account": {"institution": "First Financial Bank", "account_type": "checking",'
+                ' "account_number_last4": "9260"},'
+                ' "period": {"start_date": "2023-11-28", "end_date": "2023-12-26"},'
+                ' "balances": {"beginning_balance": 0, "ending_balance": 0}}]}'
+            )
+        head = body.split("PRIMARY PAGES: ")[1].split(".")[0]
+        first, last = (int(n) for n in head.split(" to "))
+        self.ranges.append((first, last))
+        rows = ','.join(
+            '{"line_no": 1, "transaction_date": "2023-12-04", "description": "LINE p%d",'
+            ' "amount": -1.00, "physical_page_number": %d}' % (p, p)
+            for p in range(first, last + 1)
+        )
+        if last - first + 1 > self.fits:
+            # Valid up to the point it stops, which is what truncation looks
+            # like: the parser consumes a whole entry and then finds nothing.
+            return reply('{"transactions": [%s,' % rows)
+        return reply('{"transactions": [%s]}' % rows)
+
+
+llm = Truncates(fits=1)
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+
+check("the wide range was tried first", llm.ranges[0], (1, 4))
+# Asked once more before splitting — on the real document that second ask was
+# enough both times, because the retry note changes the question rather than
+# re-rolling an identical one.
+check("asked again at the same width", llm.ranges[1], (1, 4))
+check("then halved", llm.ranges[2], (1, 2))
+check("and halved again until it fitted", (1, 1) in llm.ranges, True)
+check("every page ends up read", len(statement["transactions"]), 8)
+check("in page order",
+      [t["physical_page_number"] for t in statement["transactions"]], [1, 2, 3, 4, 5, 6, 7, 8])
+check("nothing reported unread", "unread_pages" in statement, False)
+
+# The case production actually hit: cut off once, complete on the second ask.
+# No split, no loss, and — because the statement then reconciles — no flag.
+print("12a. cut off once, then complete")
+
+
+class TruncatesOnce:
+    """Truncates the first reply for a range, answers it whole the second time."""
+
+    def __init__(self):
+        self.ranges = []
+        self.bodies = []
+        self.seen = set()
+
+    def complete_detailed(self, system, body, profile=None, **kwargs):
+        self.bodies.append(body)
+        if "indexing" in system:
+            return reply(
+                '{"statements": [{"first_page": 1, "last_page": 8,'
+                ' "header_text": "ACCOUNT NUMBER 848579260",'
+                ' "account": {"institution": "First Financial Bank", "account_type": "checking",'
+                ' "account_number_last4": "9260"},'
+                ' "period": {"start_date": "2023-11-28", "end_date": "2023-12-26"},'
+                ' "balances": {"beginning_balance": 0, "ending_balance": 0}}]}'
+            )
+        head = body.split("PRIMARY PAGES: ")[1].split(".")[0]
+        first, last = (int(n) for n in head.split(" to "))
+        self.ranges.append((first, last))
+        rows = ','.join(
+            '{"line_no": 1, "transaction_date": "2023-12-04", "description": "LINE p%d",'
+            ' "amount": -1.00, "physical_page_number": %d}' % (p, p)
+            for p in range(first, last + 1)
+        )
+        if (first, last) not in self.seen:
+            self.seen.add((first, last))
+            return reply('{"transactions": [%s,' % rows)
+        return reply('{"transactions": [%s]}' % rows)
+
+
+llm = TruncatesOnce()
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+
+check("each range asked exactly twice", llm.ranges, [(1, 4), (1, 4), (5, 8), (5, 8)])
+check("never split", all(last - first == 3 for first, last in llm.ranges), True)
+check("every page read", len(statement["transactions"]), 8)
+check("nothing reported unread", "unread_pages" in statement, False)
+# The retry has to name the failure it is answering. At temperature 0.0 an
+# identical prompt returns an identical reply, so the changed note IS the
+# mechanism — and telling a model that ran out of room to escape its quotes
+# more carefully addresses nothing.
+retries = [b for b in llm.bodies if "YOUR PREVIOUS ANSWER" in b]
+check("both retries went out", len(retries), 2)
+check("and say the reply was cut off",
+      all("WAS CUT OFF" in b for b in retries), True)
+check("not that it was malformed",
+      any("NOT VALID JSON" in b for b in retries), False)
+
+# A single page that still will not read is as small as a slice gets.
+print("13. a single page that will not read at any width")
+llm = Truncates(fits=0)
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+check("every page reported unread", statement["unread_pages"], [1, 2, 3, 4, 5, 6, 7, 8])
+check("and the document still commits", len(result["statements"]), 1)
+
+# One bad page must not take its siblings with it.
+print("14. one page fails, the rest survive")
+
+
+class OnePageBreaks(Truncates):
+    def complete_detailed(self, system, body, profile=None, **kwargs):
+        if "indexing" not in system:
+            head = body.split("PRIMARY PAGES: ")[1].split(".")[0]
+            first, last = (int(n) for n in head.split(" to "))
+            if first == last == 3:
+                return reply('{"transactions": [{"description": "X",')
+        return Truncates.complete_detailed(self, system, body, profile=profile, **kwargs)
+
+
+llm = OnePageBreaks(fits=1)
+mod.llm_service = llm
+result = statement_service.extract(document(8))
+statement = result["statements"][0]
+check("only the page that failed is reported", statement["unread_pages"], [3])
+check("its siblings are kept",
+      [t["physical_page_number"] for t in statement["transactions"]], [1, 2, 4, 5, 6, 7, 8])
+
+
 print()
 print("FAILURES: %d" % len(FAILURES))
 for f in FAILURES:

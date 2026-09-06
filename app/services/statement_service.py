@@ -42,6 +42,7 @@ from db_handler import DatabaseManager
 from services import account_number_service, bates_service
 from services.category_rule_service import category_rule_service
 from services.llm_service import llm_service
+from services.storage_service import StorageService
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -233,12 +234,26 @@ statement when they carry the same account number and the same statement dates,
 however many pages lie between them. Statements repeat their header on every
 page; a repeated header is not a new statement.
 
+A DOCUMENT MAY PACK SEVERAL ACCOUNTS ONTO ONE PAGE. Some banks print a combined
+statement — every account the customer holds, one register after another, with
+no page break between them. A page can therefore end one account and begin the
+next, and a single page can carry the close of one register, the whole of a
+short one, and the opening of a third. Do not assume a new account starts at the
+top of a page, and do not merge two accounts because they share a page.
+
 Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each has:
 
+- header_text: the exact line of text, copied character for character, that
+  introduces this statement — normally the account name and number as printed,
+  e.g. "Amandas Checking Account - 36325262322". Copy it verbatim from the text
+  above; it is searched for literally, so a paraphrase or a corrected spelling
+  will not be found. This is what marks where one register ends and the next
+  begins when they share a page.
 - first_page / last_page: integers, the page range this statement occupies,
   from its first header to the last page belonging to it. Include its balance
   tables, check images, and disclosure pages — everything before the next
-  statement starts.
+  statement starts. Two statements MAY name the same page when one ends and the
+  next begins on it.
 - account:
   - institution: the bank, brokerage, or card issuer that HOLDS the account, as
     printed in the letterhead at the top of the page. Statements also name the
@@ -292,6 +307,13 @@ the page an entry starts on is not always the page it is anchored on.
 
 Following those three rules exactly is what keeps each entry reported once, and
 keeps a description from being cut in half at a page break.
+
+ONE ACCOUNT ONLY. Some banks print every account the customer holds one after
+another with no page break, so a page can end one register and begin the next.
+The slice is cut at the account headers, but if a line introducing a DIFFERENT
+account number than the one named below still appears, stop there: report
+nothing at or after it. Rows belonging to another account are that account's,
+and filing them here puts one person's money in another account's history.
 
 Return ONLY a valid JSON object of the form {"transactions": [ ... ]}, in
 printed order. Each transaction has:
@@ -359,6 +381,38 @@ Respond ONLY with the JSON object. No markdown fences, no explanation.\
 # entries came back with 38 of them, well-formed and 87% short, having used a
 # seventh of the output budget it was given. It did not run out of room — it
 # stopped. Below this, one call is both reliable and cheaper.
+# Past this, a PDF is more likely to be a production than a single statement.
+# Only a warning: a combined statement legitimately runs long, and one holding
+# five accounts is ordinary input.
+_MANY_PAGES = 30
+
+_PAGE_MARKER_PREFIX = "<<<PAGE "
+_PAGE_MARKER_AT = re.compile(r"<<<PAGE (\d+)>>>")
+
+
+def _squash_institution(name: Optional[str]) -> str:
+    """A bank name reduced to letters, for asking whether two spellings agree."""
+    squashed = re.sub(r"[^A-Z0-9]+", "", (name or "").upper())
+    # "Unknown institution" is the absence of an answer, not an answer, and two
+    # statements that both failed to read the letterhead have not agreed.
+    return "" if squashed.startswith("UNKNOWN") else squashed
+
+
+def _page_of_offset(raw_text: str, offset: int) -> Optional[int]:
+    """
+    Which page a character offset falls on, by the last marker before it.
+
+    Needed because a statement can begin partway down a page: its text then
+    carries no marker of its own, and everything up to the next one would be
+    attributed to the following page — off by one, precisely at the seam where
+    two accounts meet.
+    """
+    found = None
+    for mark in _PAGE_MARKER_AT.finditer(raw_text, 0, offset + 1):
+        found = int(mark.group(1))
+    return found
+
+
 _MAX_SINGLE_PASS_PAGES = 6
 
 # Pages per transaction call. A dense page runs to about fifteen entries, so
@@ -418,6 +472,30 @@ Respond ONLY with the JSON object. No markdown fences, no explanation.\
 # 6/02 on a statement running 5/01 to 5/31 — so a hard bound would flag ordinary
 # entries. Ten days tolerates that while still catching a date wrong by a month.
 _PERIOD_MARGIN_DAYS = 10
+
+
+class UnparseableResponse(ValueError):
+    """
+    A model answer that would not parse, and which kind of not-parsing it was.
+
+    The two kinds want opposite responses, which is the whole reason this
+    carries a flag rather than being a bare ValueError:
+
+    * **Truncated** — the JSON ends mid-structure, so the parser ran out of
+      input. Asking the same question again produces an answer the same length
+      and it truncates again. The answer is to ask for less.
+    * **Malformed** — a bad escape, a stray character, a duplicated key. The
+      answer arrived whole and one character of it is wrong, which a second
+      sample usually fixes.
+
+    Told apart by position: a decode error whose offset is the end of the string
+    means the parser consumed a complete value and then found nothing where a
+    delimiter had to be. That cannot happen to a complete answer.
+    """
+
+    def __init__(self, message: str, truncated: bool):
+        super().__init__(message)
+        self.truncated = truncated
 
 
 def _strip_fences(text: str) -> str:
@@ -948,36 +1026,68 @@ class StatementService:
         )
 
         last_page = max(pages)
-        for statement in statements:
+        for position, statement in enumerate(statements):
             first = _page_number(statement.pop("first_page", None)) or 1
             last = _page_number(statement.pop("last_page", None)) or last_page
             first, last = max(1, min(first, last_page)), max(1, min(last, last_page))
+
+            # Cut this statement out at its printed header, so a page shared
+            # with the account before or after carries only this account's rows
+            # into the pass. On a document where every account starts on a fresh
+            # page this changes nothing; on a combined statement it is the whole
+            # difference between filing a transaction correctly and filing it
+            # against the neighbouring account.
+            own = self._statement_pages(raw_text, pages, statements, position)
+            if own is not None:
+                # Header slicing knows the statement's real extent: it read it
+                # out of the text rather than being told. So it also OVERRIDES
+                # the declared range — an index that under-reports last_page
+                # would otherwise leave a page nobody ever asks for, and lines
+                # printed on it would be missing with nothing to say so.
+                first, last = min(own), max(own)
+                own_last = last
+            else:
+                # No findable header. Fall back to the declared page range, and
+                # cap the lookahead there too — otherwise a slice reads into a
+                # document this statement has no claim on.
+                own, own_last = pages, last
+                if len(statements) > 1:
+                    LOGGER.warning(
+                        "statement_service.extract: statement %d of %d gave no findable "
+                        "header; falling back to its page range, which cannot separate "
+                        "two accounts sharing a page",
+                        position + 1, len(statements),
+                    )
+                    statement["header_not_found"] = True
+            statement.pop("header_text", None)
 
             context = self._statement_context(statement)
             period = statement.get("period") or {}
             period_start = _parse_date(period.get("start_date"))
             period_end = _parse_date(period.get("end_date"))
             collected: list[dict[str, Any]] = []
+            unread: list[int] = []
             for start in range(first, last + 1, _PAGES_PER_CHUNK):
                 stop = min(start + _PAGES_PER_CHUNK - 1, last)
-                body = self._slice_body(pages, start, stop, last)
-                if not body.strip():
+                # ONE UNREADABLE PASS MUST NOT COST THE WHOLE DOCUMENT.
+                #
+                # This used to propagate: a pass whose answer would not parse
+                # failed the job, and an upload holding five accounts — four of
+                # them read perfectly — committed nothing at all. The wasted
+                # work is not the point. The point is that the person re-uploads
+                # the same file having been given no reason to expect a
+                # different outcome.
+                #
+                # `_read_pages` splits a too-long answer and, failing that,
+                # hands back the pages it could not read. Those are flagged on
+                # the statement, which is then held and will not reconcile —
+                # three independent signals that it is short. The same trade
+                # pdf_service makes with its unreadable marker: a visible
+                # partial loss beats a silent total one.
+                found, lost = self._read_pages(context, own, start, stop, own_last, passes)
+                unread.extend(lost)
+                if not found:
                     continue
-                found = self._call_json(
-                    _TRANSACTIONS_SYSTEM,
-                    "%s\n\nPRIMARY PAGES: %d to %d.\n\n%s" % (context, start, stop, body),
-                    "transactions",
-                    "Could not read pages %d-%d" % (start, stop),
-                    passes=passes, label="pages %d-%d" % (start, stop),
-                ).get("transactions") or []
-                # A slice can only report what it was given; anything anchored
-                # in its lookahead belongs to the next one. Enforced here as
-                # well as in the prompt, because a duplicated transaction is a
-                # duplicated line in an exhibit.
-                found = [
-                    line for line in found
-                    if (_page_number(line.get("physical_page_number")) or start) <= stop
-                ]
                 # One missing date condemns every date in this batch, not just
                 # itself — see _date_audit_reason. The amounts are left alone:
                 # they were right, and re-running the whole batch to fix one
@@ -988,13 +1098,19 @@ class StatementService:
                         "statement_service.extract: pages %d-%d — %s; re-reading the date column",
                         start, stop, reason,
                     )
-                    self._audit_dates(found, pages, start, stop, last, context, passes)
+                    self._audit_dates(found, own, start, stop, own_last, context, passes)
 
                 LOGGER.info(
                     "statement_service.extract: pages %d-%d yielded %d transaction(s)",
                     start, stop, len(found),
                 )
                 collected.extend(found)
+
+            # Carried on the statement so commit_document can flag it. Recorded
+            # rather than raised: the caller decides what an incomplete read
+            # means, and for a statement it means "hold this for a person".
+            if unread:
+                statement["unread_pages"] = sorted(set(unread))
 
             # Numbered here rather than by the model: it only ever saw a slice,
             # so every chunk would otherwise start again at one.
@@ -1057,6 +1173,150 @@ class StatementService:
             "statement_service: pages %d-%d — re-read %d date(s), %d changed",
             start, stop, len(answers), changed,
         )
+
+    def _read_pages(
+        self,
+        context: str,
+        own: dict[int, str],
+        start: int,
+        stop: int,
+        own_last: int,
+        passes: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[int]]:
+        """
+        The transactions on a page range, splitting the range if the answer
+        will not fit in one.
+
+        A statement's density is not knowable in advance. `_PAGES_PER_CHUNK` is
+        a guess that holds for most documents and fails on a dense one: two
+        pages of a Capital One 360 register produced about forty entries and
+        seventeen thousand characters of JSON, which came back cut off
+        mid-array. The budget was nowhere near spent — the answer simply
+        stopped.
+
+        `_call_json` asks again first, and on the measured document that was
+        enough both times it happened. Splitting is what remains when it is not:
+        halve the range and ask each half, down to a single page. That is the
+        rule the codebase already follows when an extraction comes back short —
+        **split the work instead** — and it is a last resort rather than a first
+        one because it costs a call per half and the cheaper fix usually works.
+
+        A single page that still will not read cannot be divided any further,
+        and is returned as unread rather than raising: when a range splits, one
+        half failing must not discard the half that succeeded. The caller flags
+        whatever comes back unread, so the loss is reported page by page instead
+        of chunk by chunk.
+
+        :return: ``(transactions, unread_pages)``.
+        :rtype: tuple[list[dict[str, Any]], list[int]]
+        """
+        body = self._slice_body(own, start, stop, own_last)
+        if not body.strip():
+            return [], []
+        try:
+            found = self._call_json(
+                _TRANSACTIONS_SYSTEM,
+                "%s\n\nPRIMARY PAGES: %d to %d.\n\n%s" % (context, start, stop, body),
+                "transactions",
+                "Could not read pages %d-%d" % (start, stop),
+                passes=passes, label="pages %d-%d" % (start, stop),
+            ).get("transactions") or []
+        except UnparseableResponse as e:
+            if stop <= start:
+                LOGGER.warning(
+                    "statement_service.extract: page %d could not be read (%s); it is the "
+                    "smallest slice there is, so its lines are missing from this statement",
+                    start, str(e),
+                )
+                return [], [start]
+            if not e.truncated:
+                # Malformed rather than too long, and `_call_json` already asked
+                # again. Splitting would not help; report the range.
+                LOGGER.warning(
+                    "statement_service.extract: pages %d-%d could not be read (%s)",
+                    start, stop, str(e),
+                )
+                return [], list(range(start, stop + 1))
+            middle = start + (stop - start) // 2
+            LOGGER.info(
+                "statement_service.extract: pages %d-%d answered past the end of the reply; "
+                "splitting into %d-%d and %d-%d",
+                start, stop, start, middle, middle + 1, stop,
+            )
+            left, left_unread = self._read_pages(context, own, start, middle, own_last, passes)
+            right, right_unread = self._read_pages(context, own, middle + 1, stop, own_last, passes)
+            return left + right, left_unread + right_unread
+
+        # A slice can only report what it was given; anything anchored in its
+        # lookahead belongs to the next one. Applied per sub-range as well as
+        # per chunk, or a split half would claim its sibling's rows.
+        return [
+            line for line in found
+            if (_page_number(line.get("physical_page_number")) or start) <= stop
+        ], []
+
+    @staticmethod
+    def _statement_pages(
+        raw_text: str,
+        pages: dict[int, str],
+        statements: list[dict[str, Any]],
+        index: int,
+    ) -> Optional[dict[int, str]]:
+        """
+        One statement's own text, cut at the account headers around it.
+
+        **The page is not always the unit of division.** A combined statement —
+        Capital One 360 prints one — runs each account's register straight into
+        the next with no page break, so a single page can close one account,
+        contain the whole of a short one, and open a third. Slicing by page then
+        hands the pass reading account A a page that ends with account B's
+        opening balance, under a context line that says "these pages belong to"
+        account A. It is a false statement and the model reasonably believes it:
+        one production filed B's first transactions against A, on every account
+        after the first.
+
+        Two statements sharing a page is not an edge case for that format, it is
+        every page. So the boundary is the printed header, found literally in
+        Python — the same argument as Bates numbers and account numbers. A header
+        is a line the bank prints; locating it is exact, free, and auditable,
+        where asking a model to judge where one register stops is neither.
+
+        :param index: Which statement in ``statements`` to cut out.
+        :return: ``{page_number: text}`` holding only this statement's text, with
+            page markers preserved so a line still reports the page it was
+            printed on. None when the header cannot be found verbatim, which
+            leaves the caller on the page-range behaviour and flags it.
+        :rtype: Optional[dict[int, str]]
+        """
+        header = (statements[index].get("header_text") or "").strip()
+        if not header:
+            return None
+        start = raw_text.find(header)
+        if start == -1:
+            return None
+
+        # Where the NEXT statement's header begins, searched from after this one
+        # so a repeated header on a later page cannot cut the body short.
+        stop = len(raw_text)
+        for other in statements[index + 1:]:
+            candidate = (other.get("header_text") or "").strip()
+            if not candidate:
+                continue
+            at = raw_text.find(candidate, start + len(header))
+            if at != -1:
+                stop = min(stop, at)
+
+        body = raw_text[start:stop]
+        # The body starts at the header, which may sit halfway down a page, so
+        # it usually has no page marker of its own. Without one the first lines
+        # would be attributed to whatever page the marker search finds next —
+        # off by one, on the page where the mis-attribution began.
+        opening = _page_of_offset(raw_text, start)
+        if opening is not None and not body.lstrip().startswith(_PAGE_MARKER_PREFIX):
+            body = "<<<PAGE %d>>>\n%s" % (opening, body)
+
+        own = bates_service.split_pages(body)
+        return {n: text for n, text in own.items() if n in pages} or None
 
     @staticmethod
     def _slice_body(pages: dict[int, str], start: int, stop: int, last: int) -> str:
@@ -1135,26 +1395,92 @@ class StatementService:
             statement would be a guess.
         :param label: What this pass was for, e.g. ``"pages 5-8"``.
         :raises ValueError: If the response is not valid JSON, or lacks the key.
+
+        **A malformed answer is asked again once.** `llm_service` fails a
+        candidate over on an *exception* — a network fault, a refusal, an empty
+        body — and deliberately never retries the same candidate. A response
+        that arrived intact and is simply not valid JSON is a different event:
+        nothing failed, the vendor answered, and one character of the answer is
+        wrong. That is what a second sample fixes, and on a real ingest a single
+        unparseable chunk out of seven was enough to lose a five-account
+        document entirely. The retry lives here rather than in `llm_service`
+        because only the caller knows the answer had to parse.
         """
-        result = llm_service.complete_detailed(system, body, profile="extract_account_statement")
-        if passes is not None:
-            passes.append({
-                "pass": label or expect,
-                "vendor": result.vendor,
-                "model": result.model,
-                # Above 1 means the preferred model did not answer. Worth
-                # keeping: it is the difference between "Claude read this" and
-                # "Claude was asked and something else ended up reading it".
-                "attempts": result.attempts,
-            })
-        try:
-            parsed = json.loads(_strip_fences(result.text))
-        except json.JSONDecodeError as e:
-            LOGGER.warning("statement_service: %s — parse failure: %s", failure, str(e))
-            raise ValueError("%s — the model's response was not valid JSON" % failure) from e
-        if not isinstance(parsed, dict) or expect not in parsed:
-            raise ValueError("%s — the response had no '%s'" % (failure, expect))
-        return parsed
+        attempt_note = ""
+        for attempt in (1, 2):
+            result = llm_service.complete_detailed(
+                system, body + attempt_note, profile="extract_account_statement",
+            )
+            if passes is not None:
+                passes.append({
+                    "pass": ("%s (retry)" % (label or expect)) if attempt > 1 else (label or expect),
+                    "vendor": result.vendor,
+                    "model": result.model,
+                    # Above 1 means the preferred model did not answer. Worth
+                    # keeping: it is the difference between "Claude read this"
+                    # and "Claude was asked and something else ended up reading
+                    # it".
+                    "attempts": result.attempts,
+                })
+            try:
+                parsed = json.loads(_strip_fences(result.text))
+            except json.JSONDecodeError as e:
+                # The response itself is never logged: it is a register of
+                # transactions, and §6 forbids amounts and payee names in logs.
+                # The position and length are enough to tell a truncation from a
+                # bad escape, and the full text is recoverable from the model
+                # provenance if it ever matters.
+                body_text = _strip_fences(result.text or "")
+                truncated = getattr(e, "pos", -1) >= len(body_text)
+                LOGGER.warning(
+                    "statement_service: %s — attempt %d %s at char %s of %d: %s",
+                    failure, attempt,
+                    "response truncated" if truncated else "parse failure",
+                    getattr(e, "pos", "?"), len(body_text), e.msg,
+                )
+                if attempt == 2:
+                    raise UnparseableResponse(
+                        "%s — the model's response was not valid JSON" % failure,
+                        truncated=truncated,
+                    ) from e
+                # BOTH KINDS GET A SECOND ASK, AND IT IS NOT A RE-ROLL.
+                #
+                # The reasoning that says otherwise — "a truncated answer asked
+                # again comes back the same length" — sounds right and is
+                # wrong in practice, twice out of two on the document this was
+                # written for. The reason is that the note below CHANGES THE
+                # QUESTION: this profile runs at temperature 0.0, so a second
+                # call on an identical prompt really would return the identical
+                # reply, and the only thing making the retry worth anything is
+                # that the prompt is no longer identical.
+                #
+                # So the note has to name the failure it is answering. Telling a
+                # model that ran out of room to escape its quotes more carefully
+                # addresses nothing.
+                attempt_note = (
+                    (
+                        "\n\nYOUR PREVIOUS ANSWER WAS CUT OFF before it finished and was "
+                        "discarded — it ended in the middle of the JSON. Return the same "
+                        "transactions again, complete and closed, keeping every description "
+                        "to what is printed and omitting nothing."
+                    ) if truncated else (
+                        "\n\nYOUR PREVIOUS ANSWER WAS NOT VALID JSON and was discarded. Return "
+                        "the same data again as a single valid JSON object. Escape every quote "
+                        "and backslash inside a string value, and emit no text outside the "
+                        "object."
+                    )
+                )
+                continue
+            if not isinstance(parsed, dict) or expect not in parsed:
+                if attempt == 1:
+                    attempt_note = (
+                        "\n\nYOUR PREVIOUS ANSWER did not contain the required \"%s\" key. "
+                        "Return a single JSON object with it." % expect
+                    )
+                    continue
+                raise ValueError("%s — the response had no '%s'" % (failure, expect))
+            return parsed
+        raise ValueError(failure)  # unreachable; the loop returns or raises
 
     def resolve_missing_institutions(self, extracted: dict[str, Any], pdf_bytes: bytes) -> int:
         """
@@ -1176,7 +1502,8 @@ class StatementService:
         :return: How many names were recovered.
         :rtype: int
         """
-        from services.pdf_service import pdf_service  # noqa: PLC0415 — avoids an import cycle
+        from services.pdf_service import pdf_service  # noqa: PLC0415
+
 
         statements = extracted.get("statements") or []
 
@@ -1623,6 +1950,36 @@ class StatementService:
         # Without this the loss was total and silent: the page contributed an
         # empty string, the ingest carried on, and no record anywhere said a
         # page was missing from the extraction.
+        # A pass whose answer would not parse, twice. The lines printed on those
+        # pages are simply absent from this record, so it is said outright: the
+        # statement is held, and reconciliation will disagree by whatever was on
+        # them. Silence here would leave a short register looking complete.
+        unread_pages = [p for p in (raw_statement.get("unread_pages") or []) if p]
+        if unread_pages:
+            flags.append(_flag(
+                "PASS_UNREADABLE", "warn",
+                "Page(s) %s were read but the extraction of them could not be parsed, twice. "
+                "Any transaction printed there is missing from this statement, and the balances "
+                "below will be short by that amount. Re-import the document; if it fails the "
+                "same way again, those pages need reading by hand."
+                % ", ".join(str(p) for p in unread_pages),
+                "transactions",
+            ))
+
+        # The document could not be cut at this statement's printed header, so
+        # its page range was used instead. Harmless on a document where every
+        # account starts on a fresh page; on a combined statement it means the
+        # neighbouring account's rows may have been swept in.
+        if raw_statement.get("header_not_found"):
+            flags.append(_flag(
+                "STATEMENT_BOUNDARY_UNCERTAIN", "warn",
+                "This statement's header could not be located in the document text, so it was "
+                "separated from the others by page number alone. Where a bank prints several "
+                "accounts on one page, lines belonging to the account before or after this one "
+                "may have been filed here. Check the first and last few lines against the page.",
+                "transactions",
+            ))
+
         unreadable = _unreadable_pages(raw_text)
         if unreadable:
             flags.append(_flag(
@@ -1696,22 +2053,63 @@ class StatementService:
                 ))
 
         # Does this statement claim pages another one from this document already
-        # claimed? Two statements cannot be printed on the same page. The usual
-        # cause is a summary table — a daily ending balance list, an account
-        # summary — read as a second register, which then invents its own
-        # account because the institution on it could not be read either.
+        # claimed? The usual cause is a summary table — a daily ending balance
+        # list, an account summary — read as a second register, which then
+        # invents its own account because the institution on it could not be
+        # read either.
+        #
+        # **But a shared page is not by itself wrong.** The flag first shipped
+        # saying "two statements cannot be printed on the same page", and that
+        # is false for a combined statement: Capital One 360 runs each account's
+        # register straight into the next, so one page routinely closes one
+        # account and opens another, and page 5 of an eight-page document
+        # carried three. Flagging that put every account on the upload into the
+        # exceptions queue, which is how a useful warning stops being read.
+        #
+        # Two things separate a seam from a phantom, and both are required.
+        #
+        # HOW MUCH IS SHARED. A seam touches exactly one page — the last of one
+        # register, the first of the next. A phantom re-covers its parent's
+        # range, so it shares more.
+        #
+        # WHOSE BANK IT IS. A combined statement is ONE bank printing several of
+        # its own accounts, so every account on it names the same institution. A
+        # phantom arises where the letterhead could not be read, and invents an
+        # account whose institution differs or is unknown — which is the same
+        # signal `resolve_missing_institutions` already acts on, that
+        # disagreement about the institution within one upload means at least
+        # one answer is a guess. Requiring agreement is what keeps the guard
+        # working on the case it was built for: a register on page 1 and a
+        # balance table on page 3, read as "Unknown institution" beside the real
+        # bank, still flags on one shared page.
         overlap = None
         if statement_pages and claimed_pages is not None:
             first, last = statement_pages[0], statement_pages[-1]
             for earlier in claimed_pages:
-                if first <= earlier["last"] and earlier["first"] <= last:
-                    overlap = earlier
-                    break
+                if first > earlier["last"] or earlier["first"] > last:
+                    continue
+                shared = min(last, earlier["last"]) - max(first, earlier["first"]) + 1
+                mine = _squash_institution(institution)
+                theirs = _squash_institution(earlier.get("institution"))
+                seam = (
+                    shared == 1
+                    and last4 and earlier.get("last4") and last4 != earlier.get("last4")
+                    and mine and theirs and mine == theirs
+                )
+                if seam:
+                    LOGGER.info(
+                        "statement_service.commit: statement shares page %d with #%s — "
+                        "a combined statement's seam, not a split",
+                        max(first, earlier["first"]), earlier["statement_id"],
+                    )
+                    continue
+                overlap = earlier
+                break
         if overlap is not None:
             flags.append(_flag(
                 "SUSPECT_SPLIT", "warn",
                 "This covers page(s) %d–%d of the upload, which statement #%s (%s, %s to %s) already "
-                "covers. Two statements cannot be printed on the same page, so one of them is a "
+                "covers. More than a single shared boundary page means one of them is probably a "
                 "misreading — most often a balance or summary table read as a transaction list. "
                 "Compare the two and reject whichever is not the real register."
                 % (statement_pages[0], statement_pages[-1], overlap["statement_id"],
@@ -1756,6 +2154,10 @@ class StatementService:
                 "statement_id": statement.id,
                 "first": statement_pages[0],
                 "last": statement_pages[-1],
+                # Carried so the next statement can tell a combined statement's
+                # seam from a phantom register: a seam is one shared page
+                # between two DIFFERENT accounts.
+                "last4": last4,
                 "institution": institution,
                 "period_start": period_start.isoformat(),
                 "period_end": period_end.isoformat(),
@@ -2195,6 +2597,164 @@ class StatementService:
             "transactions_deleted": line_count,
             "account_deleted": account_deleted,
             "account_kept_reason": kept_reason,
+        }
+
+    def survey_upload(self, pdf_bytes: bytes) -> list[str]:
+        """
+        Look at a PDF before queueing it, and say what is likely to go wrong.
+
+        Warnings only — the ingest goes ahead either way. A document holding
+        several statements is perfectly legal input: a combined statement is one
+        upload with five accounts in it, and blocking that to catch a
+        twenty-four-month production would trade a real workflow for a rare one.
+        What the reader gets instead is the sentence they will wish they had
+        read: *split it and retry*.
+
+        This is worth doing because the failure it names is expensive and slow
+        to discover. A 142-page PDF of twenty-four months ran long enough to time
+        the browser out while continuing on the server, imported some statements,
+        made a mess of the last, and had to be rejected wholesale and split by
+        hand. Every part of that is recoverable; none of it is quick.
+
+        Two independent signals, deliberately not combined into one score:
+
+        * **Length.** Past `_MANY_PAGES` a statement is more likely to be a
+          production than a month.
+        * **Restarted pagination.** Statements print their own page numbers, so
+          a document holding twenty-four of them says "Page 1" twenty-four
+          times. That is a much stronger signal than length and it names a
+          number, which is what makes the warning actionable.
+
+        :return: Warnings in the order they should be read, or empty.
+        :rtype: list[str]
+        """
+        # Resolved at call time, like every other use of pdf_service here: the
+        # suites that exercise this module replace the singleton on its own
+        # module, and a name bound at import would not see the replacement.
+        from services.pdf_service import pdf_service  # noqa: PLC0415
+
+        try:
+            survey = pdf_service.survey(pdf_bytes)
+        except Exception as e:  # noqa: BLE001 — a warning must never block an upload
+            LOGGER.warning("statement_service.survey_upload: could not survey the PDF: %s", str(e))
+            return []
+
+        pages = survey.get("pages") or 0
+        first_pages = survey.get("first_pages") or 0
+        warnings: list[str] = []
+
+        # Said first, because it carries a count and the reader can check it.
+        if first_pages > 1:
+            warnings.append(
+                "This PDF looks like it holds about %d separate statements — its pagination "
+                "restarts at \"Page 1\" %d times%s. Reading a document this size takes a long "
+                "time and the accounts can be filed against the wrong statement. If the import "
+                "comes out wrong, split the PDF into one file per statement and upload them "
+                "together: they are read several at a time, so a stack of monthly files "
+                "finishes sooner than the same months combined."
+                % (first_pages, first_pages,
+                   " in the first %d pages" % survey["scanned"]
+                   if survey.get("scanned", pages) < pages else "")
+            )
+        elif pages > _MANY_PAGES:
+            # Only when the stronger signal found nothing — otherwise the reader
+            # gets two warnings saying the same thing in different words.
+            warnings.append(
+                "This PDF is %d pages, which is longer than a single statement usually runs. "
+                "It may hold more than one. If the import comes out wrong, split it into one "
+                "file per statement and upload them together — they are read several at a "
+                "time." % pages
+            )
+
+        if warnings:
+            LOGGER.info(
+                "statement_service.survey_upload: %d page(s), %d first-page marker(s); warning",
+                pages, first_pages,
+            )
+        return warnings
+
+    def retry_statement(
+        self, manager: DatabaseManager, statement_id: int, staff_id: int,
+    ) -> dict[str, Any]:
+        """
+        Throw away what one upload produced and read the PDF again.
+
+        **The unit is the document, not the statement**, and that is the whole
+        of the design. A re-import re-reads the file, and the file may hold five
+        accounts — a combined statement does. Rejecting only the statement the
+        user clicked and requeueing would produce all five again, leaving the
+        other four duplicated: two copies of an account's history, each half
+        complete, which is the failure mode `find_match` and the merge tooling
+        exist to clean up after. So every statement from the same ingest job
+        goes, and the document is read once more as a whole.
+
+        **Nothing is deleted until the PDF is known to be retrievable.** The
+        obvious ordering — reject, then requeue — loses the evidence outright
+        when the source has been purged from storage, and the person clicking
+        "Retry" is asking to re-read a document, never to destroy one. So the
+        bytes are fetched first and the deletes only happen once they are in
+        hand.
+
+        The bytes are re-uploaded under the new job's own id rather than the new
+        job pointing at the old path. It costs a duplicate object in storage and
+        buys independence: two jobs sharing one file means purging either one's
+        source removes the other's.
+
+        :return: What was discarded and the id of the job now reading it again.
+        :rtype: dict[str, Any]
+        :raises ValueError: If the statement is unknown, or its source PDF
+            cannot be retrieved — in which case nothing has been deleted.
+        """
+        statement_repo = FinancialAccountStatementRepository(manager)
+        statement = statement_repo.select_one(condition={"id": statement_id})
+        if statement is None:
+            raise ValueError("Statement not found")
+        if not statement.storage_path:
+            raise ValueError(
+                "No source PDF was stored for this statement, so there is nothing to read "
+                "again. Nothing has been deleted."
+            )
+
+        # Imported here, not at module scope: job_service reaches back into this
+        # module to run an ingest, so a module-level import is a cycle. The
+        # worker resolves the same pair the same way.
+        from services.job_service import job_service  # noqa: PLC0415
+
+        pdf_bytes = StorageService(manager).download(statement.storage_path)
+        if not pdf_bytes:
+            raise ValueError(
+                "The source PDF could not be retrieved from storage, so it cannot be read "
+                "again. Nothing has been deleted — upload the document afresh instead."
+            )
+
+        # Everything this upload produced. Falls back to the one statement when
+        # the ingest predates source_job_id, which is the conservative answer:
+        # better to leave a sibling in place than to delete a statement this
+        # re-import will not recreate.
+        siblings = (
+            statement_repo.get_by_source_job(statement.source_job_id)
+            if statement.source_job_id else [statement]
+        ) or [statement]
+
+        discarded = [self.reject_statement(manager, s.id) for s in siblings]
+
+        extraction = statement.extraction or {}
+        job = job_service.enqueue_statement_ingest(
+            manager, staff_id, statement.matter_id, pdf_bytes,
+            bates_prefix=extraction.get("bates_prefix"),
+            source_filename=extraction.get("source_filename"),
+        )
+        LOGGER.info(
+            "statement_service.retry_statement: statement=%s discarded %d statement(s) from "
+            "job=%s; requeued as job=%s",
+            statement_id, len(discarded), statement.source_job_id, job.id,
+        )
+        return {
+            "job_id": job.id,
+            "statements_discarded": len(discarded),
+            "transactions_discarded": sum(d["transactions_deleted"] for d in discarded),
+            "accounts_deleted": sum(1 for d in discarded if d["account_deleted"]),
+            "source_filename": extraction.get("source_filename"),
         }
 
     @staticmethod

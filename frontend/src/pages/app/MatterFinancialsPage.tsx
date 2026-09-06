@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getMatter, getOpposingParties,
-  ingestStatement, getFinancialAccounts, updateFinancialAccount,
+  queueStatement, awaitStatementJob, retryStatement,
+  getFinancialAccounts, updateFinancialAccount,
   getAccountStatements, getStatementExceptions, reviewStatement,
   getStatementTransactions, getAccountTransactions,
   previewAccountMerge, mergeAccounts,
@@ -12,6 +13,7 @@ import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
 import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import FisPanel from './FisPanel'
+import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
   Matter, OpposingParty,
@@ -162,6 +164,13 @@ export default function MatterFinancialsPage() {
   // Upload
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
+  // Which half of the work is running. The upload phase is short but not
+  // instant — a dozen files is ten to fifteen seconds — and it used to render
+  // nothing at all, so the screen looked exactly as it had before the drop.
+  const [phase, setPhase] = useState<'uploading' | 'reading' | null>(null)
+  // A ref, not state: the guard has to hold on the same tick as the drop, and
+  // state does not update until the next render.
+  const uploadingRef = useRef(false)
   const [job, setJob] = useState<{ status: StatementJobStatus['status']; seconds: number } | null>(null)
   // One entry per dropped file. Statements arrive as a stack of PDFs far more
   // often than one at a time, and taking only files[0] silently discarded the
@@ -169,6 +178,11 @@ export default function MatterFinancialsPage() {
   const [queue, setQueue] = useState<{ done: number; total: number; name: string } | null>(null)
   const [summary, setSummary] = useState<StatementIngestSummary | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  // Advice, not failure — kept apart from uploadError so a warning about a
+  // long PDF never reads as "the upload broke". These accumulate across a
+  // dropped stack and stay on screen after it finishes, because the whole
+  // point is to be read once the result looks wrong.
+  const [uploadAdvice, setUploadAdvice] = useState<string[]>([])
   const [batesPrefix, setBatesPrefix] = useState('')
 
   // Drill-down: one account expanded at a time, one statement inside it.
@@ -217,21 +231,64 @@ export default function MatterFinancialsPage() {
   // ── Upload ─────────────────────────────────────────────────────────────
 
   /**
-   * Ingest a stack of PDFs, one after another.
+   * Ingest a stack of PDFs: upload them all, then watch them all.
    *
-   * Sequential rather than parallel on purpose: each upload is a queued job
-   * doing several LLM calls, and firing ten at once buys nothing while making
-   * the progress meaningless and the failures hard to attribute.
+   * **Re-entry is refused on a ref, not on state.** React state does not update
+   * until the next render, so two drops in quick succession both read the old
+   * value and both run — which is exactly what happened: a dozen files dropped
+   * twice produced twenty-four jobs, twelve of them recognised as duplicates
+   * after the fact. The ref is set on the same tick as the drop, so the second
+   * one cannot get past it.
    */
   async function handleFiles(files: File[]) {
+    if (uploadingRef.current) {
+      // Say so rather than dropping it silently. Somebody who re-drags is
+      // already unsure the first one landed; ignoring them without a word is
+      // what made them do it in the first place. The two phases want different
+      // words — the reading one runs for minutes, and "still uploading" would
+      // read as stuck.
+      setNotice(phase === 'reading'
+        ? 'Those files were not uploaded — the previous batch is still being read. '
+          + 'Wait for it to finish, then drop them again.'
+        : 'Those files were ignored — the previous drop is still uploading. '
+          + 'Every file from it is being sent.')
+      return
+    }
     const pdfs = files.filter(f => f.type === 'application/pdf')
     const rejected = files.length - pdfs.length
     if (pdfs.length === 0) {
       setUploadError('Only PDF files are accepted')
       return
     }
-    setSummary(null)
 
+    // Before the first await, so the drop zone changes on the same tick as the
+    // drop. It used to switch only once every upload had finished — ten to
+    // fifteen seconds of a screen that looked like nothing had happened.
+    uploadingRef.current = true
+    setPhase('uploading')
+    setQueue({ done: 0, total: pdfs.length, name: '' })
+    setNotice(null)
+    setSummary(null)
+    setUploadAdvice([])
+
+    try {
+      await ingestStack(pdfs, rejected)
+    } finally {
+      // Whatever happened, the drop zone comes back. A ref left true would
+      // disable it for the life of the page, and the only cure would be a
+      // reload nobody would know to try.
+      setJob(null); setQueue(null); setPhase(null)
+      uploadingRef.current = false
+    }
+  }
+
+  /**
+   * Send every file, then watch every job.
+   *
+   * Split out so `handleFiles` can own the re-entry guard and release it in a
+   * `finally` without this whole body sitting inside a try block.
+   */
+  async function ingestStack(pdfs: File[], rejected: number) {
     // Results accumulate across the whole stack, so one summary covers the drop.
     const combined: StatementIngestSummary = {
       statements_found: 0, auto_accepted: 0, needs_review: 0, results: [], bates: null,
@@ -248,13 +305,53 @@ export default function MatterFinancialsPage() {
       setUploadError(failures.join(' · '))
     }
 
-    for (let i = 0; i < pdfs.length; i++) {
-      const file = pdfs[i]
-      setQueue({ done: i, total: pdfs.length, name: file.name })
-      setJob({ status: 'queued', seconds: 0 })
+    const advice: string[] = []
+    function advise(notes: string[]) {
+      advice.push(...notes)
+      setUploadAdvice([...advice])
+    }
+
+    // HAND THE WHOLE STACK OVER BEFORE WAITING ON ANY OF IT.
+    //
+    // The upload is a second; the read is minutes, and the worker runs several
+    // at once. Uploading one and waiting for it before sending the next left
+    // that pool with exactly one job to run however many files were dropped —
+    // so a year of statements took the sum of thirteen reads rather than the
+    // longest few, and the only way to make it finish was to merge them into a
+    // single enormous PDF, which is slower still.
+    const queued: { file: File; jobId: string }[] = []
+    for (const file of pdfs) {
+      setQueue({ done: queued.length, total: pdfs.length, name: file.name })
       try {
-        const result = await ingestStatement(
-          matterId, file, (status, seconds) => setJob({ status, seconds }), batesPrefix,
+        const job = await queueStatement(matterId, file, batesPrefix)
+        queued.push({ file, jobId: job.id })
+        // Shown as soon as the upload lands, which is seconds — long before the
+        // read finishes. It does not stop the ingest: a document holding
+        // several statements is legal input, and the reader is being told what
+        // to do if this one comes out wrong, not being refused.
+        if (job.warnings.length) {
+          advise(pdfs.length > 1
+            ? job.warnings.map(w => `${file.name}: ${w}`)
+            : job.warnings)
+        }
+      } catch (err) {
+        // One bad PDF must not abandon the rest of the stack.
+        fail(`${file.name}: ${err instanceof Error ? err.message : 'failed'}`)
+      }
+    }
+
+    let finished = 0
+    setPhase('reading')
+    setQueue({ done: 0, total: queued.length, name: '' })
+    setJob({ status: 'queued', seconds: 0 })
+
+    // Every result is folded in as it lands. JavaScript is single-threaded, so
+    // these callbacks cannot interleave mid-update — the counters are safe
+    // without any coordination.
+    await Promise.all(queued.map(async ({ file, jobId }) => {
+      try {
+        const result = await awaitStatementJob(
+          jobId, (status, seconds) => setJob({ status, seconds }),
         )
         combined.statements_found += result.statements_found
         combined.auto_accepted += result.auto_accepted
@@ -265,24 +362,25 @@ export default function MatterFinancialsPage() {
         if (!combined.bates && result.bates) combined.bates = result.bates
         setSummary({ ...combined })
       } catch (err) {
-        // One bad PDF must not abandon the rest of the stack.
         fail(`${file.name}: ${err instanceof Error ? err.message : 'failed'}`)
+      } finally {
+        finished += 1
+        setQueue({ done: finished, total: queued.length, name: '' })
       }
+    }))
 
-      // Reloading the page's own data gets its own guard. This sat outside the
-      // try, so a failing accounts or exceptions call rejected the whole
-      // function: the loop stopped, the spinner was never cleared, and no error
-      // ever reached the screen. The upload had succeeded — only the redraw
-      // failed — which is the most misleading way for this to break.
-      try {
-        await refresh()
-      } catch (err) {
-        fail(`Could not refresh the page after ${file.name}: ` +
-             `${err instanceof Error ? err.message : 'unknown error'}`)
-      }
+    // Refreshed once at the end rather than after each file. This gets its own
+    // guard because it used to sit inside the loop's try: a failing accounts or
+    // exceptions call rejected the whole function, the spinner was never
+    // cleared, and no error reached the screen — the upload had succeeded and
+    // only the redraw failed, which is the most misleading way for this to
+    // break.
+    try {
+      await refresh()
+    } catch (err) {
+      fail(`Could not refresh the page: ${err instanceof Error ? err.message : 'unknown error'}`)
     }
 
-    setJob(null); setQueue(null)
   }
 
   // ── Drill-down ─────────────────────────────────────────────────────────
@@ -397,6 +495,74 @@ export default function MatterFinancialsPage() {
     } finally { setBusy(false) }
   }
 
+  /**
+   * Discard what an upload produced and read the PDF again.
+   *
+   * The confirmation names the whole document rather than the statement,
+   * because that is what goes: one PDF can hold several accounts, and re-reading
+   * it recreates every one of them, so the siblings have to be discarded too or
+   * each account ends up filed twice. Somebody clicking Retry on one row needs
+   * to know that before they click, not after.
+   */
+  async function retry(statement: AccountStatement) {
+    const file = statement.source_filename ? `"${statement.source_filename}"` : 'this document'
+    if (!window.confirm(
+      `Read ${file} again from the start?\n\n` +
+      'Everything that upload produced is discarded first — every statement from it, not ' +
+      'just this one, along with their transactions and any account left empty. The PDF is ' +
+      'then re-read, which recreates them.\n\n' +
+      'If the PDF can no longer be retrieved, nothing is deleted.',
+    )) return
+
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await retryStatement(statement.id)
+      setNotice(
+        `Discarded ${result.statements_discarded} statement` +
+        `${result.statements_discarded === 1 ? '' : 's'} and ` +
+        `${result.transactions_discarded} transaction` +
+        `${result.transactions_discarded === 1 ? '' : 's'}` +
+        (result.accounts_deleted
+          ? `, and ${result.accounts_deleted} emptied account` +
+            `${result.accounts_deleted === 1 ? '' : 's'}`
+          : '') +
+        '. The document is being read again — this page updates when it finishes.',
+      )
+      setOpenStatementId(null)
+      setOpenAccountId(null)
+      setEditing(null)
+      setTransactions([])
+      await refresh()
+      // The re-read runs as a job and takes as long as the original did, so the
+      // page shows the same progress it shows for an upload. Without this the
+      // rows simply vanish and nothing says they are coming back.
+      setJob({ status: 'queued', seconds: 0 })
+      try {
+        const summary = await awaitStatementJob(
+          result.job_id, (status, seconds) => setJob({ status, seconds }),
+        )
+        setSummary(summary)
+        setNotice(
+          `Read ${file} again: ${summary.statements_found} statement` +
+          `${summary.statements_found === 1 ? '' : 's'}, ` +
+          `${summary.needs_review} still needing review.`,
+        )
+      } catch (err) {
+        setError(
+          'The document was discarded but the re-read did not finish: ' +
+          `${err instanceof Error ? err.message : 'unknown error'}. ` +
+          'The source PDF is still in storage and can be uploaded again.',
+        )
+      } finally {
+        setJob(null)
+        await refresh()
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not re-read the document')
+    } finally { setBusy(false) }
+  }
+
   async function saveAccount(accountId: number, patch: Record<string, unknown>) {
     setBusy(true)
     try {
@@ -472,34 +638,63 @@ export default function MatterFinancialsPage() {
       {/* ── Upload ── */}
       <div
         className={`card p-8 text-center border-2 border-dashed transition-colors ${
-          job ? 'border-navy bg-navy/5' : dragOver ? 'border-navy bg-navy/5 cursor-pointer' : 'border-border hover:border-navy/40 cursor-pointer'
+          phase ? 'border-navy bg-navy/5' : dragOver ? 'border-navy bg-navy/5 cursor-pointer' : 'border-border hover:border-navy/40 cursor-pointer'
         }`}
         onDrop={e => {
           e.preventDefault(); setDragOver(false)
-          if (!job) handleFiles(Array.from(e.dataTransfer.files))
+          // handleFiles refuses re-entry itself, on a ref. Checking a state
+          // value here as well would be the same stale read that let a second
+          // drop through: `job` is null for the whole upload phase.
+          handleFiles(Array.from(e.dataTransfer.files))
         }}
         onDragOver={e => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={e => { e.preventDefault(); setDragOver(false) }}
-        onClick={() => { if (!job) fileInputRef.current?.click() }}>
+        onClick={() => { if (!uploadingRef.current) fileInputRef.current?.click() }}>
         <input ref={fileInputRef} type="file" accept=".pdf" multiple className="hidden"
           onChange={e => {
             if (e.target.files?.length) handleFiles(Array.from(e.target.files))
             e.target.value = ''
           }} />
-        {job ? (
+        {phase ? (
           <div>
             <div className="mx-auto mb-3 animate-spin w-8 h-8 border-4 border-navy/20 border-t-navy rounded-full" />
-            <p className="text-navy font-medium">
-              {job.status === 'queued' ? 'Queued…' : 'Reading the statement…'}
-            </p>
-            {queue && queue.total > 1 && (
-              <p className="text-navy text-sm mt-1 tabular-nums">
-                File {queue.done + 1} of {queue.total} · {queue.name}
-              </p>
+            {phase === 'uploading' ? (
+              <>
+                {/* The reassurance, and the whole point of this branch: it
+                    appears on the same tick as the drop. Sending a dozen files
+                    takes ten to fifteen seconds, and this used to render
+                    nothing — so the screen looked untouched and the natural
+                    thing to do was drag them again, which is exactly what
+                    produced twenty-four jobs for twelve files. */}
+                <p className="text-navy font-medium">
+                  {queue ? `Uploading ${queue.total} file${queue.total === 1 ? '' : 's'}…` : 'Uploading…'}
+                </p>
+                {queue && (
+                  <p className="text-navy text-sm mt-1 tabular-nums">
+                    {queue.done} of {queue.total} sent{queue.name ? ` · ${queue.name}` : ''}
+                  </p>
+                )}
+                <p className="text-text-secondary text-sm mt-1">
+                  Do not drop them again — every file is being sent.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-navy font-medium">
+                  {job?.status === 'queued' ? 'Queued…' : 'Reading the statements…'}
+                </p>
+                {/* Counts finished, not "which one" — several are read at once,
+                    so there is no current file to name. */}
+                {queue && (
+                  <p className="text-navy text-sm mt-1 tabular-nums">
+                    {queue.done} of {queue.total} done
+                  </p>
+                )}
+                <p className="text-text-secondary text-sm mt-1 tabular-nums">
+                  {job?.seconds ?? 0}s · several are read at once — you can leave this page
+                </p>
+              </>
             )}
-            <p className="text-text-secondary text-sm mt-1 tabular-nums">
-              {job.seconds}s · one pass per statement in the file — a full year takes a few minutes
-            </p>
           </div>
         ) : (
           <div>
@@ -508,8 +703,10 @@ export default function MatterFinancialsPage() {
             </svg>
             <p className="text-navy font-medium">Drop statement PDFs here or click to browse</p>
             <p className="text-text-secondary text-sm mt-1">
-              Bank, brokerage, or credit card. Drop as many as you like — they run one at a time.
-              Several statements in one file is fine too; each is filed separately.
+              Bank, brokerage, or credit card. Drop as many as you like — several are read at
+              once, so a stack of monthly PDFs finishes far sooner than the same months
+              combined into one file. Several statements in one file still works; each is
+              filed separately.
             </p>
           </div>
         )}
@@ -531,6 +728,14 @@ export default function MatterFinancialsPage() {
         </div>
       </details>
 
+      {uploadAdvice.length > 0 && (
+        <div className="p-3 border border-amber-300 bg-amber-50 rounded space-y-1">
+          <p className="text-sm font-medium text-amber-900">Before you rely on this import</p>
+          {uploadAdvice.map((note, i) => (
+            <p key={i} className="text-sm text-amber-900">{note}</p>
+          ))}
+        </div>
+      )}
       {uploadError && <p className="text-sm text-red-600">{uploadError}</p>}
 
       {/* ── Ingest result ── */}
@@ -663,6 +868,11 @@ export default function MatterFinancialsPage() {
                         {s.source_filename}
                       </span>
                     )}
+                    {/* Reviewing an exception nearly always means reading the
+                        page. Deciding whether a balance really is what the
+                        statement printed cannot be done from the numbers we
+                        extracted from it. */}
+                    <StatementPdfButton statementId={s.id} label="Show the source statement" />
                     {s.bates_first && (
                       <span className="text-xs text-text-secondary font-mono">
                         {s.bates_first}
@@ -672,6 +882,17 @@ export default function MatterFinancialsPage() {
                     <span className="ml-auto flex gap-3">
                       <button type="button" className="text-xs text-navy underline" disabled={busy}
                         onClick={() => decide(s, 'accepted')}>Accept</button>
+                      {/* Between accepting a bad read and throwing it away
+                          outright: some statements come out wrong for a reason
+                          a second reading fixes. It discards the whole upload
+                          first — see retry() for why it cannot be just this
+                          statement. */}
+                      <button type="button" className="text-xs text-navy underline"
+                        disabled={busy || !s.storage_path}
+                        title={s.storage_path
+                          ? 'Discard this upload and read the PDF again'
+                          : 'No source PDF was stored for this statement'}
+                        onClick={() => retry(s)}>Retry</button>
                       <button type="button" className="text-xs text-red-700 underline" disabled={busy}
                         onClick={() => decide(s, 'rejected')}>Reject and delete</button>
                     </span>
@@ -785,6 +1006,7 @@ export default function MatterFinancialsPage() {
                         <button type="button" className="text-navy underline" onClick={() => openStatement(s)}>
                           {period(s)}
                         </button>
+                        <StatementPdfButton statementId={s.id} />
                         <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${REVIEW_COLOR[s.review_status]}`}>
                           {REVIEW_LABEL[s.review_status]}
                         </span>

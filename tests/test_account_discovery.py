@@ -398,10 +398,12 @@ check("institution inferred from the statement it sat on",
       entry["institution"], "First Financial Bank")
 check("and flagged as inferred", entry["institution_inferred"], True)
 check("named the account it was seen on", entry["seen_on"], ["First Financial Bank ····9260"])
-# One query per gate term — transfer, xfer, payment, pmt, autopay — and not one
-# page of the matter's whole transaction table.
+# One query per gate term and not one page of the matter's whole transaction
+# table. The mask term is in there because a masked number is an account
+# reference whatever verb the sentence uses, so the fetch cannot be verbs alone.
 check("the search was pushed to the database, not paged over everything",
-      repo.calls, len(ads._TRANSFER_TERMS) + len(ads._PAYMENT_TERMS))
+      repo.calls,
+      len(ads._TRANSFER_TERMS) + len(ads._MOVEMENT_TERMS) + len(ads._MASK_TERMS))
 
 print("\nAn institution the description names outright")
 
@@ -492,6 +494,50 @@ rows = [
 ]
 results, _ = run(held, rows)
 check("busiest account first", [r["last4"] for r in results], ["2222", "1111"])
+
+# ── A mask, in any sentence at all ───────────────────────────────────────────
+
+print("\nA masked number needs no verb")
+
+# The line that went missing. Capital One writes an intra-bank move as a plain
+# deposit: no "transfer", no "payment", and the other account's number sitting
+# in the open. Gating on verbs meant this was invisible while the identical
+# shape with the word "Payment" in it was not.
+check("a deposit naming a masked account",
+      _references("Deposit from 360 Performance Savings XXXXXXX3640"),
+      [("3640", None)])
+
+check("and the withdrawal on the other side of it",
+      _references("Electricity - Withdrawal to Amandas Checking Account XXXXXXX2322"),
+      [("2322", None)])
+
+# The mask is the assertion, so even a sentence with no movement word at all
+# still reports. Nobody masks a confirmation number.
+check("no movement word required",
+      _references("Overdraft protection linked to XXXXXXX3640"),
+      [("3640", None)])
+
+print("\nAnd the noise it must not pick up")
+
+for line in (
+    "Deposit from 6R CONSULTING IN PAYROLL",
+    "Deposit from DFW CRYSTALS PAYROLL",
+    "Check Deposit (Mobile)",
+    "ATM Withdrawal - CAPITAL ONE A3D7 FRISCO, TX",
+    "Withdrawal from CAPITAL ONE MOBILE PMT",
+    "Withdrawal from NEWREZ-SHELLPOIN ACH PMT",
+    "Zelle money sent to Nickola Rushing",
+    "Interest Rate Change from 3.251% to 3.154%",
+):
+    check("silent on %r" % line[:38], _references(line), [])
+
+# A deposit is not a transfer, so it does not get the loose "label then number"
+# pattern — that run is a confirmation number on everything but a transfer.
+check("a deposit does not read a trailing run as an account",
+      _references("Deposit from ACME PAYROLL 998877665"), [])
+check("but a transfer still does",
+      _references("TRANSFER FROM CHASE 4321"), [("4321", "CHASE")])
+
 
 # ── Payments that name an account ────────────────────────────────────────────
 

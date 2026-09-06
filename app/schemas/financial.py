@@ -20,6 +20,13 @@ class StatementIngestJobResponse(BaseModel):
     """A queued statement extraction. Poll it at GET /statements/jobs/{id}."""
     id: str = Field(..., description="Job id to poll")
     status: str = Field(..., description="queued | running | succeeded | failed")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="What the upload looks like before anything reads it — chiefly that a PDF "
+                    "appears to hold several statements. Advisory: the ingest is already "
+                    "queued, because a document holding several statements is legal input and "
+                    "blocking it would trade a real workflow for a rare one",
+    )
 
 
 class StatementIngestOutcome(BaseModel):
@@ -538,6 +545,55 @@ class ReferencedInstitutionResponse(BaseModel):
     last_seen: Optional[date] = None
     seen_on: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
+
+
+class StatementRetryResult(BaseModel):
+    """
+    What a re-import discarded, and the job now reading the document again.
+
+    The counts are the point of the response: "Retry" on one statement can
+    legitimately discard five, because a combined statement holds five accounts
+    and the file is re-read as a whole. A caller that reported only the one the
+    user clicked would understate what just happened.
+    """
+    job_id: str = Field(..., description="Poll this the same way an upload is polled")
+    statements_discarded: int = Field(
+        ...,
+        description="Every statement the original upload produced — not just the one clicked. "
+                    "Re-reading the PDF recreates all of them, so leaving the siblings would "
+                    "duplicate each of them",
+    )
+    transactions_discarded: int
+    accounts_deleted: int = Field(
+        ...,
+        description="Accounts removed because nothing of value was left on them. An account "
+                    "carrying a characterization is kept",
+    )
+    source_filename: Optional[str] = Field(default=None, description="The document being re-read")
+
+
+class StatementPdfUrlResponse(BaseModel):
+    """
+    Where to find the document a statement was read from.
+
+    Carries a page hint because one upload routinely holds a whole production —
+    twelve statements, sixty pages — and opening at page 1 leaves the reader
+    hunting for the month they clicked on.
+    """
+    url: str = Field(..., description="Signed URL; the signature is the authorization")
+    expires_in: int = Field(..., description="Seconds the URL remains valid")
+    page: Optional[int] = Field(
+        default=None,
+        description="The first page carrying one of this statement's transactions — an "
+                    "approximation of where it begins, not its first page. A statement "
+                    "usually opens with a summary page or two before any line appears, so "
+                    "the true start is at or just before this",
+    )
+    source_filename: Optional[str] = Field(
+        default=None,
+        description="The uploaded file's own name. Storage renames every upload to a job id, "
+                    "so this is the only thing tying the tab that opens back to a real file",
+    )
 
 
 class CreditorResponse(BaseModel):

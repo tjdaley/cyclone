@@ -135,30 +135,73 @@ class JobService:
 
     # ── Worker side ───────────────────────────────────────────────────────
 
-    def run_pending(self, manager: DatabaseManager, limit: int = 3) -> int:
+    def claim_pending(self, manager: DatabaseManager, limit: int) -> list[JobInDB]:
         """
-        Claim and run queued intake jobs.
+        Take ownership of up to ``limit`` queued jobs, without running them.
 
-        :param manager: Database manager for the worker.
-        :type manager: DatabaseManager
-        :param limit: Most jobs to run in one tick.
-        :type limit: int
-        :return: How many jobs this worker completed (succeeded or failed).
-        :rtype: int
+        Split from running so the two can happen on different threads: claiming
+        is a couple of fast database calls, running a statement ingest is
+        minutes of LLM time. A worker that did both in one call could only ever
+        have one job in flight, which is what made a thirteen-month upload a
+        thirteen-times-as-long wait.
+
+        Claiming is still serial and still cheap. It is also still two-layered —
+        a Redis key so two nodes cannot start the same job in the same instant,
+        then the ``queued → running`` transition that holds it after the key
+        expires.
+
+        :param limit: How many to take. The caller sizes this to its free
+            capacity, so a full pool claims nothing and leaves the queue for
+            whichever node has room.
+        :return: The jobs claimed, already marked running.
+        :rtype: list[JobInDB]
         """
+        if limit <= 0:
+            return []
         repo = JobRepository(manager)
+        claimed: list[JobInDB] = []
+        for kind in (JobKind.matter_intake, JobKind.statement_ingest):
+            if len(claimed) >= limit:
+                break
+            for job in repo.next_queued(kind, limit=limit - len(claimed)):
+                if self._claim(repo, job):
+                    claimed.append(job)
+                if len(claimed) >= limit:
+                    break
+        return claimed
+
+    def run_claimed(self, manager: DatabaseManager, job: JobInDB) -> None:
+        """
+        Run one job this worker has already claimed.
+
+        :param manager: A manager belonging to the calling thread and nobody
+            else. ``SupabaseManager`` is not thread-safe, so a pool that shared
+            one across jobs would interleave two ingests' requests.
+        """
         handlers = {
             JobKind.matter_intake: self._run_matter_intake,
             JobKind.statement_ingest: self._run_statement_ingest,
         }
-        done = 0
-        for kind, handler in handlers.items():
-            for job in repo.next_queued(kind, limit=limit):
-                if not self._claim(repo, job):
-                    continue
-                handler(manager, repo, job)
-                done += 1
-        return done
+        handler = handlers.get(job.kind)
+        if handler is None:
+            LOGGER.error("job_service: no handler for job=%s kind=%s", job.id, job.kind)
+            return
+        handler(manager, JobRepository(manager), job)
+
+    def run_pending(self, manager: DatabaseManager, limit: int = 3) -> int:
+        """
+        Claim and run queued jobs on this thread, one after another.
+
+        The serial path, kept for callers with nowhere to run work concurrently.
+        The worker uses ``claim_pending`` and ``run_claimed`` instead.
+
+        :return: How many jobs this worker completed (succeeded or failed).
+        :rtype: int
+        """
+        jobs = self.claim_pending(manager, limit)
+        for job in jobs:
+            self.run_claimed(manager, job)
+        return len(jobs)
 
     def _claim(self, repo: JobRepository, job: JobInDB) -> bool:
         """

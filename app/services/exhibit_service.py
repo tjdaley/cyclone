@@ -33,6 +33,11 @@ LOGGER = LoggerFactory.create_logger(__name__)
 # matter cannot supply is printed as a fill-in and reported in `warnings`.
 _BLANK = "__________"
 
+# Sits immediately above the Rule 1006 notice, which is the point of it: the
+# notice says the underlying records are available for examination, and this
+# block names them.
+_SOURCES_HEADING = "Documents summarized in this exhibit"
+
 # Under Texas Rule of Evidence 1006 a summary may stand in for voluminous
 # records only if the originals are available and the summary is accurate — and
 # the proponent carries that accuracy, not the tool that drew the table. The
@@ -132,6 +137,18 @@ class Exhibit:
     #: dagger in a cell looks directly below the table for what it means, and a
     #: mark whose explanation is missing is worse than no mark at all.
     footnotes: tuple[str, ...] = ()
+    sources: tuple[tuple[str, str], ...] = ()
+    """
+    The documents this exhibit summarizes: ``(filename, Bates range)`` each.
+
+    Rendered immediately before the Rule 1006 notice, and paired with it on
+    purpose — the notice says the underlying records are available for
+    examination, and this says *which* records, by the name and the stamp
+    somebody has to go and pull. A summary that cannot be traced back to the
+    documents behind it is the objection the rule exists to answer.
+
+    Absent from the CSV, like the caption and the notice: that file is the data.
+    """
     notice: str = NOTICE
     warnings: list[str] = field(default_factory=list)
     landscape: bool = False
@@ -447,6 +464,13 @@ def to_markdown(exhibit: Exhibit) -> bytes:
             out.append("- **%s:** %s" % (label, value))
         out.append("")
 
+    if exhibit.sources:
+        out.append("## %s" % _SOURCES_HEADING)
+        out.append("")
+        for label, value in exhibit.sources:
+            out.append("- **%s:** %s" % (label, value))
+        out.append("")
+
     out.append("---")
     out.append("")
     out.append("*%s*" % exhibit.notice)
@@ -648,6 +672,15 @@ def to_docx(exhibit: Exhibit) -> bytes:
             paragraph.add_run(value)
         document.add_paragraph()
 
+    if exhibit.sources:
+        heading = document.add_paragraph()
+        heading.add_run(_SOURCES_HEADING).bold = True
+        for label, value in exhibit.sources:
+            paragraph = document.add_paragraph(style="List Bullet")
+            paragraph.add_run("%s: " % label).bold = True
+            paragraph.add_run(value)
+        document.add_paragraph()
+
     notice = document.add_paragraph()
     notice_run = notice.add_run(exhibit.notice)
     notice_run.italic = True
@@ -835,6 +868,7 @@ def to_pdf(exhibit: Exhibit) -> bytes:
         flow('<p class="notice">%s</p>' % _esc(note))
     flow(_pdf_list("Totals", exhibit.summary))
     flow(_pdf_list("Selection", exhibit.selection))
+    flow(_pdf_list(_SOURCES_HEADING, exhibit.sources))
     flow('<p>&#160;</p><p class="notice">%s</p>' % _esc(exhibit.notice))
     writer.end_page()
     writer.close()

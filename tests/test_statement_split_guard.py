@@ -157,6 +157,35 @@ summary, a, s, t = run({"statements": [
 ]})
 check("no split flag raised", "SUSPECT_SPLIT" in codes(s.rows[1]), False)
 
+# ── 5. A pass that could not be parsed ───────────────────────────────────
+#
+# extract() records the pages it failed to read rather than failing the whole
+# job. Commit has to turn that into something a person sees, or a register short
+# by a page of transactions looks exactly like a complete one.
+print("5. pages the extraction could not parse")
+short = block("First Financial Bank", "4527", [1], [100.00, 200.00])
+short["unread_pages"] = [5, 6]
+summary, a, s, t = run({"statements": [short]})
+check("flagged", "PASS_UNREADABLE" in codes(s.rows[0]), True)
+check("held for a person", summary["results"][0]["status"], "needs_review")
+note = next(f["note"] for f in s.rows[0]["flags"] if f["code"] == "PASS_UNREADABLE")
+check("names the pages", "5, 6" in note, True)
+check("says the balances will be short", "short by that amount" in note, True)
+
+# ── 6. A statement whose header could not be located ─────────────────────
+print("6. a statement separated by page number alone")
+loose = block("First Financial Bank", "4527", [1], [100.00, 200.00])
+loose["header_not_found"] = True
+summary, a, s, t = run({"statements": [loose]})
+check("flagged", "STATEMENT_BOUNDARY_UNCERTAIN" in codes(s.rows[0]), True)
+check("held for a person", summary["results"][0]["status"], "needs_review")
+note = next(f["note"] for f in s.rows[0]["flags"] if f["code"] == "STATEMENT_BOUNDARY_UNCERTAIN")
+check("says what could have gone wrong", "before or after this one" in note, True)
+
+# A clean statement raises neither.
+summary, a, s, t = run({"statements": [block("First Financial Bank", "4527", [1], [1.00])]})
+check("silent on a statement that read cleanly", codes(s.rows[0]), [])
+
 print()
 print("FAILURES: %d" % len(FAILURES))
 for f in FAILURES:

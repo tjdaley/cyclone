@@ -8,6 +8,7 @@ statement of the account you *do* have prints the number of the one you do not.
     Transfer from XXX4070 to XXX9260: Conf #:19842192
     Transfer to DDA        Acct No.  86110018909-D
     INTERNET XFER FROM CHKG 8098386837
+    Deposit from 360 Performance Savings XXXXXXX3640
 
 Every one of those names a second account. Matching them against the accounts
 actually filed on the matter leaves the difference: numbers that exist, that
@@ -62,12 +63,24 @@ _TRANSFER = re.compile(r"\b(?:transfer|xfer)\b", re.I)
 # row the regex would accept is a row one of these searches returns.
 _TRANSFER_TERMS = ("transfer", "xfer")
 
-# A payment is a transfer with only one side named, and a few banks name the
-# other side anyway: "Payment To Chase Card Ending IN 9547". Those belong in the
-# account list exactly as a transfer reference does. The vast majority name only
-# a payee and are handled by ``creditors()`` further down.
-_PAYMENT = re.compile(r"\b(?:payment|payments|pmt|autopay)\b", re.I)
+# What ``creditors()`` fetches. Narrower than ``_MOVEMENT_TERMS`` on purpose:
+# that scan is about who was PAID, and a deposit is not a payment to anybody.
 _PAYMENT_TERMS = ("payment", "pmt", "autopay")
+
+# Money moving, in the words banks other than "transfer" use for it. A payment
+# is a transfer with only one side named, and a few banks name the other side
+# anyway ("Payment To Chase Card Ending IN 9547"); Capital One writes an
+# intra-bank move as "Deposit from 360 Performance Savings XXXXXXX3640" — no
+# transfer, no payment, and an account number in plain sight.
+_MOVEMENT = re.compile(
+    r"\b(?:payment|payments|pmt|autopay|deposit|deposits|withdrawal|withdrawals|withdraw)\b",
+    re.I,
+)
+_MOVEMENT_TERMS = ("payment", "pmt", "autopay", "deposit", "withdraw")
+
+# A masked number needs no verb at all — see ``_references``. Searched for in
+# the database as well, or the line above is never fetched to be parsed.
+_MASK_TERMS = ("xxx",)
 
 # The same idea for wires. "wire" alone would also pull every VERIZON WIRELESS
 # line out of the database, which is cheap — the parser below rejects them — and
@@ -191,13 +204,19 @@ def _references(description: str) -> list[tuple[str, Optional[str]]]:
     the line is counted twice and the account appears to have moved twice the
     money it did.
 
-    A payment is read too, but with a **narrower** pattern set. On a transfer,
-    "FROM CHKG 8098386837" is a bank convention and the trailing run really is
-    an account number. On a payment it is a confirmation number essentially
-    always — "Zelle Payment To Kathy Gunn 20928990159" would otherwise be
-    reported as an undisclosed account belonging to Kathy Gunn. So ``_LABELLED``
-    is a transfer-only pattern, and a payment must name its account in a form
-    that says so outright: a mask, an "Acct No.", or "ending in".
+    Three ways in, and they are not equally trusting:
+
+    * **A transfer** gets every pattern, including ``_LABELLED``. On a transfer,
+      "FROM CHKG 8098386837" is a bank convention and the trailing run really is
+      an account number.
+    * **Any other movement** — a payment, a deposit, a withdrawal — gets the
+      explicit patterns only. There a trailing digit run is a confirmation
+      number essentially always, and "Zelle Payment To Kathy Gunn 20928990159"
+      would otherwise be reported as an undisclosed account belonging to Kathy
+      Gunn. It must name its account outright: a mask, an "Acct No.", or
+      "ending in".
+    * **A mask, in any sentence at all.** No verb is required, because the mask
+      is itself the assertion. Nobody masks a confirmation number.
 
     :return: ``(number, label)`` per reference, where the label is an
         institution name read off the page, or None. The same description can
@@ -207,10 +226,17 @@ def _references(description: str) -> list[tuple[str, Optional[str]]]:
     """
     if not description:
         return []
-    transfer = bool(_TRANSFER.search(description))
-    if not transfer and not _PAYMENT.search(description):
-        return []
     text = _clean(description)
+    transfer = bool(_TRANSFER.search(description))
+    # A MASK NEEDS NO VERB. The gate exists so that a confirmation number in a
+    # description is not read as an account — but nobody masks a confirmation
+    # number. "XXXXXXX3640" is the bank asserting that these are the last digits
+    # of an account, whatever sentence it sits in, and requiring a verb as well
+    # meant "Deposit from 360 Performance Savings XXXXXXX3640" was invisible
+    # while the same line with the word "Payment" in it was not.
+    explicit = bool(_MASKED.search(text) or _ENDING.search(text))
+    if not (transfer or explicit or _MOVEMENT.search(description)):
+        return []
 
     found: list[tuple[int, str, Optional[str]]] = []
     claimed: list[tuple[int, int]] = []
@@ -540,7 +566,7 @@ class AccountDiscoveryService:
         seen_rows: set[int] = set()
         scanned = 0
 
-        for term in _TRANSFER_TERMS + _PAYMENT_TERMS:
+        for term in _TRANSFER_TERMS + _MOVEMENT_TERMS + _MASK_TERMS:
             offset = 0
             while True:
                 rows, total = transaction_repo.search(

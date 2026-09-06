@@ -17,6 +17,8 @@ scope**. Transactions carry no matter_id, so every query resolves the matter's
 accounts first. That is not just plumbing — it is what stops a crafted request
 from reaching another matter's records.
 """
+import re
+from collections import OrderedDict
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -71,6 +73,17 @@ def _account_label(row: dict[str, Any]) -> str:
     institution = row.get("institution") or "Unknown"
     last4 = row.get("account_last4")
     return "%s%s" % (institution, " x%s" % last4 if last4 else "")
+
+
+# Bates stamps sort by their numeric tail, not as strings: "KF 9" precedes
+# "KF 10" on the production and follows it alphabetically. A stamp with no
+# digits sorts last rather than first, so an oddity never leads the list.
+_BATES_TAIL = re.compile(r"(\d+)\s*$")
+
+
+def _bates_key(value: str) -> tuple[int, str]:
+    found = _BATES_TAIL.search(value or "")
+    return (int(found.group(1)) if found else 10 ** 9, value or "")
 
 
 class TransactionSearchService:
@@ -310,8 +323,84 @@ class TransactionSearchService:
             rows=tuple(table),
             selection=tuple(selection),
             summary=tuple(summary),
+            sources=self._sources(manager, matter.id, rows),
             warnings=warnings,
         )
+
+    @staticmethod
+    def _sources(
+        manager: DatabaseManager, matter_id: int, rows: list[dict[str, Any]],
+    ) -> tuple[tuple[str, str], ...]:
+        """
+        The documents these lines were read out of, by name and Bates range.
+
+        This is the half of Rule 1006 the table cannot supply. The notice at the
+        foot of every exhibit says the underlying records are available for
+        examination; this says **which** records, in the two terms somebody
+        actually needs to go and pull them — the file as it was produced, and
+        the stamp on it.
+
+        Grouped by the UPLOAD, not by the statement. One PDF routinely holds
+        several statements — a combined statement holds one per account, and a
+        year of a production is often scanned as a single file — and a list that
+        named each statement separately would send someone to the same document
+        five times while looking like five documents.
+
+        The Bates range shown is the **document's**, not the range of the lines
+        selected. A summary drawn from three transactions inside a statement is
+        still drawn from that statement, and the person pulling it needs its
+        extent, not the two pages the rows happened to land on.
+
+        :param rows: The transactions in the exhibit, already fetched.
+        :return: ``(filename, Bates range)`` per document, in Bates order.
+        :rtype: tuple[tuple[str, str], ...]
+        """
+        statement_ids = {r.get("statement_id") for r in rows if r.get("statement_id")}
+        if not statement_ids:
+            return ()
+
+        # The matter's statements in one read, rather than one per id. A matter
+        # holds hundreds at most, and the alternative is a query per statement.
+        statements = FinancialAccountStatementRepository(manager).get_by_matter(matter_id)
+
+        documents: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        for statement in statements:
+            if statement.id not in statement_ids:
+                continue
+            extraction = statement.extraction or {}
+            # Keyed on the ingest job: it is the upload, which is what a
+            # filename only approximates — two productions can both contain a
+            # file called "statements.pdf".
+            key = statement.source_job_id or statement.storage_path or str(statement.id)
+            entry = documents.get(key)
+            if entry is None:
+                entry = {"name": (extraction.get("source_filename") or "").strip(), "stamps": []}
+                documents[key] = entry
+            elif not entry["name"]:
+                entry["name"] = (extraction.get("source_filename") or "").strip()
+            for stamp in (extraction.get("bates_first"), extraction.get("bates_last")):
+                if stamp:
+                    entry["stamps"].append(str(stamp))
+
+        described: list[tuple[str, str, tuple[Any, ...]]] = []
+        for key, entry in documents.items():
+            stamps = sorted(set(entry["stamps"]), key=_bates_key)
+            if not stamps:
+                # Said plainly rather than left blank. An unstamped production
+                # is ordinary, and a reader who cannot tell "no stamp" from "we
+                # did not look" has to go and check.
+                span = "no Bates stamp detected"
+            elif len(stamps) == 1:
+                span = stamps[0]
+            else:
+                span = "%s – %s" % (stamps[0], stamps[-1])
+            name = entry["name"] or "Unnamed upload (job %s)" % key[:8]
+            described.append((name, span, _bates_key(stamps[0]) if stamps else (10**9, name)))
+
+        # Bates order, so the block reads as the production does and an
+        # unstamped document falls to the end rather than the middle.
+        described.sort(key=lambda d: d[2])
+        return tuple((name, span) for name, span, _ in described)
 
     def _describe(
         self,

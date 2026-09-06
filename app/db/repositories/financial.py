@@ -175,6 +175,17 @@ class FinancialAccountStatementRepository(BaseRepository[FinancialAccountStateme
             sort_by="period_end",
         )[0]
 
+    def get_by_source_job(self, source_job_id: str) -> list[FinancialAccountStatementInDB]:
+        """
+        Every statement one upload produced.
+
+        The unit of a re-import is the DOCUMENT, not the statement. A combined
+        statement holds five accounts; re-reading the PDF to fix one of them
+        produces all five again, so the other four have to go first or the matter
+        ends up holding each of them twice.
+        """
+        return self.select_many(condition={"source_job_id": source_job_id})[0]
+
     def rejected_ids(self, matter_id: int) -> list[int]:
         """
         Statements whose extraction was thrown away.
@@ -279,6 +290,36 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             sort_by="transaction_date",
         )[0]
         return rows if include_deleted else [r for r in rows if r.deleted_at is None]
+
+    def first_page(self, statement_id: int) -> Optional[int]:
+        """
+        The lowest page number any of a statement's lines was printed on.
+
+        Used to open the source PDF near the right place. One upload commonly
+        holds a whole production — twelve months, sixty pages — so opening at
+        page 1 leaves the reader to hunt for the statement they clicked.
+
+        It is an approximation and the caller says so: this is the first page
+        carrying a TRANSACTION, not the statement's first page. A statement
+        usually opens with a summary page or two before any line appears, so
+        the true start is at or slightly before this. Landing a page late in
+        the right month beats landing on page 1 of the wrong one.
+
+        :return: The page number, or None when no line records one.
+        :rtype: Optional[int]
+        """
+        result = (
+            self.manager.client.table(self.table_name)
+            .select("physical_page_number")
+            .eq("statement_id", statement_id)
+            .is_("deleted_at", "null")
+            .not_.is_("physical_page_number", "null")
+            .order("physical_page_number", desc=False)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0].get("physical_page_number") if rows else None
 
     def search(
         self,

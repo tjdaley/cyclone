@@ -46,6 +46,8 @@ from schemas.financial import (
     StatementIngestJobResponse,
     StatementIngestSummary,
     StatementJobStatusResponse,
+    StatementPdfUrlResponse,
+    StatementRetryResult,
     StatementRejectResult,
     StatementResponse,
     StatementReviewRequest,
@@ -71,6 +73,7 @@ from services.audit_logger import AuditLogger
 from services import exhibit_service
 from services.job_service import job_service
 from services.statement_service import statement_service
+from services.storage_service import StorageService
 from services.transaction_search_service import transaction_search_service
 from util.loggerfactory import LoggerFactory
 
@@ -161,7 +164,15 @@ def upload_statement(
         LOGGER.error("financial.upload_statement: could not queue: %s", str(e))
         raise HTTPException(status_code=502, detail="Could not store the upload for processing") from e
 
-    return StatementIngestJobResponse(id=job.id, status=job.status.value)
+    return StatementIngestJobResponse(
+        id=job.id, status=job.status.value,
+        # Surveyed after queueing, never before: the warning is advisory and a
+        # failure to produce one must not cost the upload. It is fast — the page
+        # count is free and the text comes off the text layer with no OCR — so
+        # it stays inside the request rather than becoming a second round trip
+        # the caller could skip.
+        warnings=statement_service.survey_upload(pdf_bytes),
+    )
 
 
 @router.get("/statements/jobs/{job_id}", response_model=StatementJobStatusResponse)
@@ -293,6 +304,107 @@ def export_undisclosed_accounts(
         headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
 
     return Response(content=content, media_type=media_type, headers=headers)
+
+
+@router.post("/statements/{statement_id}/retry", response_model=StatementRetryResult)
+def retry_statement(
+    statement_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementRetryResult:
+    """
+    Discard what an upload produced and read the PDF again.
+
+    **This acts on the document, not the statement**, and the response says how
+    many statements went. One PDF can hold several accounts — a combined
+    statement does — and re-reading it recreates every one of them, so the
+    siblings have to go too or the matter ends up holding each account twice.
+
+    Nothing is deleted until the source PDF has been retrieved, so a retry
+    against a purged document fails with everything still in place. A 409 here
+    always means "nothing changed".
+    """
+    try:
+        result = statement_service.retry_statement(
+            manager, statement_id, _staff_id(request, manager),
+        )
+    except ValueError as e:
+        message = str(e)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message) from e
+        # The PDF is unreachable. 409 rather than 404: the statement is fine and
+        # still there, and the caller needs to know the deletes did not happen.
+        raise HTTPException(status_code=409, detail=message) from e
+    except Exception as e:  # noqa: BLE001 — a storage or queue failure mid-retry
+        LOGGER.error("financial.retry_statement: statement=%s failed: %s", statement_id, str(e))
+        raise HTTPException(
+            status_code=502,
+            detail="Could not requeue the document. Check the statement list before retrying.",
+        ) from e
+    return StatementRetryResult(**result)
+
+
+@router.get("/statements/{statement_id}/pdf-url", response_model=StatementPdfUrlResponse)
+def get_statement_pdf_url(
+    statement_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementPdfUrlResponse:
+    """
+    A short-lived signed URL for the PDF a statement was extracted from.
+
+    JSON rather than a redirect, the same as `pleadings/{id}/pdf-url`: the
+    browser cannot attach the bearer token to a plain link or an iframe, so the
+    SPA fetches the URL here and navigates to it. The signature in the query
+    string is the authorization.
+
+    **The three ways this legitimately fails are told apart**, because "the
+    document is not there" and "storage is down" call for completely different
+    reactions from whoever clicked:
+
+    * no ``storage_path`` — the statement predates stored sources, or arrived
+      by a path that kept none. Nothing to look for.
+    * a path, but Storage has no object — the PDF was purged. The transactions
+      are still evidence; the source is gone and would have to be re-uploaded.
+    * Storage refused — a real outage, and a retry is the right response.
+
+    Collapsing those into one 404 produces the dead link this endpoint exists to
+    replace: the reader cannot tell whether to go find the file, ask for it
+    again in discovery, or simply click once more.
+    """
+    repo = FinancialAccountStatementRepository(manager)
+    record = repo.select_one(condition={"id": statement_id})
+    if record is None:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    if not record.storage_path:
+        raise HTTPException(
+            status_code=404,
+            detail="No source PDF was stored for this statement. Its transactions are "
+                   "unaffected — only the document it was read from is missing.",
+        )
+
+    expires_in = 300
+    url = StorageService(manager).get_signed_url(record.storage_path, expires_in=expires_in)
+    if not url:
+        # get_signed_url swallows the distinction, so this covers both a purged
+        # object and an outage. Say both, rather than asserting the one that
+        # would send somebody looking for a file that is really still there.
+        LOGGER.warning("financial.get_statement_pdf_url: no signed URL for statement=%s",
+                       statement_id)
+        raise HTTPException(
+            status_code=404,
+            detail="The source PDF could not be opened. It may have been purged from "
+                   "storage, or storage may be unavailable — try again, and if it "
+                   "keeps failing the document will need to be uploaded afresh.",
+        )
+
+    return StatementPdfUrlResponse(
+        url=url,
+        expires_in=expires_in,
+        page=FinancialAccountTransactionRepository(manager).first_page(statement_id),
+        source_filename=(record.extraction or {}).get("source_filename"),
+    )
 
 
 # ── Payee classifications ────────────────────────────────────────────────────

@@ -11,6 +11,8 @@ Run from the app directory (same image as the API):
     python crm_worker.py
 """
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
 
 from dependencies import get_db_manager, get_landing_pages_db
 from services.crm_agent_service import crm_agent_service
@@ -85,20 +87,62 @@ def _run_diff_explainer() -> None:
             LOGGER.error("diff_explainer: failed run_id=%s err=%s", run.id, str(e))
 
 
-def _run_jobs() -> None:
+# Jobs this worker has started and not yet seen finish. Only the main loop
+# touches it, so no lock: the pool's threads never look at it.
+_IN_FLIGHT: set[Future] = set()
+
+
+def _run_one(job: Any) -> None:
     """
-    Run queued background jobs — currently matter intake extraction.
+    Run one claimed job on a pool thread, with its own database connection.
+
+    A manager per job, not per worker: ``SupabaseManager`` is not thread-safe,
+    and sharing one would interleave two ingests' requests down a single
+    connection. It is cheap to make.
+    """
+    try:
+        job_service.run_claimed(get_db_manager(), job)
+    except Exception as e:  # noqa: BLE001 — a thread that raises kills nothing else
+        LOGGER.error("crm_worker: job=%s failed err=%s", job.id, str(e), exc_info=True)
+
+
+def _run_jobs(pool: ThreadPoolExecutor, capacity: int) -> None:
+    """
+    Top the pool back up to capacity with whatever is queued.
+
+    **This must not block**, and that is the change that matters. It used to run
+    each job to completion on the main loop, so a single statement — a
+    thirteen-month upload took 1,600 seconds and was still going — stopped
+    everything: no other job started, and the CRM tick did not run either,
+    which is why a long ingest looked like a dead worker.
+
+    Now the loop claims only what it has room for and hands it to the pool. Five
+    statements read at once, and the tick carries on around them.
 
     Deliberately outside the ``crm:poller`` lock. That lock makes CRM polling
     fleet-wide single-runner, which is right for scanning a shared mailbox but
     wrong here: jobs are claimed individually, so every node should take work.
     """
+    global _IN_FLIGHT
+    _IN_FLIGHT = {future for future in _IN_FLIGHT if not future.done()}
+
+    free = capacity - len(_IN_FLIGHT)
+    if free <= 0:
+        return
     try:
-        done = job_service.run_pending(get_db_manager(), limit=3)
-        if done:
-            LOGGER.info("crm_worker: completed %s background job(s)", done)
-    except Exception as e:  # noqa: BLE001 — a bad job must not stop the loop
-        LOGGER.error("crm_worker: job run failed err=%s", str(e))
+        # Claim only what there is room to run. A worker at capacity takes
+        # nothing, which leaves the queue for a node that has room rather than
+        # holding jobs hostage in a backlog of its own.
+        claimed = job_service.claim_pending(get_db_manager(), limit=free)
+    except Exception as e:  # noqa: BLE001 — a bad claim must not stop the loop
+        LOGGER.error("crm_worker: job claim failed err=%s", str(e))
+        return
+
+    for job in claimed:
+        _IN_FLIGHT.add(pool.submit(_run_one, job))
+    if claimed:
+        LOGGER.info("crm_worker: started %d job(s), %d now running of %d slots",
+                    len(claimed), len(_IN_FLIGHT), capacity)
 
 
 def _tick() -> None:
@@ -121,16 +165,25 @@ def main() -> None:
     watching a spinner while they wait. The CRM polls stay on their own, much
     slower schedule — running them every few seconds would hammer the mailbox
     and the landing-pages DB for no benefit.
+
+    Neither cadence waits on a job any more. Jobs run in a pool of
+    ``job_concurrency``; the loop only hands work to it and reaps what has
+    finished, so a statement that takes half an hour no longer holds up the
+    other four slots or the CRM tick.
     """
     job_interval = max(1, settings.job_poll_interval_seconds)
     crm_interval = settings.lead_poll_interval_seconds
+    capacity = max(1, settings.job_concurrency)
     LOGGER.info(
-        "CRM worker started | jobs every %ss, CRM every %ss, redis=%s",
-        job_interval, crm_interval, settings.redis_url,
+        "CRM worker started | jobs every %ss (%s at a time), CRM every %ss, redis=%s",
+        job_interval, capacity, crm_interval, settings.redis_url,
     )
+    # Never shut down: the worker runs until the container stops, and an
+    # executor closed on the way out would only cancel work already claimed.
+    pool = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="job")
     next_crm_run = 0.0
     while True:
-        _run_jobs()
+        _run_jobs(pool, capacity)
         now = time.monotonic()
         if now >= next_crm_run:
             next_crm_run = now + crm_interval

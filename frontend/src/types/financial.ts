@@ -500,6 +500,21 @@ export interface UndisclosedReport {
   candidates: Creditor[]
 }
 
+/**
+ * What a re-import discarded, and the job now reading the document again.
+ *
+ * `statements_discarded` can exceed one: a retry acts on the DOCUMENT, and a
+ * combined statement holds several accounts. Re-reading recreates all of them,
+ * so the siblings go too or each account ends up filed twice.
+ */
+export interface StatementRetryResult {
+  job_id: string
+  statements_discarded: number
+  transactions_discarded: number
+  accounts_deleted: number
+  source_filename: string | null
+}
+
 /** What the firm has decided about a payee. */
 export interface PayeeClassification {
   id: number

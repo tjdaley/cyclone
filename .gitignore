@@ -14,8 +14,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root. Unanchored, these came from the Python template
+# to hide a build directory and also hid frontend/src/lib/ — the API layer,
+# the Supabase client, and the money formatters — from every commit.
+/lib/
+/lib64/
 parts/
 sdist/
 var/

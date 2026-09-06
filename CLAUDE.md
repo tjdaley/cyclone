@@ -493,7 +493,96 @@ Covered by `tests/test_date_audit.py`.
 
 **Check the extraction against what the statement says about itself.** The account summary states its own answer — "24 Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and `_completeness_findings` compares both count and total per side, raising `INCOMPLETE_EXTRACTION` (warn). It reports a side only when the extraction falls **short** of what is printed, never when it exceeds it: a statement may split its debits across several named buckets — Bank of Texas prints "2 Checks & Withdrawals 159.11" and "Service Fees 2.00" separately — so extracting all three debits correctly reads as two too many against a single bucket. A shortfall has no innocent explanation; an excess usually does, and over-counting is caught by reconciliation instead. Reconciliation alone does catch a short read, but only as one unexplained delta; this says *which side* fell short and by how much, which is the difference between "something is wrong" and "the debits stopped after fifteen of two hundred sixty-two". Covered by `tests/test_long_statement.py`.
 
-**One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements claim the same page, because two statements cannot be printed on one page. Covered by `tests/test_statement_split_guard.py`.
+**An upload is surveyed before it is trusted, and the survey is advice.**
+`survey_upload` reads the page count and counts pages whose text restarts at
+"Page 1" — statements paginate themselves, so a document holding twenty-four
+months says it twenty-four times. Past `_MANY_PAGES` (30) with no such signal,
+length alone warns. It never blocks: a combined statement is one upload with
+five accounts in it, and refusing that to catch a production would trade a real
+workflow for a rare one. **The word boundary is the whole pattern** — `PAGE\s1`
+also matches inside "Page 10", "Page 19" and "Page 142", so one long statement
+reads as a dozen first pages and every long upload gets warned about;
+`page\s+1(?!\d)` does not. Counted by **page**, not occurrence, or a
+statement printing its pagination in both header and footer counts twice. The
+survey uses the text layer with **no OCR fallback**, which is what lets it run
+inside the upload request — a warning that had to render pages would cost more
+than the mistake it prevents. It returns no warning rather than raising, because
+the job is already queued by then and a failed warning must not read as a failed
+upload. Written after a 142-page, twenty-four-month client production timed the
+browser out, imported some statements, mangled the last, and had to be rejected
+wholesale and split by hand. Covered by `tests/test_upload_survey.py`.
+
+**A page is not always the unit of division.** Capital One 360 prints a combined
+statement — every account the customer holds, one register straight after the
+next, with no page break. A page therefore ends one account and begins another,
+and on one real eight-page document page 5 carried the close of one register,
+the whole of a second, and the opening of a third. Slicing by page handed the
+pass reading account A a page ending with account B's opening balance, under a
+context line reading *"these pages belong to"* A — a false statement the model
+reasonably believed, filing B's first transactions against A on every account
+after the first. So the index reports each statement's `header_text` and
+`_statement_pages()` cuts the document at those headers **in Python**: the same
+argument as Bates numbers and account numbers, since a header is a line the bank
+prints and locating it is exact where judging where a register stops is not. A
+statement beginning mid-page carries no page marker of its own, so one is
+prepended from `_page_of_offset` — without it the first lines are attributed to
+the *next* page, off by one exactly at the seam. No findable header falls back to
+the page range and logs it. Covered by `tests/test_combined_statement.py`.
+
+**A reply that stops mid-array is not a reply that is wrong.** The two failures
+look identical from `json.loads` and want opposite responses, so they are told
+apart by position: a decode error whose offset is the *end of the string* means
+the parser consumed a complete value and then found nothing where a delimiter
+had to be, which cannot happen to a complete answer. `UnparseableResponse`
+carries the distinction, and **both kinds get a second ask** — what differs is
+what the retry note says. Measured: two dense pages of a Capital One register
+produced ~40 entries and 17,264 characters cut off mid-array, with `max_tokens`
+at 32,000 and a fraction of it used. Nothing hit a ceiling; the reply simply
+stopped.
+
+**The retry is not a re-roll, and that is load-bearing.** This profile runs at
+`temperature: 0.0`, so a second call on an identical prompt returns the
+identical reply — the only thing making a retry worth anything is that the note
+changes the question. Which is why the note has to name the failure it answers:
+telling a model that ran out of room to escape its quotes more carefully
+addresses nothing. Measured on the same document, a truncation-specific retry
+recovered it **twice out of two**, and the reasoning that said it could not
+("the answer comes back the same length") was wrong for exactly this reason.
+
+Splitting is the fallback, not the first move: `_read_pages` halves the page
+range and asks each half, down to a single page — the rule already stated for a
+short extraction, *split the work instead* — and it is second because it costs a
+call per half and the cheaper fix usually works. A page that still will not read
+at width one is returned as unread rather than raised, so one bad page never
+discards the half of a split that succeeded.
+
+**One unparseable pass must not cost the whole document.** A chunk whose answer
+was not valid JSON used to raise out of `extract()`, out of the worker, and fail
+the job — so a five-account upload with four accounts read perfectly committed
+nothing, and the person re-uploaded the same file with no reason to expect a
+different result. Two changes. `_call_json` **asks again once**, telling the
+model its previous answer was rejected: `llm_service` fails a candidate over on
+an *exception* and deliberately never retries the same one, but a response that
+arrived intact and merely will not parse is a different event, and only the
+caller knows the answer had to parse. If the second attempt also fails, the
+pages are recorded on the statement (`unread_pages`) and the walk continues;
+commit raises `PASS_UNREADABLE` (warn), so the statement is held, says which
+pages are missing, and will not reconcile — three independent signals that it is
+short. The same trade `pdf_service` makes with its unreadable marker: a visible
+partial loss beats a silent total one. **The response is never logged** — it is
+a register of transactions, and §6 forbids amounts and payee names in logs; the
+error position and response length distinguish a truncation from a bad escape,
+and the text is recoverable from provenance.
+
+**One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements overlap by more than a single
+boundary page, or share one while naming different institutions. **A shared page
+is not by itself wrong** — the flag first shipped saying "two statements cannot
+be printed on the same page", which is false for a combined statement and put
+every account on such an upload into the exceptions queue. A real seam touches
+exactly one page and both accounts name the same bank, because a combined
+statement is one bank printing its own accounts; a phantom register invents an
+account whose institution differs or could not be read, which is the same signal
+`resolve_missing_institutions` already acts on. Covered by `tests/test_statement_split_guard.py`.
 
 **The three deletes are deliberately not the same delete.** Nothing in this database is the original record — the Bates-stamped PDF in Storage is — so a statement or an account is removed outright: a mistake costs a re-import, and a half-deleted account sitting in an inventory is worse than one that is gone. A single *line* is different, and gets a soft delete:
 
@@ -641,10 +730,23 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
   never reach the institution list. That is the *creditor's* bank: keying on it
   would report an undisclosed account at Wells Fargo because somebody pays their
   Amex bill.
-- The gate (`transfer|xfer`, plus `payment|pmt|autopay`) is pushed to the
-  database as one text search per term, so the scan fetches candidate lines
-  rather than every line on the matter. The query terms and the regexes are
-  deliberately the same words.
+- **A mask needs no verb.** The gate exists so a confirmation number is not read
+  as an account — but nobody masks a confirmation number, so `XXXXXXX3640` is
+  the bank asserting these are an account's last digits whatever sentence it
+  sits in. Requiring a movement word as well meant Capital One's
+  `Deposit from 360 Performance Savings XXXXXXX3640` was invisible while the
+  identical shape carrying the word "Payment" was not. `_MASKED` and `_ENDING`
+  therefore open the gate by themselves.
+- Three ways in, and they are not equally trusting: a **transfer** gets every
+  pattern including `_LABELLED`; any **other movement** (payment, deposit,
+  withdrawal) gets the explicit patterns only, because a trailing digit run
+  there is a confirmation number essentially always; a **mask** gets in on its
+  own.
+- The gate is pushed to the database as one text search per term
+  (`transfer`, `xfer`, `payment`, `pmt`, `autopay`, `deposit`, `withdraw`,
+  `xxx`), so the scan fetches candidate lines rather than every line on the
+  matter. The query terms and the regexes are deliberately the same words —
+  including the mask term, or a line the parser would accept is never fetched.
 
 Covered by `tests/test_account_discovery.py` and `tests/test_undisclosed_exhibit.py`.
 
@@ -671,6 +773,18 @@ Anything in Cyclone that produces a table worth taking to court builds an
   no column headings; its columns are self-evident. The CSV prints them anyway —
   that file is data, and data without a header row is a puzzle. Markdown still
   emits the separator row, or the block stops being a table.
+- **`sources` names the documents the exhibit summarizes**, and sits directly
+  above the Rule 1006 notice because the two are one argument: the notice says
+  the underlying records are available for examination, and this says *which*
+  records, by the filename as produced and the Bates range on it. Grouped by the
+  **upload**, not the statement — one PDF routinely holds several statements, and
+  a list naming each separately would send somebody to the same document five
+  times while looking like five documents. The range shown is the document's own
+  extent, not the pages the selected rows happened to land on: a summary drawn
+  from three lines inside a statement is still drawn from that statement, and
+  the person pulling it needs the whole thing. An unstamped production says "no
+  Bates stamp detected" rather than leaving a blank, because a reader cannot
+  tell a blank from nobody having looked. Absent from the CSV, like the caption.
 - **`footnotes` ride with the table**, not in `selection`. A reader meeting a
   dagger in a cell looks directly below the table for what it means; a mark
   whose explanation stayed on the screen is worse than no mark, because the
@@ -980,6 +1094,10 @@ Rules learned the hard way:
 - **Failures land on the job,** with the reason in `error`. A failed upload must be able to tell the attorney what happened.
 - **Polling is scoped to the requester** (`get_for_staff`) — a result holds the full text of someone's pleading.
 - The worker runs **two cadences**: jobs every `job_poll_interval_seconds` (short — someone is watching a spinner), CRM polls on their own much slower schedule.
+- **Jobs run in a pool of `job_concurrency` (default 5), and the loop never waits on one.** It used to run each job to completion inline, so a single statement — a thirteen-month upload still going at 1,600 seconds — stopped everything: no other job started, and the CRM tick did not run either, which is why a long ingest was indistinguishable from a dead worker. `claim_pending` takes only what there is free capacity for and `run_claimed` runs it on a pool thread. A worker at capacity claims **nothing**, leaving the queue for a node with room rather than building a private backlog.
+- **A manager per job, never per worker.** `SupabaseManager` is not thread-safe (`dependencies.get_db_manager` says so); one shared across pool threads interleaves two ingests' requests down a single connection.
+- **The upload side has to match, or the pool is pointless.** The page uploads the whole dropped stack before waiting on any of it (`queueStatement`, then `awaitStatementJob` for each). Uploading one and awaiting it before sending the next left the pool with exactly one job however many files were dropped — which is what made merging a year into a single enormous PDF look like the only way to finish.
+- Concurrency trades against **vendor rate limits**: a 429 fails the candidate over to the next model in the chain rather than waiting, so too much of it quietly changes which model read the evidence. Lower `job_concurrency` before raising it.
 
 Pleading ingestion and discovery upload still run extraction inline and carry the same exposure. The `jobs.kind` CHECK constraint is where they get added.
 
@@ -1044,6 +1162,15 @@ const matters = await getMatters()  // returns Promise<Matter[]> — no cast nee
 ```
 
 `apiFetch<T>()` automatically attaches the Supabase Bearer token from the current session.
+
+**A thrown error's `message` is the sentence the server wrote, not its JSON.**
+`errorMessage()` pulls `detail` out of the body — the string an `HTTPException`
+carries, or the joined `msg` fields of a 422 — and every fetch path in `api.ts`
+goes through it, including the six multipart uploads that call `fetch`
+directly. It used to throw the raw body, so roughly ninety `e.message` display
+sites all showed `{"detail":"..."}` with the prose walled up inside it. A body
+that will not parse (an haproxy 504 answers in HTML) falls back to the status,
+because rendering markup into an error dialog is worse than saying "504".
 
 ### Shared Types
 
@@ -1111,6 +1238,16 @@ cd frontend && npm install && npm run dev
 
 Vite dev server (port 3000) proxies `/api` to `http://localhost:8000`.
 
+### `.gitignore` — one trap, already sprung
+
+The Python template's `lib/` and `lib64/` are **unanchored**, so they matched
+`frontend/src/lib/` as readily as a root build directory. `api.ts`,
+`supabaseClient.ts`, `money.ts`, and `categories.ts` — the whole API layer —
+were therefore never committed, and a clean clone could not build the frontend.
+Both rules are now `/lib/` and `/lib64/`. When adding an ignore rule copied from
+a language template, anchor it, or it will match a source directory three levels
+down that shares a common name.
+
 ### Startup Checks
 
 1. Pydantic validates all `Settings` fields — raises `ValidationError` before accepting requests
@@ -1157,9 +1294,13 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
 | Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts, plus institutions named by wires, plus creditors named by payments |
 | Creditor discovery from payments | ✅ Built — `is_liability` on the category, `transaction_payee_classifications` for the rest, and a triage queue that never reaches an exhibit |
+| Re-import a document (Retry) | ✅ Built — discards every statement the upload produced, then re-reads the PDF. Verifies the source is retrievable **before** deleting anything |
+| Combined statements (several accounts, no page break) | ✅ Built — the document is cut at each account's printed header, not by page |
+| Open a statement's source PDF | ✅ Built — signed URL as JSON, opened at the statement's first transaction page; says which of the three failures happened |
 | Payee-classification management screen | ❌ Not started — the endpoints exist and the triage queue writes through them, but there is no screen to review or reverse a firm-wide ruling |
 | Card funded from an unproduced account | ❌ Not started — a "Payment Thank You" on a produced card with no matching debit on any produced deposit account means the funding account was not produced. Same finding, opposite direction, and the match is exact on date and amount |
 | Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
+| "Documents summarized in this exhibit" block | ✅ Built for the transaction export — filename and Bates range per upload, above the Rule 1006 notice. Not yet on the FIS schedule or the undisclosed-accounts exhibit, which summarize documents too |
 | Export query results: CSV / MD / DOCX / PDF | ✅ Built — CSV is a clean extraction; the rest are full exhibits |
 | Financial Information Statement generation | ✅ Built — whole-month averaging, recurrence-aware, three-panel UI, four-format export. Chart of accounts still to be populated |
 | Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks |
@@ -1222,9 +1363,9 @@ order they came up.
 
 | # | Item |
 | - | ---- |
-| 4 | **Open the source statement PDF in a new tab** from any transaction row. A small icon with a "show statement" tooltip rather than making the whole row a target. The same on every statement list. `matter_pleadings` already does this: return a **signed URL as JSON** and let the browser navigate — a redirect or a plain link cannot carry the bearer token. `financial_account_statements.storage_path` is the handle. |
-| 5 | **Say so plainly when the PDF is gone.** A popup, not a dead link or a 404 page. Which raises the next item. |
-| 6 | **A retention policy for stored PDFs**, deliberately less generous than the eternal retention of transaction data — a statement's numbers stay long after the scan needs to. Plus a user-requested purge for data hygiene. Interacts with the matter-close workflow, which is also unbuilt. |
+| 4 | ✅ **Done** — `components/StatementPdfButton.tsx` on the exceptions queue and on every statement row in the Accounts tab. Still to do: the same button on a **transaction** row, which needs the transaction's statement id in the search response. |
+| 5 | ✅ **Done** — the endpoint distinguishes "never stored", "purged", and "storage is down", and the button shows that sentence in a dialog. |
+| 6 | **A retention policy for stored PDFs**, deliberately less generous than the eternal retention of transaction data — a statement's numbers stay long after the scan needs to. Plus a user-requested purge for data hygiene. Interacts with the matter-close workflow, which is also unbuilt. The "purged" message in item 5 is written for a world where this exists. |
 
 ### Tell it what to do, rather than learn another menu
 
@@ -1278,6 +1419,7 @@ Three things to get right when it is built:
 | `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_MAX_TOKENS` | Backend | Global sampling defaults |
 | `LLM_TIMEOUT_SECONDS` | Backend | Per-call ceiling (default 90). Keep ≥10 — Gemini rejects shorter deadlines |
 | `JOB_POLL_INTERVAL_SECONDS` | Worker | How often queued jobs are picked up (default 3) |
+| `JOB_CONCURRENCY` | Worker | Jobs one worker runs at once (default 5). Throughput for a stack of statements; trades against vendor rate limits |
 | `LEAD_POLL_INTERVAL_SECONDS` | Worker | CRM mailbox/lead polling cadence (default 60) |
 | `REDIS_URL` | Worker | Poller lock + job claim; job claiming degrades gracefully if unreachable |
 | `{VENDOR}_API_KEY`, `{VENDOR}_BASE_URL` | Backend | Per-vendor credentials only |
@@ -1370,7 +1512,11 @@ Three things to get right when it is built:
 | Order rules by priority alone | `WALMART` and `WALMART PHARMACY` at equal priority: the longer pattern must be tried first or the specific rule never fires |
 | Let a rule-loading failure break an ingest | The statement is evidence; filing it is convenience. Log and carry on unfiled |
 | Format a CSV amount as currency | A spreadsheet reads `-$2,500.00` as text and will not sum it. Currency is for the exhibit formats; the CSV carries the raw figure |
+| Ship a summary that cannot name the documents behind it | The notice promises the records are available; `sources` says which. Group by upload, not statement |
+| Sort Bates stamps as strings | "KF 9" follows "KF 10" alphabetically and precedes it on the production. Sort on the numeric tail |
 | Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
+| Require a movement verb before reading a masked number | Nobody masks a confirmation number. `Deposit from … XXXXXXX3640` was invisible for want of the word "transfer" |
+| Add a parser route without adding its database term | The gate is pushed to the query. A line the regex would accept is never fetched to be parsed |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
 | Read a trailing digit run on a PAYMENT as an account number | On a transfer it is a bank convention; on a payment it is a confirmation number. `Zelle Payment To Kathy Gunn 20928990159` became an undisclosed account belonging to Kathy Gunn |
 | Decide from the text whether a payee is a creditor | "Payment To Mr. Cooper" and "Payment To Frontier" are the same sentence. It comes from the category a person filed it under, or a recorded ruling — nowhere else |
@@ -1379,6 +1525,26 @@ Three things to get right when it is built:
 | Key an institution on the ABA inside an ACH trace number | Those nine digits are the CREDITOR's bank. It reports an undisclosed account at Wells Fargo because the client pays an Amex bill |
 | Let a scraped payee key be aggressive enough to merge two names | Two groups for one payee is cosmetic and collapses on the first ruling. Two creditors merged into one row is not recoverable |
 | Strip a payee phrase that leaves an empty string | The line is then dropped with no trace. "Venmo Payment" keeps its trailing word so the row stays visible |
+| Throw a failed response's raw body as the error | The prose the handler wrote is inside `detail`. `errorMessage()` unwraps it; ~90 display sites showed braces before it existed |
+| `window.open` after an `await` | The popup blocker judges a tab by whether a real click opened it. Open it synchronously, then set `location` |
+| Answer "the PDF is missing" with one 404 | Never stored, purged, and storage-is-down call for three different next moves from whoever clicked |
+| Retry a temperature-0 call without changing the prompt | It returns the identical reply. The retry note is the mechanism, not the second call |
+| Give a truncated reply the malformed-JSON retry note | It ran out of room; escaping advice answers a different failure. Name the one that happened |
+| Split a range before asking it again | Splitting costs a call per half. The second ask recovered the measured case twice out of two |
+| Discard a split's successful half when its sibling fails | Return the pages that failed, not an exception. The loss is reported page by page |
+| Let one unparseable chunk fail the whole ingest | Four accounts that read perfectly are lost with it. Record the pages, flag the statement, carry on |
+| Log an LLM response to diagnose a parse failure | It is a transaction register. Log the error offset and the length; the text is in the provenance |
+| Treat a malformed JSON reply as a vendor failure | The vendor answered. `llm_service` never retries a candidate, so the caller that needed JSON asks again |
+| Match a restarted page number as `PAGE\s1` | It matches inside "Page 10", "Page 19" and "Page 142". One long statement then reads as a dozen |
+| Block an upload that looks like several statements | A combined statement is ordinary input. Warn, name the count, and say to split it if the result is wrong |
+| Let a pre-flight warning raise | The job is queued before the survey runs. A failed warning must not read as a failed upload |
+| Bind `pdf_service` at import in `statement_service` | Every use there resolves at call time; the suites replace the singleton on its own module and would not be seen |
+| Assume a new account starts on a fresh page | A combined statement runs registers together. One page can close one account, hold a whole second, and open a third |
+| Slice a multi-account document by page range | The pass is then told "these pages belong to" an account that owns only part of one. Cut at the printed header |
+| Treat two statements sharing a page as a misreading | That is a seam on a combined statement. A phantom shares more than a boundary, or names a different bank |
+| Requeue one statement's PDF without discarding its siblings | One upload can hold five accounts. Re-reading recreates all five, and the four left behind become duplicates |
+| Delete before confirming the source PDF can be retrieved | A retry against a purged document then destroys the evidence it meant to re-read |
+| Open a statement's PDF at page 1 | One upload routinely holds a whole production. Send the first transaction page as a `#page=` hint — approximate, and the caller says so |
 | Read a routing number as an account number | An ABA is nine checksummed digits identifying a BANK. Reporting "UBS ····7993" as an account is a confident-wrong finding |
 | Assume a wire names the account it came from | It names the bank. That is why institutions are a separate section keyed on the ABA |
 | Report an inferred institution as though it were read off the page | Flag it. The dagger is the difference between a finding and an assertion |
@@ -1391,6 +1557,13 @@ Three things to get right when it is built:
 | Accept a model's account number without checking it against the page | Compare each printed run separately. An answer that is not printed there was invented |
 | Store a masked account number with no digits in it | It is the caption, scraped. `"Account Number:"` reached production twice |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
+| Run a job to completion on the worker's main loop | One long statement then blocks every other job and the CRM tick. Claim to capacity, run in the pool |
+| Share one `SupabaseManager` across pool threads | It is not thread-safe. A manager per job, and it is cheap to make |
+| Gate a drop zone's busy state on the job | The job does not exist until every upload finishes. A dozen files is 10–15 seconds of a screen that looks untouched, and the natural response is to drag them again |
+| Guard re-entry on React state | State does not update until the next render, so two quick drops both read the old value and both run. Use a ref, set on the same tick |
+| Take a re-drag as a new upload | It is somebody unsure the first one landed. Refuse it and say so — silence is what caused it |
+| Set a busy ref without releasing it in `finally` | One unexpected throw disables the drop zone for the life of the page, curable only by a reload nobody would think to try |
+| Upload one file and await it before sending the next | The pool then has one job to run whatever was dropped. Queue the whole stack, then wait |
 | Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |
 | Add a model field without a migration in the same change | The startup schema check will log an `ERROR`, but the insert is already broken |
 | Persist PDF-extracted text straight from PyMuPDF | It can contain NULs; Postgres rejects the row (`22P05`). `pdf_service` sanitizes — use its output |
