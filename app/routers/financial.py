@@ -5,18 +5,24 @@ Ingestion is queued (§11a): a statement PDF is one LLM call per statement over
 a document that may hold several months, which is far too long to hold a
 request open. The upload returns a job id; the worker does the work.
 """
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
-from db.models.financial import StatementReviewStatus, TransactionCategory, TransactionTag
+from db.models.financial import (
+    PayeeClassification,
+    StatementReviewStatus,
+    TransactionCategory,
+    TransactionTag,
+)
 from db.models.job import JobStatus
 from db.repositories.financial import (
     FinancialAccountRepository,
     FinancialAccountStatementRepository,
     FinancialAccountTransactionRepository,
+    PayeeClassificationRepository,
     TransactionCategoryRepository,
     TransactionTagRepository,
 )
@@ -31,7 +37,10 @@ from schemas.financial import (
     BulkCategorizeRequest,
     BulkResultResponse,
     BulkTagRequest,
+    CreditorResponse,
     ExhibitExportRequest,
+    PayeeClassificationResponse,
+    PayeeClassificationWriteRequest,
     FinancialAccountResponse,
     FinancialAccountUpdateRequest,
     StatementIngestJobResponse,
@@ -54,6 +63,8 @@ from schemas.financial import (
     TransactionTagWriteRequest,
     TransactionUpdateRequest,
     UndisclosedAccountResponse,
+    ReferencedInstitutionResponse,
+    UndisclosedReport,
 )
 from services.account_discovery_service import account_discovery_service
 from services.audit_logger import AuditLogger
@@ -199,22 +210,47 @@ def list_accounts(
 
 
 @router.get("/matters/{matter_id}/undisclosed-accounts",
-            response_model=list[UndisclosedAccountResponse])
+            response_model=UndisclosedReport)
 def list_undisclosed_accounts(
     matter_id: int,
     manager: Any = Depends(get_db_manager),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[UndisclosedAccountResponse]:
     """
-    Accounts the produced transactions name but no produced statement covers.
+    What the production names but does not contain, in two halves.
+
+    **Accounts** come from transfer descriptions, which print the other
+    account's number. **Institutions** come from wires, which print the other
+    *bank* — its name and routing number — and never the account. The second
+    half exists because an account-shaped report is structurally blind to a
+    wire, and a wire is where the large money moves.
+
+    **Creditors** come from payments, which print neither: a card issuer is
+    identified by who was paid, and whether that payee is a creditor is
+    knowledge held outside the description — in the category a person filed the
+    payments under, or in a standing ruling about the payee. **Candidates** are
+    the payees for which neither exists yet. They are a work queue and not a
+    finding, they never reach an exhibit, and a caller that renders them beside
+    the findings has misrepresented them.
 
     Read-only and derived on demand — nothing is stored, so the answer always
     reflects the accounts and statements as they stand right now. Adding the
     missing account to the matter makes it disappear from this list, which is
     the workflow: the list is the outstanding question, not a record.
     """
-    found = account_discovery_service.undisclosed(manager, matter_id)
-    return [UndisclosedAccountResponse(**entry) for entry in found]
+    creditors, candidates = account_discovery_service.creditors(manager, matter_id)
+    return UndisclosedReport(
+        accounts=[
+            UndisclosedAccountResponse(**entry)
+            for entry in account_discovery_service.undisclosed(manager, matter_id)
+        ],
+        institutions=[
+            ReferencedInstitutionResponse(**entry)
+            for entry in account_discovery_service.referenced_institutions(manager, matter_id)
+        ],
+        creditors=[CreditorResponse(**entry) for entry in creditors],
+        candidates=[CreditorResponse(**entry) for entry in candidates],
+    )
 
 
 @router.post("/matters/{matter_id}/undisclosed-accounts/export")
@@ -257,6 +293,119 @@ def export_undisclosed_accounts(
         headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
 
     return Response(content=content, media_type=media_type, headers=headers)
+
+
+# ── Payee classifications ────────────────────────────────────────────────────
+#
+# Where the answer to "is this payee a creditor?" is kept, because nothing in a
+# payment description can answer it. Two layers, like tags and category rules:
+# no matter is the firm's answer, a matter row overrides it.
+
+def _classification_response(record: Any) -> PayeeClassificationResponse:
+    return PayeeClassificationResponse(
+        **record.model_dump(),
+        is_firm_wide=record.matter_id is None,
+    )
+
+
+@router.get("/payee-classifications", response_model=list[PayeeClassificationResponse])
+def list_payee_classifications(
+    matter_id: Optional[int] = Query(
+        default=None,
+        description="Omit for the firm's own rulings; give a matter for that case's overrides",
+    ),
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[PayeeClassificationResponse]:
+    """
+    One layer of rulings, for editing.
+
+    One layer rather than the merged set the scan uses, for the same reason the
+    category-rule editor shows one: an editor that blurred them would offer to
+    change the firm's answer from inside a matter, and silently alter what every
+    other case reports.
+    """
+    records = PayeeClassificationRepository(manager).for_scope(matter_id)
+    return [_classification_response(r) for r in sorted(records, key=lambda r: r.pattern)]
+
+
+@router.post("/payee-classifications",
+             response_model=PayeeClassificationResponse, status_code=201)
+def create_payee_classification(
+    body: PayeeClassificationWriteRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> PayeeClassificationResponse:
+    """
+    Record what a payee is.
+
+    ``not_creditor`` is the more consequential of the two verdicts and the one
+    worth pausing over: it removes a payee from a report that backs a motion to
+    compel, permanently and silently, which is precisely the failure this module
+    exists to prevent. So it is attributed — ``decided_by_staff_id`` is written
+    from the caller's own login, never taken from the request body.
+    """
+    if body.matter_id is not None:
+        if MatterRepository(manager).select_one(condition={"id": body.matter_id}) is None:
+            raise HTTPException(status_code=404, detail="Matter not found")
+
+    record = PayeeClassification(
+        **body.model_dump(),
+        decided_by_staff_id=_staff_id(request, manager),
+    )
+    try:
+        created = PayeeClassificationRepository(manager).insert(record.model_dump())
+    except Exception as e:  # noqa: BLE001 — the unique index is the likely cause
+        LOGGER.warning("financial.create_payee_classification: rejected: %s", str(e))
+        raise HTTPException(
+            status_code=409,
+            detail="That payee already has a ruling in this scope — edit it instead.",
+        ) from e
+    return _classification_response(created)
+
+
+@router.patch("/payee-classifications/{classification_id}",
+              response_model=PayeeClassificationResponse)
+def update_payee_classification(
+    classification_id: int,
+    body: PayeeClassificationWriteRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> PayeeClassificationResponse:
+    """
+    Change a ruling — including reversing it, which is the point.
+
+    Nothing is re-filed as a consequence. The creditor report is derived on
+    demand, so the next read simply reflects the new answer; there is no stored
+    result to go stale.
+    """
+    repo = PayeeClassificationRepository(manager)
+    if repo.select_one(condition={"id": classification_id}) is None:
+        raise HTTPException(status_code=404, detail="Ruling not found")
+    payload = body.model_dump()
+    payload["decided_by_staff_id"] = _staff_id(request, manager)
+    return _classification_response(repo.update(classification_id, payload))
+
+
+@router.delete("/payee-classifications/{classification_id}", status_code=204)
+def delete_payee_classification(
+    classification_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> None:
+    """
+    Remove a ruling. The payee returns to the candidate list on the next scan.
+
+    Deleting is safe in a way most deletes here are not: a ruling is an opinion
+    about a payee, not evidence, and everything it affected is recomputed from
+    the transactions each time the report is read.
+    """
+    repo = PayeeClassificationRepository(manager)
+    if repo.select_one(condition={"id": classification_id}) is None:
+        raise HTTPException(status_code=404, detail="Ruling not found")
+    repo.delete(classification_id)
 
 
 @router.patch("/financial-accounts/{account_id}", response_model=FinancialAccountResponse)

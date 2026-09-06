@@ -106,6 +106,24 @@ def _contains(haystack: str, boundaries: frozenset[int], needle: str) -> bool:
     return False
 
 
+def matches(prepared: tuple[str, frozenset[int]], pattern: Optional[str]) -> bool:
+    """
+    Whether a prepared text contains a pattern, aligned to word boundaries.
+
+    The public door onto the matching above. Anything else that wants to ask
+    "does this description mention WALMART?" — the creditor scan asks it of
+    payee classifications — comes through here rather than reimplementing the
+    boundary check, because the version without it silently matches TARGET
+    inside STARGETTER LLC and nobody notices for a year.
+
+    :param prepared: The output of ``prepare()`` for the text being searched.
+    :param pattern: The needle, in whatever form somebody typed it.
+    :rtype: bool
+    """
+    haystack, boundaries = prepared
+    return _contains(haystack, boundaries, normalize(pattern))
+
+
 def _sign_allows(rule: Any, amount: Decimal) -> bool:
     """PAYROLL arriving is income; PAYROLL leaving is an expense."""
     if rule.applies_to == "credit":

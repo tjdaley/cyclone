@@ -510,6 +510,144 @@ class AccountDeletePreview(BaseModel):
     )
 
 
+class ReferencedInstitutionResponse(BaseModel):
+    """
+    A bank the wires name that this matter has no account at.
+
+    Reported separately from the accounts because a wire prints the sending
+    INSTITUTION and never the sending account — there is no number to key on,
+    which is exactly why an account-shaped report missed $198,101.18 of incoming
+    wires while catching a $500 transfer between two accounts we already had.
+    """
+    institution: str = Field(..., description="The bank as the wire printed it")
+    aba: Optional[str] = Field(
+        default=None,
+        description="Its routing number. Checksummed, so it is a reliable identity where a "
+                    "name spelled two ways is not",
+    )
+    wires: int = Field(..., description="Wire lines naming it")
+    same_party_wires: int = Field(
+        ...,
+        description="Wires where the sender and the receiver are the same person. This is the "
+                    "finding: money moving out of an account they control and into one we hold",
+    )
+    money_in: Decimal
+    money_out: Decimal
+    net: Decimal
+    first_seen: Optional[date] = None
+    last_seen: Optional[date] = None
+    seen_on: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
+class CreditorResponse(BaseModel):
+    """
+    A payee the matter pays that no produced statement accounts for.
+
+    A payment names a payee and, almost never, a number — which is why this is
+    keyed on the payee rather than on a last four. Whether that payee is a
+    creditor comes from outside the description: the category a person filed the
+    payments under, or a standing ruling about the payee. ``reason`` says which,
+    on every row, because "American Express" and "the City of Lewisville" arrive
+    here looking identical and only one of them is a finding.
+    """
+    payee: str = Field(..., description="The payee as the scan reads it across every payment, "
+                                        "or the ruling's pattern once one exists")
+    creditor_name: Optional[str] = Field(
+        default=None,
+        description="What to call it on a motion. The scraped payee is a fragment; this is the "
+                    "name a person wrote against it",
+    )
+    creditor_type: Optional[str] = Field(
+        default=None,
+        description="credit_card | loan | mortgage | line_of_credit | other. It changes what you "
+                    "request: a card means statements, a mortgage means a payoff and a note",
+    )
+    reason: str = Field(
+        ...,
+        description="liability_category — payments are filed under a category naming a debt; "
+                    "classified — a standing ruling says this payee is a creditor; "
+                    "unreviewed — nobody has said either way, so this is a question not a finding",
+    )
+    classification_id: Optional[int] = Field(
+        default=None,
+        description="The ruling that put it here, so the UI can offer to change it",
+    )
+    payments: int = Field(..., description="Payment lines to this payee")
+    money_out: Decimal = Field(..., description="Total paid. The ranking key: an unproduced card "
+                                                "serviced at $4,000 a month is not the same "
+                                                "finding as one paid twice")
+    last4: list[str] = Field(
+        default_factory=list,
+        description="Account digits any payment happened to print. Usually empty — that is the "
+                    "whole reason payees need their own report",
+    )
+    first_seen: Optional[date] = None
+    last_seen: Optional[date] = None
+    seen_on: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
+class UndisclosedReport(BaseModel):
+    """
+    Everything the production names but does not contain, by how it was found.
+
+    Four lists because there are four shapes of evidence, and collapsing them
+    would misrepresent three of them. ``candidates`` in particular is a work
+    queue, not a finding, and is the one list that never reaches an exhibit.
+    """
+    accounts: list["UndisclosedAccountResponse"] = Field(default_factory=list)
+    institutions: list[ReferencedInstitutionResponse] = Field(default_factory=list)
+    creditors: list[CreditorResponse] = Field(default_factory=list)
+    candidates: list[CreditorResponse] = Field(
+        default_factory=list,
+        description="Payees nobody has ruled on, largest first. A question for a person, never "
+                    "an assertion — a utility and a card issuer are indistinguishable here",
+    )
+
+
+class PayeeClassificationWriteRequest(BaseModel):
+    """Record what a payee is, or stop being asked about it."""
+    pattern: str = Field(
+        ..., min_length=3, max_length=120,
+        description="Matched case- and punctuation-blind on word boundaries, so ATT matches both "
+                    "'AT&T BILL PAYMENT' and 'ATT* BILL'. Three characters minimum",
+    )
+    classification: str = Field(
+        ..., pattern="^(creditor|not_creditor)$",
+        description="creditor puts the payee on the report; not_creditor removes it for good",
+    )
+    matter_id: Optional[int] = Field(
+        default=None,
+        description="Omit for the firm's answer, applied to every matter. A matter id for a "
+                    "judgment about one household — a Zelle payee who might be a private lender",
+    )
+    creditor_name: Optional[str] = Field(default=None, max_length=200)
+    creditor_type: Optional[str] = Field(
+        default=None,
+        pattern="^(credit_card|loan|mortgage|line_of_credit|other)$",
+    )
+    note: Optional[str] = Field(default=None, max_length=300)
+    is_active: bool = Field(default=True)
+
+
+class PayeeClassificationResponse(BaseModel):
+    id: int
+    matter_id: Optional[int]
+    pattern: str
+    classification: str
+    creditor_name: Optional[str]
+    creditor_type: Optional[str]
+    note: Optional[str]
+    is_active: bool
+    decided_by_staff_id: Optional[int]
+    is_firm_wide: bool = Field(
+        ...,
+        description="True when the ruling governs every case. An editor that could not tell would "
+                    "offer to change it from inside one matter and silently alter every other",
+    )
+
+
 class UndisclosedAccountResponse(BaseModel):
     """
     An account the produced transactions name but no produced statement covers.
@@ -546,3 +684,6 @@ class UndisclosedAccountResponse(BaseModel):
     examples: list[str] = Field(default_factory=list,
                                 description="Up to three descriptions, verbatim, so the finding can "
                                             "be traced to the page it came from")
+
+
+UndisclosedReport.model_rebuild()

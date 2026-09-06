@@ -17,6 +17,7 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
+from db.models.financial import AccountType  # noqa: E402
 from db.models.matter import ClientAlignment  # noqa: E402
 from services.account_discovery_service import AccountDiscoveryService  # noqa: E402
 from services.exhibit_service import to_csv, to_markdown, to_pdf  # noqa: E402
@@ -48,14 +49,16 @@ class FakeMatter:
 
 
 class FakeAccount:
-    def __init__(self, id, institution, last4):
+    def __init__(self, id, institution, last4, account_type=AccountType.checking):
         self.id = id
         self.institution = institution
         self.account_number_last4 = last4
+        self.account_type = account_type
 
 
 class FakeTransaction:
-    def __init__(self, id, account_id, description, amount, when):
+    def __init__(self, id, account_id, description, amount, when, category_id=None):
+        self.category_id = category_id
         self.id = id
         self.financial_account_id = account_id
         self.description = description
@@ -100,21 +103,55 @@ ROWS = [
 ]
 
 
-def build(accounts=ACCOUNTS, rows=ROWS, name="Accounts Referenced But Not Produced"):
+class FakeCategoryRepo:
+    """The category side of creditor discovery, which the exhibit now includes."""
+
+    def __init__(self, liability_ids=()):
+        self._ids = list(liability_ids)
+
+    def liability_ids(self):
+        return self._ids
+
+
+class FakeClassificationRepo:
+    def __init__(self, rulings=()):
+        self._rulings = list(rulings)
+
+    def available_for_matter(self, matter_id, include_inactive=False):
+        return self._rulings
+
+
+class FakeRuling:
+    def __init__(self, id, pattern, classification, name=None, kind=None):
+        self.id = id
+        self.pattern = pattern
+        self.classification = classification
+        self.creditor_name = name
+        self.creditor_type = kind
+
+
+def build(accounts=ACCOUNTS, rows=ROWS, name="Accounts Referenced But Not Produced",
+          liability_ids=(), rulings=()):
     import services.account_discovery_service as mod
 
     original = (mod.FinancialAccountRepository,
                 mod.FinancialAccountStatementRepository,
-                mod.FinancialAccountTransactionRepository)
+                mod.FinancialAccountTransactionRepository,
+                mod.TransactionCategoryRepository,
+                mod.PayeeClassificationRepository)
     mod.FinancialAccountRepository = lambda m: FakeAccountRepo(accounts)
     mod.FinancialAccountStatementRepository = lambda m: FakeStatementRepo()
     mod.FinancialAccountTransactionRepository = lambda m: FakeTransactionRepo(rows)
+    mod.TransactionCategoryRepository = lambda m: FakeCategoryRepo(liability_ids)
+    mod.PayeeClassificationRepository = lambda m: FakeClassificationRepo(rulings)
     try:
         return AccountDiscoveryService().build_exhibit(object(), FakeMatter(), name)
     finally:
         (mod.FinancialAccountRepository,
          mod.FinancialAccountStatementRepository,
-         mod.FinancialAccountTransactionRepository) = original
+         mod.FinancialAccountTransactionRepository,
+         mod.TransactionCategoryRepository,
+         mod.PayeeClassificationRepository) = original
 
 
 print("\nThe exhibit")
@@ -194,6 +231,36 @@ with pymupdf.open(stream=pdf, filetype="pdf") as document:
 check_true("account on the page", "4070" in text)
 check_true("footnote on the page", "not evidence" in text)
 check_true("page numbered", "Page 1 of" in text)
+
+print("\nCreditors are a third block, and candidates are not in the document")
+
+CREDITOR_ROWS = [
+    # A finding: filed by a person under a category that names a debt.
+    FakeTransaction(10, 1, "ACH PMT AMEX EPAYMENT 0005000008 ID #-M3630",
+                    "-5000.00", date(2023, 4, 1), category_id=69),
+    # Not a finding: nobody has said what this payee is. It belongs in the
+    # triage queue on screen and NOWHERE in a document filed with a court —
+    # listing it would assert of a water utility exactly what the row above
+    # asserts of a card issuer.
+    FakeTransaction(11, 1, "10/16 Online Payment 22398267106 To City of Lewisville",
+                    "-120.00", date(2023, 4, 2)),
+]
+with_creditors = build(rows=CREDITOR_ROWS, liability_ids=[69])
+flat = "\n".join(" | ".join(row) for row in with_creditors.rows)
+
+check_true("the creditor block is headed", "Creditors paid, with no account produced" in flat)
+check_true("the creditor is named", "AMEX" in flat)
+check_true("with what it costs to service", "5000.00" in flat)
+check("an unruled payee never reaches the exhibit",
+      "LEWISVILLE" in flat.upper(), False)
+check("and is not counted as one either",
+      dict(with_creditors.summary)["Creditors paid, with no account produced"], "1")
+check_true("the footnote explains what a creditor row is and is not",
+           any("identify a creditor rather than an account number" in note
+               for note in with_creditors.footnotes))
+
+md = to_markdown(with_creditors).decode("utf-8")
+check_true("and it survives into the document", "Creditors paid" in md)
 
 print("\nAn empty list still produces a document")
 

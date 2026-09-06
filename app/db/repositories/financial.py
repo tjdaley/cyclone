@@ -14,6 +14,7 @@ from db.models.financial import (
     TransactionTagLinkInDB,
     FisCategorySettingInDB,
     TransactionCategoryRuleInDB,
+    PayeeClassificationInDB,
 )
 from db_handler import BaseRepository, DatabaseManager
 from util.loggerfactory import LoggerFactory
@@ -479,6 +480,25 @@ class TransactionCategoryRepository(BaseRepository[TransactionCategoryInDB]):
             pending.extend(children.get(current, []))
         return sorted(seen)
 
+    def liability_ids(self) -> list[int]:
+        """
+        Every category that names a debt, descendants included.
+
+        A payment filed under one of these was paid to a creditor, and a
+        creditor holds an account. That is the whole of the second layer of
+        creditor discovery: the categorization a paralegal has already done
+        answers a question the description cannot.
+
+        Descendants are included because the flag is set on a heading as often
+        as on a leaf — "Credit Card Payments" with a child per issuer is a
+        perfectly ordinary way to keep the chart.
+
+        :return: Flagged category ids plus every descendant, deduplicated.
+        :rtype: list[int]
+        """
+        flagged = [c.id for c in self.get_all(include_inactive=True) if c.is_liability]
+        return self.expand(flagged)
+
     def in_use(self, category_id: int) -> int:
         """How many transactions are filed under a category. Guards deletion."""
         result = (
@@ -718,3 +738,46 @@ class TransactionCategoryRuleRepository(BaseRepository[TransactionCategoryRuleIn
             .execute()
         )
         return result.count or 0
+
+
+class PayeeClassificationRepository(BaseRepository[PayeeClassificationInDB]):
+    """CRUD for ``transaction_payee_classifications`` — creditor or vendor."""
+
+    def __init__(self, manager: DatabaseManager):
+        super().__init__(manager, "transaction_payee_classifications", PayeeClassificationInDB)
+
+    def available_for_matter(
+        self,
+        matter_id: int,
+        include_inactive: bool = False,
+    ) -> list[PayeeClassificationInDB]:
+        """
+        Every ruling that applies to a matter: the firm's layer plus its own.
+
+        Two queries, for the same reason ``TransactionTagRepository`` uses two:
+        PostgREST cannot express "matter_id is null OR matter_id = 7" through a
+        condition dict without a raw ``or=`` string.
+
+        The matter's own rulings come **second**, and the caller keeps the last
+        one it sees for a pattern. That is the override: a firm-wide
+        ``not_creditor`` on a payee stops applying the moment this matter says
+        otherwise.
+        """
+        firm = self.select_many(condition={"matter_id": None})[0]
+        mine = self.select_many(condition={"matter_id": matter_id})[0]
+        rulings = firm + mine
+        if not include_inactive:
+            rulings = [r for r in rulings if r.is_active]
+        return rulings
+
+    def for_scope(self, matter_id: Optional[int] = None) -> list[PayeeClassificationInDB]:
+        """One layer on its own, for the management screen."""
+        if matter_id is None:
+            rows = (
+                self.manager.client.table(self.table_name)
+                .select("*")
+                .is_("matter_id", "null")
+                .execute()
+            )
+            return [PayeeClassificationInDB(**row) for row in (rows.data or [])]
+        return self.select_many(condition={"matter_id": matter_id})[0]

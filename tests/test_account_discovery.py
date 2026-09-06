@@ -17,8 +17,11 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
+from db.models.financial import AccountType  # noqa: E402
+import services.account_discovery_service as ads  # noqa: E402
 from services.account_discovery_service import (  # noqa: E402
-    AccountDiscoveryService, _last4, _references,
+    AccountDiscoveryService, _aba_is_valid, _last4, _payee_key, _references,
+    _same_party, _wire_details,
 )
 
 FAILURES: list[str] = []
@@ -32,23 +35,84 @@ def check(label: str, got, want) -> None:
         FAILURES.append(label)
 
 
+def check_true(label: str, got) -> None:
+    check(label, bool(got), True)
+
+
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
 class FakeAccount:
-    def __init__(self, id, institution, last4, ownership="unknown"):
+    def __init__(self, id, institution, last4, ownership="unknown",
+                 account_type=AccountType.checking):
         self.id = id
         self.institution = institution
         self.account_number_last4 = last4
         self.ownership = ownership
+        self.account_type = account_type
 
 
 class FakeTransaction:
-    def __init__(self, id, account_id, description, amount, when=None):
+    def __init__(self, id, account_id, description, amount, when=None, category_id=None):
         self.id = id
         self.financial_account_id = account_id
         self.description = description
         self.amount = Decimal(amount)
         self.transaction_date = when
+        self.category_id = category_id
+
+
+class FakeRuling:
+    def __init__(self, id, pattern, classification, name=None, kind=None):
+        self.id = id
+        self.pattern = pattern
+        self.classification = classification
+        self.creditor_name = name
+        self.creditor_type = kind
+
+
+class FakeCategoryRepo:
+    def __init__(self, liability_ids=()):
+        self._ids = list(liability_ids)
+
+    def liability_ids(self):
+        return self._ids
+
+
+class FakeClassificationRepo:
+    def __init__(self, rulings=()):
+        self._rulings = list(rulings)
+
+    def available_for_matter(self, matter_id, include_inactive=False):
+        return self._rulings
+
+
+def guard_fakes() -> None:
+    """
+    Every attribute a fake invents must exist on the real model.
+
+    This check exists because its absence cost a session: fakes carrying a
+    ``.name`` the real model spells ``description`` agreed perfectly with code
+    that read ``.name``, so the tests passed and production 500'd. A fake that
+    is free to invent fields tests the fake.
+    """
+    from db.models.financial import (
+        FinancialAccount, FinancialAccountTransaction, PayeeClassification,
+    )
+    pairs = (
+        ("FakeAccount", FakeAccount(1, "B", "1234"), FinancialAccount,
+         {"id"}),
+        ("FakeTransaction", FakeTransaction(1, 1, "d", "0.00"), FinancialAccountTransaction,
+         {"id"}),
+        ("FakeRuling", FakeRuling(1, "P", "creditor"), PayeeClassification,
+         {"id"}),
+    )
+    renamed = {"kind": "creditor_type", "name": "creditor_name"}
+    for label, fake, model, exempt in pairs:
+        for attribute in vars(fake):
+            field = renamed.get(attribute, attribute)
+            if field in exempt or field in model.model_fields:
+                continue
+            check("%s.%s exists on %s" % (label, attribute, model.__name__), field, "a real field")
 
 
 class FakeAccountRepo:
@@ -76,12 +140,13 @@ class FakeTransactionRepo:
         self.calls = 0
 
     def search(self, account_ids, exclude_statement_ids=None, text=None,
-               limit=200, offset=0, **kwargs):
+               category_ids=None, limit=200, offset=0, **kwargs):
         self.calls += 1
         matches = [
             r for r in self._rows
             if r.financial_account_id in account_ids
             and (text is None or text.lower() in (r.description or "").lower())
+            and (category_ids is None or getattr(r, "category_id", None) in category_ids)
         ]
         size = min(limit, self._page_cap)
         return matches[offset:offset + size], len(matches)
@@ -107,6 +172,36 @@ def run(accounts, rows, page_cap=1000):
         (mod.FinancialAccountRepository,
          mod.FinancialAccountStatementRepository,
          mod.FinancialAccountTransactionRepository) = original
+
+
+def run_creditors(accounts, rows, liability_ids=(), rulings=()):
+    """Drive the creditor scan against fakes. Returns (creditors, candidates)."""
+    import services.account_discovery_service as mod
+
+    account_repo = FakeAccountRepo(accounts)
+    statement_repo = FakeStatementRepo()
+    transaction_repo = FakeTransactionRepo(rows)
+    category_repo = FakeCategoryRepo(liability_ids)
+    classification_repo = FakeClassificationRepo(rulings)
+
+    original = (mod.FinancialAccountRepository,
+                mod.FinancialAccountStatementRepository,
+                mod.FinancialAccountTransactionRepository,
+                mod.TransactionCategoryRepository,
+                mod.PayeeClassificationRepository)
+    mod.FinancialAccountRepository = lambda m: account_repo
+    mod.FinancialAccountStatementRepository = lambda m: statement_repo
+    mod.FinancialAccountTransactionRepository = lambda m: transaction_repo
+    mod.TransactionCategoryRepository = lambda m: category_repo
+    mod.PayeeClassificationRepository = lambda m: classification_repo
+    try:
+        return AccountDiscoveryService().creditors(object(), 1)
+    finally:
+        (mod.FinancialAccountRepository,
+         mod.FinancialAccountStatementRepository,
+         mod.FinancialAccountTransactionRepository,
+         mod.TransactionCategoryRepository,
+         mod.PayeeClassificationRepository) = original
 
 
 # ── Parser ───────────────────────────────────────────────────────────────────
@@ -179,6 +274,71 @@ check("'Transfer' is not mistaken for 'transaction' and stripped",
       _references("Transfer to XXX4070"), [("4070", None)])
 
 
+print("")
+print("Wires name a bank, never an account")
+
+# Verbatim from the Harrison production. Seven of these arrived at the Chase
+# checking account in 2024, totalling $198,101.18, and the transfer scan saw
+# none of them: the description contains neither "transfer" nor "xfer", and no
+# UBS account number appears anywhere in it.
+WIRE = ("Fedwire Credit Via: UBS Ag Stamford Branch/026007993 B/O: Kimberly Harrison "
+        "United States 75056 Ref: Chase Nyc/Ctr/Bnf=Kimberly A Harrison Lewisville TX "
+        "75056-5760 US/Ac-0 00000018227 Rfb=Fa35304Dom240605 BB I=/Ocmt/USD31721,34/ "
+        "Imad: 0605B6B7Ik2C001185 Trn: 0839331157Ff")
+
+check("the transfer scan is blind to it", _references(WIRE), [])
+
+details = _wire_details(WIRE)
+check("the sending bank is read off the wire", details["institution"], "UBS Ag Stamford Branch")
+check("with its routing number", details["aba"], "026007993")
+check_true("the originator is captured", details["originator"].startswith("Kimberly Harrison"))
+check_true("so is the beneficiary", details["beneficiary"].startswith("Kimberly A Harrison"))
+
+# The finding. Not "money arrived from UBS" but "she wired it to herself".
+check("sender and receiver are the same person", details["same_party"], True)
+
+print("")
+print("The routing number is checksummed, which is why it is safe to key on")
+check("a real ABA validates", _aba_is_valid("026007993"), True)
+check("Chase", _aba_is_valid("021000021"), True)
+check("a made-up nine-digit run does not", _aba_is_valid("123456789"), False)
+check("nor does a short one", _aba_is_valid("02600799"), False)
+check("nor a non-numeric one", _aba_is_valid("02600799X"), False)
+
+print("")
+print("A nine-digit run that is not a routing number is not an institution")
+# The danger of loosening the digit patterns: reporting "UBS ....7993" as an
+# undisclosed ACCOUNT, when 026007993 is the bank's routing number.
+check("the routing number never reaches the account list",
+      [ref for ref, _ in _references(WIRE) if "7993" in ref], [])
+check("a wire whose bank number fails the checksum yields no institution",
+      _wire_details("Fedwire Credit Via: Nowhere Bank/123456789 B/O: A Person")["institution"],
+      None)
+
+print("")
+print("What is not a wire")
+check("a phone bill from a carrier with WIRELESS in the name",
+      _wire_details("VERIZON WIRELESS PMT 8005551212"), None)
+check("a grocery run", _wire_details("WAL-MART SUPERCENTER #1234"), None)
+check("an ordinary transfer", _wire_details("Transfer from XXX4070 to XXX9260"), None)
+
+print("")
+print("A third-party wire is not the same finding")
+third = _wire_details("Fedwire Credit Via: UBS Ag Stamford Branch/026007993 "
+                      "B/O: Acme Holdings LLC Ref: Bnf=Kimberly A Harrison Lewisville TX")
+check("still names the institution", third["institution"], "UBS Ag Stamford Branch")
+check("but the parties differ", third["same_party"], False)
+
+print("")
+print("Shared address words alone are not a shared identity")
+# Both party lines carry "United States" and a Texas town. Two shared NAME words
+# are required, which is the rule intake_service uses for matching people.
+check("geography does not make two people one",
+      _same_party("Acme Corp United States Texas", "Jane Doe United States Texas"), False)
+check("a surname alone is not enough either",
+      _same_party("Harrison Enterprises", "Kimberly A Harrison"), False)
+
+
 print("\nNumbers that are not accounts")
 
 check("confirmation number alone is not an account",
@@ -238,8 +398,10 @@ check("institution inferred from the statement it sat on",
       entry["institution"], "First Financial Bank")
 check("and flagged as inferred", entry["institution_inferred"], True)
 check("named the account it was seen on", entry["seen_on"], ["First Financial Bank ····9260"])
+# One query per gate term — transfer, xfer, payment, pmt, autopay — and not one
+# page of the matter's whole transaction table.
 check("the search was pushed to the database, not paged over everything",
-      repo.calls, 2)
+      repo.calls, len(ads._TRANSFER_TERMS) + len(ads._PAYMENT_TERMS))
 
 print("\nAn institution the description names outright")
 
@@ -330,6 +492,187 @@ rows = [
 ]
 results, _ = run(held, rows)
 check("busiest account first", [r["last4"] for r in results], ["2222", "1111"])
+
+# ── Payments that name an account ────────────────────────────────────────────
+
+print("\nA payment that prints the account it paid")
+
+check("Chase spells a mask in English, and names the issuer",
+      _references("12/21 Payment To Chase Card Ending IN 9547"),
+      [("9547", "Chase")])
+
+check("without the word 'in', an account-type word carries it",
+      _references("Payment To Chase Card ending 1269"),
+      [("1269", "Chase")])
+
+check("a masked account inside a payment still reads",
+      _references("Hudson Payment for Liukin - Withdrawal to Main Checking Account XXXXXXX3009"),
+      [("3009", None)])
+
+# The reason ``_LABELLED`` is transfer-only. Without that split this line reads
+# as an undisclosed account belonging to Kathy Gunn, whose "account number" is
+# the Zelle confirmation.
+check("a trailing confirmation number on a payment is not an account",
+      _references("Zelle Payment To Kathy  Gunn 20928990159"), [])
+
+check("but the same shape on a transfer still is",
+      _references("TRANSFER FROM CHASE 4321"), [("4321", "CHASE")])
+
+check("a statement period is not an account",
+      _references("Payment for the period ending 2024"), [])
+
+check("a payment naming nobody's number yields nothing",
+      _references("ACH PMT AMEX EPAYMENT 0005000008 03/09/26 ID #-M3630 "
+                  "TRACE #-091000014282361"), [])
+
+
+# ── Reading a payee out of a payment ─────────────────────────────────────────
+
+print("\nReducing a payment description to who was paid")
+
+check("ACH pull, with the ids and dates that differ every month",
+      _payee_key("ACH PMT AMEX EPAYMENT 0005000008 03/09/26 ID #-M3630 "
+                 "TRACE #-091000014282361"), "AMEX")
+check("the same creditor, worded differently by the same bank",
+      _payee_key("Withdrawal from AMEX EPAYMENT ACH PMT"), "AMEX")
+check("bank bill-pay, with its confirmation number",
+      _payee_key("10/16 Online Payment 22398267106 To City of Lewisville"),
+      "CITY OF LEWISVILLE")
+check("the account number comes off the payee, it is not part of the name",
+      _payee_key("12/21 Payment To Chase Card Ending IN 9547"), "CHASE CARD")
+check("a card issuer written two ways lands in one place",
+      _payee_key("APPLECARD GSBANK  PAYMENT     17643109"), "APPLECARD GSBANK")
+check("and again from the other statement's phrasing",
+      _payee_key("Withdrawal from APPLECARD GSBANK PAYMENT"), "APPLECARD GSBANK")
+# A Zelle to a named person can be a private loan being repaid, which is a debt
+# somebody has to disclose. The rail is furniture; the name is the payee.
+check("the person survives, the payment rail does not",
+      _payee_key("Zelle Payment To Kathy  Gunn 20928990159"), "KATHY GUNN")
+check("a bare rail with no name groups as the rail",
+      _payee_key("Venmo Payment 1032673429529 Web ID: 3264681992"), "VENMO")
+
+
+# ── Creditors ────────────────────────────────────────────────────────────────
+
+print("\nCreditors, and the payees nobody has ruled on")
+
+guard_fakes()
+
+CHECKING = [FakeAccount(1, "Chase", "4448", account_type=AccountType.checking)]
+PAYMENTS = [
+    # Filed by a person under a liability category — a finding.
+    FakeTransaction(1, 1, "ACH PMT AMEX EPAYMENT 0005000008 03/09/26 ID #-M3630",
+                    "-5000.00", date(2023, 3, 9), category_id=69),
+    FakeTransaction(2, 1, "ACH PMT AMEX EPAYMENT 0005000008 04/09/26 ID #-M3631",
+                    "-4000.00", date(2023, 4, 9), category_id=69),
+    # Nobody has ruled on these two.
+    FakeTransaction(3, 1, "Withdrawal from LOWES PAYMENT", "-300.00", date(2023, 3, 12)),
+    FakeTransaction(4, 1, "10/16 Online Payment 22398267106 To City of Lewisville",
+                    "-120.00", date(2023, 3, 16)),
+]
+
+creditors, candidates = run_creditors(CHECKING, PAYMENTS, liability_ids=[69])
+check("the categorized payee is a finding", [c["payee"] for c in creditors], ["AMEX"])
+check("and says why, so a reader can weigh it", creditors[0]["reason"], "liability_category")
+check("twelve payments, one creditor", creditors[0]["payments"], 2)
+check("ranked on what it costs to service", creditors[0]["money_out"], Decimal("9000.00"))
+check("the window it was paid over",
+      (creditors[0]["first_seen"], creditors[0]["last_seen"]),
+      (date(2023, 3, 9), date(2023, 4, 9)))
+check("everything else is a question, not a finding",
+      [c["payee"] for c in candidates], ["LOWES", "CITY OF LEWISVILLE"])
+check("candidates are ranked by money too", candidates[0]["money_out"], Decimal("300.00"))
+check("and are marked as unruled", candidates[0]["reason"], "unreviewed")
+
+creditors, candidates = run_creditors(
+    CHECKING, PAYMENTS, liability_ids=[69],
+    rulings=[FakeRuling(7, "LOWES", "creditor", "Lowe's (Synchrony)", "credit_card")],
+)
+check("a ruling promotes a payee out of the queue",
+      sorted(c["payee"] for c in creditors), ["AMEX", "LOWES"])
+check("and it carries the name a person would put on a motion",
+      [c["creditor_name"] for c in creditors if c["payee"] == "LOWES"], ["Lowe's (Synchrony)"])
+check("which changes what you request",
+      [c["creditor_type"] for c in creditors if c["payee"] == "LOWES"], ["credit_card"])
+check("the queue is shorter by exactly one",
+      [c["payee"] for c in candidates], ["CITY OF LEWISVILLE"])
+
+creditors, candidates = run_creditors(
+    CHECKING, PAYMENTS, liability_ids=[69],
+    rulings=[FakeRuling(8, "CITY OF LEWISVILLE", "not_creditor")],
+)
+check("a vendor ruling removes it for good", [c["payee"] for c in candidates], ["LOWES"])
+check("and does not touch the findings", [c["payee"] for c in creditors], ["AMEX"])
+
+# The matter layer overriding the firm's answer: last match wins.
+creditors, candidates = run_creditors(
+    CHECKING, PAYMENTS, liability_ids=[],
+    rulings=[FakeRuling(9, "LOWES", "not_creditor"),
+             FakeRuling(10, "LOWES", "creditor", "Lowe's", "credit_card")],
+)
+check("the matter's own ruling overrides the firm's",
+      [c["payee"] for c in creditors], ["LOWES"])
+
+print("\nWhat the creditor scan refuses to report")
+
+# Producing the card explains every payment to it. Reporting it anyway is how a
+# report that is right most of the time stops being read.
+held_card = CHECKING + [FakeAccount(2, "AMEX", "1005", account_type=AccountType.credit_card)]
+creditors, candidates = run_creditors(held_card, PAYMENTS, liability_ids=[69])
+check("a produced credit account is not a finding", [c["payee"] for c in creditors], [])
+
+# A produced CHECKING account at the same bank explains nothing about a card.
+held_bank = CHECKING + [FakeAccount(2, "AMEX", "1005", account_type=AccountType.checking)]
+creditors, _ = run_creditors(held_bank, PAYMENTS, liability_ids=[69])
+check("but a produced deposit account at the same bank does not",
+      [c["payee"] for c in creditors], ["AMEX"])
+
+# Money arriving from a creditor is a refund or a cash advance. Neither says an
+# account went unproduced, and both would inflate the total that ranks the list.
+inbound = [FakeTransaction(1, 1, "ACH PMT AMEX EPAYMENT REFUND", "500.00", date(2023, 3, 9))]
+creditors, candidates = run_creditors(CHECKING, inbound)
+check("money coming back from a creditor is not a payment to one",
+      (creditors, candidates), ([], []))
+
+# A payment landing ON a card describes the account that funded it, which is a
+# different question — and "Payment Thank You" is not the name of a creditor.
+card_only = [FakeAccount(1, "Chase", "9547", account_type=AccountType.credit_card)]
+on_card = [FakeTransaction(1, 1, "Payment Thank You - Web", "-2000.00", date(2023, 3, 9))]
+check("a payment arriving on a card is out of scope",
+      run_creditors(card_only, on_card), ([], []))
+
+print("\nWhen a payment names the number as well as the payee")
+
+named = [FakeTransaction(1, 1, "12/21 Payment To Chase Card Ending IN 9547",
+                         "-2500.00", date(2023, 3, 9), category_id=69)]
+creditors, _ = run_creditors(CHECKING, named, liability_ids=[69])
+check("the digits ride along with the creditor", creditors[0]["last4"], ["9547"])
+check("so the row is the creditor and the account at once",
+      creditors[0]["payee"], "CHASE CARD")
+
+print("\nDegrading when 033 has not been applied")
+
+
+class ExplodingClassificationRepo:
+    def available_for_matter(self, matter_id, include_inactive=False):
+        raise RuntimeError('relation "transaction_payee_classifications" does not exist')
+
+
+def run_without_table():
+    import services.account_discovery_service as mod
+    original = mod.PayeeClassificationRepository
+    mod.PayeeClassificationRepository = lambda m: ExplodingClassificationRepo()
+    try:
+        return run_creditors(CHECKING, PAYMENTS, liability_ids=[69])
+    finally:
+        mod.PayeeClassificationRepository = original
+
+
+creditors, candidates = run_without_table()
+check("a missing rulings table degrades to everything-is-a-candidate",
+      len(creditors) + len(candidates), 3)
+check("and the categorized finding still stands",
+      [c["payee"] for c in creditors], ["AMEX"])
 
 print("")
 if FAILURES:

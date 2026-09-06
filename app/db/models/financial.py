@@ -330,6 +330,14 @@ class TransactionCategory(BaseModel):
                     "False for money that moves without being income or expense — a stock "
                     "split, a transfer between the parties' own accounts",
     )
+    is_liability: bool = Field(
+        default=False,
+        description="Whether money filed here was paid to a creditor — a card issuer, a "
+                    "lender, a mortgage servicer. Read by the creditor-discovery scan: a "
+                    "payment filed here names an account somebody may not have produced. "
+                    "Distinct from include_in_fis, which asks whether the line belongs on "
+                    "the sworn statement at all",
+    )
     is_active: bool = Field(
         default=True,
         description="Retire a category without disturbing the transactions already filed under it",
@@ -546,6 +554,61 @@ class TransactionCategoryRule(BaseModel):
 
 
 class TransactionCategoryRuleInDB(TransactionCategoryRule):
+    id: int = Field(..., description="Primary key, set by the database")
+    created_at: datetime = Field(..., description="Set by the database")
+    updated_at: Optional[datetime] = Field(default=None)
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PayeeClassification(BaseModel):
+    """
+    What the firm has decided about a payee: creditor, or vendor.
+
+    The creditor-discovery scan cannot tell "Online Payment To Mr. Cooper" (a
+    mortgage servicer) from "Online Payment To Frontier" (an ISP) — the two are
+    the same sentence, and the difference lives outside the text. This is where
+    the answer is kept once somebody gives it.
+
+    Both verdicts are stored, because both are worth keeping. ``creditor`` puts
+    a payee on the report; ``not_creditor`` takes it off permanently. Without
+    the second, the same utilities are re-triaged on every matter until nobody
+    reads the list at all.
+    """
+    matter_id: Optional[int] = Field(
+        default=None,
+        description="None for the firm's answer, offered on every matter; a matter id for a "
+                    "judgment about one household",
+    )
+    pattern: str = Field(
+        ...,
+        min_length=3,
+        description="The normalized payee, matched case- and punctuation-blind on word "
+                    "boundaries — the same matching transaction_category_rules uses",
+    )
+    classification: str = Field(
+        ...,
+        description="creditor | not_creditor",
+    )
+    creditor_name: Optional[str] = Field(
+        default=None,
+        description="What to call it on a motion. The normalized payee is a scraped fragment "
+                    "('CITI CARD ONLINE CITICTP'); this is what a person would write",
+    )
+    creditor_type: Optional[str] = Field(
+        default=None,
+        description="credit_card | loan | mortgage | line_of_credit | other. It changes what "
+                    "you ask for: a card means statements, a mortgage means a payoff and a note",
+    )
+    note: Optional[str] = Field(default=None, description="Why, for whoever inherits it")
+    is_active: bool = Field(default=True, description="Retire a ruling without losing its history")
+    decided_by_staff_id: Optional[int] = Field(
+        default=None,
+        description="Who decided. A not_creditor ruling suppresses evidence from a report that "
+                    "backs a motion, so it is attributable",
+    )
+
+
+class PayeeClassificationInDB(PayeeClassification):
     id: int = Field(..., description="Primary key, set by the database")
     created_at: datetime = Field(..., description="Set by the database")
     updated_at: Optional[datetime] = Field(default=None)

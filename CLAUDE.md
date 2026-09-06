@@ -129,6 +129,7 @@ cyclone/
 │       ├── 030_matter_caption.sql          # matters.case_style, matters.client_alignment
 │       ├── 031_fis_category_settings.sql  # payment schedules per category, per person
 │       ├── 032_category_rules.sql        # keyword rules + category provenance on transactions
+│       ├── 033_creditor_discovery.sql    # categories.is_liability + payee classifications
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -566,11 +567,86 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
   matched as a phrase: what sits before an account number is account-type words
   in any combination (`DDA Acct No`, `CHKG`, `SVGS`), and enumerating
   combinations is a losing game. What survives is a name, or nothing.
-- The gate (`transfer|xfer`) is pushed to the database as two text searches, so
-  the scan fetches transfer lines rather than every line on the matter. The
-  query terms and the regex are deliberately the same two words.
+- **A wire names the sending INSTITUTION, never the sending account**, so it
+  cannot join the account list at all — there is no number to key on.
+  `referenced_institutions()` is the second half of the report, and it exists
+  because the account-shaped scan was structurally blind to $198,101.18 of
+  incoming wires on the Harrison matter while catching a $500 intra-bank
+  transfer. Keyed on the **ABA routing number**, which is checksummed (3-7-1
+  weights, sum ≡ 0 mod 10) and therefore safe where a bank name spelled two ways
+  is not.
+- **The finding is not "money came from UBS" — it is "she wired it to
+  herself".** `B/O:` and `Bnf=` are the Fedwire originator and beneficiary; when
+  they are the same person, money moved out of an account that party controls
+  and into one we hold. `_same_party` requires **two** shared name words, the
+  same rule `intake_service._match_confidence` uses — a surname alone is not
+  enough, and both lines are padded with address text that would otherwise match
+  on "United States".
+- **The routing number must never reach the account list.** Loosening the digit
+  patterns to catch wires would report "UBS ····7993" as an undisclosed account,
+  which is the confident-wrong failure this whole module is built to avoid.
+- Wire vocabulary is matched on the **Fedwire tags** (`B/O:`, `BNF=`, `ORIG:`)
+  rather than any bank's phrasing, because the tags come from the message format
+  and survive a change of institution. The word "wire" alone would also match
+  every VERIZON WIRELESS line — cheap at the query, rejected by the parser.
+- **A payment is a transfer with only one side named**, and that is a third
+  shape of evidence with its own method (`creditors()`). Measured on one
+  production's payment lines: **two** of roughly a dozen credit relationships
+  printed an account number; the rest name only a payee. `_ENDING` catches the
+  two (Chase spells a mask in English — "Card Ending IN 9547"), and they join
+  the account list like any transfer reference.
+- **`_LABELLED` is transfer-only, deliberately.** On a transfer,
+  `FROM CHKG 8098386837` is a bank convention. On a payment, a trailing digit
+  run is a confirmation number essentially always — widening the gate without
+  this split reports *"Kathy Gunn ····0159"* as an undisclosed account, the
+  number being her Zelle confirmation. A payment must name its account in a
+  form that says so: a mask, an "Acct No.", or "ending in".
+- **Nothing in a payment description can say whether the payee is a creditor.**
+  "Online Payment To Mr. Cooper" (a mortgage servicer) and "Online Payment To
+  Frontier" (an ISP) are the same sentence, and no regular expression separates
+  them because the difference is not in the text. Two sources answer it, and
+  every row says **which**: a category flagged `is_liability` (a paralegal
+  filing a line under "Credit Card Payments" IS that assertion, made as
+  ordinary work), or a row in `transaction_payee_classifications`.
+- **The negative verdict is what makes the report survive a real production.**
+  Without a way to record "Atmos Energy is not a creditor" once, forty utilities
+  come back on every matter and the list stops being read. `not_creditor` is
+  therefore stored, attributed, and reversible — it suppresses evidence, so it
+  is never a silent default and is never seeded.
+- **Everything unruled is a CANDIDATE, never a finding**, returned in its own
+  list, ranked by money, and **excluded from the exhibit entirely**. Putting an
+  unclassified payee in a document filed with a court asserts of a water utility
+  exactly what it asserts of American Express.
+- `_payee_key()` strips what varies between payments of one creditor — dates,
+  trace and ACH ids, channel furniture like `CHK CARD PUR` — so twelve payments
+  group as one row. It removes bank furniture and never removes words: a payee
+  that scrapes into two near-identical groups is cosmetic and collapses the
+  moment somebody rules on it, because a ruling's own pattern then becomes the
+  key. A scrub aggressive enough to merge two different creditors would not be
+  recoverable.
+- **A line that scrubs to nothing is dropped without trace**, which is why
+  "Venmo Payment" is not stripped as a lead phrase — left alone it groups under
+  VENMO, a visible fact somebody can dismiss. A payment rail is furniture but a
+  *name* on it is not: "Zelle Payment To Kathy Gunn" keeps the name, because a
+  Zelle to a person can be a private loan being repaid.
+- The scan runs over **deposit-side accounts only**. A payment arriving on a
+  card describes the checking account that funded it, not a creditor. And only a
+  produced **credit** account explains a creditor payment — a produced Chase
+  checking account says nothing about a Chase card.
+- Ruling matching goes through `category_rule_service.matches()`, the same
+  boundary-aligned matcher the rules use, rather than a second implementation
+  that would silently match TARGET inside STARGETTER LLC.
+- **An ACH trace number's first eight digits are a real routing number** —
+  `TRACE #-091000014282361` resolves to 091000019, Wells Fargo — and it must
+  never reach the institution list. That is the *creditor's* bank: keying on it
+  would report an undisclosed account at Wells Fargo because somebody pays their
+  Amex bill.
+- The gate (`transfer|xfer`, plus `payment|pmt|autopay`) is pushed to the
+  database as one text search per term, so the scan fetches candidate lines
+  rather than every line on the matter. The query terms and the regexes are
+  deliberately the same words.
 
-Covered by `tests/test_account_discovery.py`.
+Covered by `tests/test_account_discovery.py` and `tests/test_undisclosed_exhibit.py`.
 
 ### Exhibit Service (`exhibit_service.py`)
 
@@ -1079,7 +1155,10 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Transaction categories (FIS chart of accounts) | ✅ Built — firm-wide hierarchy, seeded by 024 |
 | Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply, create/edit/retire/delete UI |
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
-| Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts |
+| Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts, plus institutions named by wires, plus creditors named by payments |
+| Creditor discovery from payments | ✅ Built — `is_liability` on the category, `transaction_payee_classifications` for the rest, and a triage queue that never reaches an exhibit |
+| Payee-classification management screen | ❌ Not started — the endpoints exist and the triage queue writes through them, but there is no screen to review or reverse a firm-wide ruling |
+| Card funded from an unproduced account | ❌ Not started — a "Payment Thank You" on a produced card with no matching debit on any produced deposit account means the funding account was not produced. Same finding, opposite direction, and the match is exact on date and amount |
 | Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
 | Export query results: CSV / MD / DOCX / PDF | ✅ Built — CSV is a clean extraction; the rest are full exhibits |
 | Financial Information Statement generation | ✅ Built — whole-month averaging, recurrence-aware, three-panel UI, four-format export. Chart of accounts still to be populated |
@@ -1293,6 +1372,15 @@ Three things to get right when it is built:
 | Format a CSV amount as currency | A spreadsheet reads `-$2,500.00` as text and will not sum it. Currency is for the exhibit formats; the CSV carries the raw figure |
 | Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
+| Read a trailing digit run on a PAYMENT as an account number | On a transfer it is a bank convention; on a payment it is a confirmation number. `Zelle Payment To Kathy Gunn 20928990159` became an undisclosed account belonging to Kathy Gunn |
+| Decide from the text whether a payee is a creditor | "Payment To Mr. Cooper" and "Payment To Frontier" are the same sentence. It comes from the category a person filed it under, or a recorded ruling — nowhere else |
+| Put an unclassified payee in the exhibit | It asserts of a water utility what it asserts of American Express. Candidates are a screen-only work queue |
+| Seed a `not_creditor` ruling | It hides an account permanently and silently. Suppression is always somebody's recorded decision |
+| Key an institution on the ABA inside an ACH trace number | Those nine digits are the CREDITOR's bank. It reports an undisclosed account at Wells Fargo because the client pays an Amex bill |
+| Let a scraped payee key be aggressive enough to merge two names | Two groups for one payee is cosmetic and collapses on the first ruling. Two creditors merged into one row is not recoverable |
+| Strip a payee phrase that leaves an empty string | The line is then dropped with no trace. "Venmo Payment" keeps its trailing word so the row stays visible |
+| Read a routing number as an account number | An ABA is nine checksummed digits identifying a BANK. Reporting "UBS ····7993" as an account is a confident-wrong finding |
+| Assume a wire names the account it came from | It names the bank. That is why institutions are a separate section keyed on the ABA |
 | Report an inferred institution as though it were read off the page | Flag it. The dagger is the difference between a finding and an assertion |
 | Take a model's null account number at face value | It is the dedup key. Find it by pattern — the one long digit run on every page — or a form the model reads half the time opens one account per statement |
 | Let the pattern override an extracted account number | Unlike a Bates stamp, the number is printed in prose too. Disagreement is a real conflict: keep the extraction and flag it |

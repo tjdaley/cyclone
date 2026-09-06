@@ -439,3 +439,87 @@ export interface DownloadedFile {
   filename: string
   warnings: string[]
 }
+
+/**
+ * A bank the wires name that this matter has no account at.
+ *
+ * Separate from UndisclosedAccount because a wire prints the sending
+ * INSTITUTION and never the sending account — there is no number to key on.
+ */
+export interface ReferencedInstitution {
+  institution: string
+  /** Its routing number. Checksummed, so a reliable identity where a name is not. */
+  aba: string | null
+  wires: number
+  /** Wires where sender and receiver are the same person. This is the finding. */
+  same_party_wires: number
+  money_in: string
+  money_out: string
+  net: string
+  first_seen: string | null
+  last_seen: string | null
+  seen_on: string[]
+  examples: string[]
+}
+
+/**
+ * A payee the matter pays that no produced statement accounts for.
+ *
+ * Keyed on the payee, not on a number, because a payment to a card issuer
+ * almost never prints one. Whether the payee is a creditor comes from outside
+ * the description — the category its payments are filed under, or a standing
+ * ruling — so `reason` travels with every row. "American Express" and "the
+ * City of Lewisville" arrive here looking identical.
+ */
+export interface Creditor {
+  payee: string
+  /** What to call it on a motion; the scraped payee is a fragment. */
+  creditor_name: string | null
+  /** credit_card | loan | mortgage | line_of_credit | other. */
+  creditor_type: string | null
+  /** liability_category | classified | unreviewed. */
+  reason: string
+  /** The ruling that put it here, so the UI can offer to change it. */
+  classification_id: number | null
+  payments: number
+  money_out: string
+  /** Digits a payment happened to print. Usually empty — hence a payee report. */
+  last4: string[]
+  first_seen: string | null
+  last_seen: string | null
+  seen_on: string[]
+  examples: string[]
+}
+
+/** Everything the production names but does not contain, by how it was found. */
+export interface UndisclosedReport {
+  accounts: UndisclosedAccount[]
+  institutions: ReferencedInstitution[]
+  creditors: Creditor[]
+  /** Payees nobody has ruled on. A work queue, never a finding, never exported. */
+  candidates: Creditor[]
+}
+
+/** What the firm has decided about a payee. */
+export interface PayeeClassification {
+  id: number
+  matter_id: number | null
+  pattern: string
+  classification: string
+  creditor_name: string | null
+  creditor_type: string | null
+  note: string | null
+  is_active: boolean
+  decided_by_staff_id: number | null
+  is_firm_wide: boolean
+}
+
+export interface PayeeClassificationPayload {
+  pattern: string
+  classification: 'creditor' | 'not_creditor'
+  matter_id?: number | null
+  creditor_name?: string | null
+  creditor_type?: string | null
+  note?: string | null
+  is_active?: boolean
+}
