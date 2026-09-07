@@ -62,12 +62,15 @@ class FakeTransaction:
 
 
 class FakeRuling:
-    def __init__(self, id, pattern, classification, name=None, kind=None):
+    def __init__(self, id, pattern, classification, name=None, kind=None,
+                 holds=None, matter_id=None):
         self.id = id
+        self.matter_id = matter_id
         self.pattern = pattern
         self.classification = classification
         self.creditor_name = name
         self.creditor_type = kind
+        self.holds = list(holds or [])
 
 
 class FakeCategoryRepo:
@@ -172,6 +175,36 @@ def run(accounts, rows, page_cap=1000):
         (mod.FinancialAccountRepository,
          mod.FinancialAccountStatementRepository,
          mod.FinancialAccountTransactionRepository) = original
+
+
+def run_counterparties(accounts, rows, liability_ids=(), rulings=()):
+    """Drive the whole counterparty scan. Returns (creditors, candidates, platforms)."""
+    import services.account_discovery_service as mod
+
+    account_repo = FakeAccountRepo(accounts)
+    statement_repo = FakeStatementRepo()
+    transaction_repo = FakeTransactionRepo(rows)
+    category_repo = FakeCategoryRepo(liability_ids)
+    classification_repo = FakeClassificationRepo(rulings)
+
+    original = (mod.FinancialAccountRepository,
+                mod.FinancialAccountStatementRepository,
+                mod.FinancialAccountTransactionRepository,
+                mod.TransactionCategoryRepository,
+                mod.PayeeClassificationRepository)
+    mod.FinancialAccountRepository = lambda m: account_repo
+    mod.FinancialAccountStatementRepository = lambda m: statement_repo
+    mod.FinancialAccountTransactionRepository = lambda m: transaction_repo
+    mod.TransactionCategoryRepository = lambda m: category_repo
+    mod.PayeeClassificationRepository = lambda m: classification_repo
+    try:
+        return AccountDiscoveryService().counterparties(object(), 1)
+    finally:
+        (mod.FinancialAccountRepository,
+         mod.FinancialAccountStatementRepository,
+         mod.FinancialAccountTransactionRepository,
+         mod.TransactionCategoryRepository,
+         mod.PayeeClassificationRepository) = original
 
 
 def run_creditors(accounts, rows, liability_ids=(), rulings=()):
@@ -719,6 +752,177 @@ check("a missing rulings table degrades to everything-is-a-candidate",
       len(creditors) + len(candidates), 3)
 check("and the categorized finding still stands",
       [c["payee"] for c in creditors], ["AMEX"])
+
+print("\nA ruling made from a scraped payee must fire on the line it came from")
+
+# THE TRIAGE BUTTON STORES THE SCRAPED PAYEE AS THE PATTERN, and `_payee_key`
+# removes noise from the MIDDLE of a description as readily as from its ends:
+#
+#     PASSPORTSERVICES 8005551212 CHECK   ->   PASSPORTSERVICES CHECK
+#
+# so the pattern is a join of two fragments that were never adjacent. `matches`
+# needs a contiguous run on word boundaries -- correctly -- so the ruling could
+# never match its own line. Reached production: the row stayed on the queue
+# after being ruled, the paralegal clicked again, and the second attempt came
+# back a duplicate key. The ruling existed and did nothing.
+TRIAGED = FakeAccount(1, "Liberty National", "8157", account_type=AccountType.checking)
+
+for description in (
+    "PASSPORTSERVICES 8005551212 CHECK",
+    "NATIONWIDE 1122334455 INS PAYMENT",
+    "STATE FARM 800-956-5000 INSURANCE PMT",
+    "ONLINE PAYMENT 22398267106 TO CITY OF LEWISVILLE",
+):
+    scraped = _payee_key(description)
+    line = [FakeTransaction(1, 1, description, "-500.00", date(2024, 1, 5))]
+
+    # Exactly what the button does: rule on the payee the report displayed.
+    vendor = run_counterparties([TRIAGED], line, rulings=[
+        FakeRuling(70, scraped, "not_creditor", matter_id=1),
+    ])
+    check("ruled a vendor, %r leaves the queue" % scraped,
+          (vendor[0], vendor[1]), ([], []))
+
+    lender = run_counterparties([TRIAGED], line, rulings=[
+        FakeRuling(71, scraped, "creditor", "Ruled", kind="loan"),
+    ])
+    check("  ruled a creditor, it becomes a finding",
+          [e["creditor_name"] for e in lender[0]], ["Ruled"])
+    check("  and stops being a question", lender[1], [])
+
+# The description is still matched too. A hand-written ruling names a word the
+# scrape may have thrown away, which is why both forms are offered and not one.
+eaten = run_counterparties([TRIAGED], [
+    FakeTransaction(2, 1, "ACH PMT AMEX EPAYMENT 0005000008 TRACE 091000019",
+                    "-900.00", date(2024, 2, 2)),
+], rulings=[FakeRuling(72, "EPAYMENT", "creditor", "American Express",
+                       kind="credit_card")])
+check("a ruling naming a word the scrape dropped still matches the description",
+      [e["creditor_name"] for e in eaten[0]], ["American Express"])
+
+print("\nPlatforms that hold value")
+
+CHK = FakeAccount(1, "Liberty National", "8157", account_type=AccountType.checking)
+
+VENMO = FakeRuling(90, "VENMO", "custodian", "Venmo", holds=["deposit"])
+PAYPAL = FakeRuling(91, "PAYPAL", "custodian", "PayPal",
+                    holds=["deposit", "credit_card"])
+COINBASE = FakeRuling(92, "COINBASE", "custodian", "Coinbase",
+                      holds=["crypto", "deposit"])
+ZIPCO = FakeRuling(93, "ZIP CO", "creditor", "Zip", kind="loan")
+
+
+def platforms_for(accounts, rows, rulings):
+    return run_counterparties(accounts, rows, rulings=rulings)[2]
+
+
+# BOTH DIRECTIONS COUNT, and the pair is the finding. A creditor is only ever
+# paid; a custodian is a container, so traffic either way proves it exists.
+flow = [
+    FakeTransaction(1, 1, "VENMO PAYMENT 1042956", "-1000.00", date(2024, 1, 4)),
+    FakeTransaction(2, 1, "VENMO CASHOUT 1042956", "200.00", date(2024, 3, 9)),
+]
+one = platforms_for([CHK], flow, [VENMO])
+check("one platform", [e["platform"] for e in one], ["Venmo"])
+check("money sent to it", one[0]["money_out"], Decimal("1000.00"))
+check("money that came back", one[0]["money_in"], Decimal("200.00"))
+check("and what never returned", one[0]["unreturned"], Decimal("800.00"))
+check("both lines counted", one[0]["transactions"], 2)
+check("dated from the traffic", (one[0]["first_seen"], one[0]["last_seen"]),
+      (date(2024, 1, 4), date(2024, 3, 9)))
+
+# THE REVERSE IS ALSO A FINDING, and a stronger one: money came out of a
+# platform that the produced accounts never funded, so something else did.
+backwards = platforms_for([CHK], [
+    FakeTransaction(3, 1, "COINBASE INC TRANSFER", "9000.00", date(2024, 5, 1)),
+], [COINBASE])
+check("reported even though nothing was sent to it", len(backwards), 1)
+check("with the sign the other way", backwards[0]["unreturned"], Decimal("-9000.00"))
+
+# NO GATE WORD ANYWHERE IN IT. This is the line the old query-side gate could
+# never have fetched -- no transfer, no payment, no deposit, no mask -- and it
+# is why the scan reads every line instead of a search per word.
+bare = platforms_for([CHK], [
+    FakeTransaction(4, 1, "COINBASE.COM 8887 8889", "-2500.00", date(2024, 2, 2)),
+], [COINBASE])
+check("a description with no movement word at all is still found",
+      [e["platform"] for e in bare], ["Coinbase"])
+
+# A PAYEE CAN BE BOTH, and Venmo is: not a lender, and holding money. The two
+# axes are matched against separate lists, or this true statement would delete
+# the finding.
+both = run_counterparties([CHK], flow, rulings=[
+    VENMO, FakeRuling(94, "VENMO", "not_creditor"),
+])
+check("'not a creditor' does not remove it from the creditor report", both[0], [])
+check("nor from the candidate queue", both[1], [])
+check("and the platform finding stands", [e["platform"] for e in both[2]], ["Venmo"])
+
+print("\nWhat a produced account discharges")
+
+# PER KIND, NOT PER INSTITUTION. A produced PayPal balance answers the deposit
+# half and says nothing whatever about PayPal Credit.
+paypal_flow = [FakeTransaction(5, 1, "PAYPAL INST XFER", "-400.00", date(2024, 6, 1))]
+half = platforms_for(
+    [CHK, FakeAccount(2, "PayPal", "9001", account_type=AccountType.checking)],
+    paypal_flow, [PAYPAL],
+)
+check("the platform is still listed", len(half), 1)
+check("with only the unanswered half asked for", half[0]["missing"], ["credit_card"])
+check("and it says what was produced", half[0]["produced_types"], ["checking"])
+
+whole = platforms_for(
+    [CHK,
+     FakeAccount(2, "PayPal", "9001", account_type=AccountType.checking),
+     FakeAccount(3, "PayPal", "4400", account_type=AccountType.credit_card)],
+    paypal_flow, [PAYPAL],
+)
+check("produce every kind it can hold and the row goes away", whole, [])
+
+# Crypto was landing under 'brokerage' before 036 gave it a type of its own, so
+# a brokerage account at the platform still discharges the crypto request.
+crypto_held = platforms_for(
+    [CHK, FakeAccount(4, "Coinbase", "7788", account_type=AccountType.brokerage)],
+    [FakeTransaction(6, 1, "COINBASE.COM", "-800.00", date(2024, 4, 1))],
+    [COINBASE],
+)
+check("a brokerage account answers the crypto half", crypto_held[0]["missing"], ["deposit"])
+
+print("\nThe gate governs questions, not findings")
+
+# An UNRULED payee still has to say "payment" before it becomes a candidate --
+# the same three substrings the query used, applied one layer later -- or every
+# grocery run on the matter turns into something a person has to answer.
+ordinary = run_counterparties([CHK], [
+    FakeTransaction(7, 1, "KROGER #4521 PLANO TX", "-84.19", date(2024, 1, 8)),
+    FakeTransaction(8, 1, "ONLINE PAYMENT TO MR COOPER", "-2100.00", date(2024, 1, 9)),
+])
+check("a grocery run is not a candidate payee",
+      [e["payee"] for e in ordinary[1]], ["MR COOPER"])
+
+# A RULED payee is not a question, so it counts wherever it appears. This is
+# the case that nearly shipped broken: "AFFIRM PAY MZWQ4XK" carries no payment
+# word, and neither do "KLARNA*", "AFTERPAY" or "ACH DEBIT DISCOVER" -- so a
+# seeded lender gated behind a word its statements do not print would have been
+# a feature that silently found nothing.
+bnpl = run_counterparties([CHK], [
+    FakeTransaction(9, 1, "AFFIRM PAY MZWQ4XK", "-142.83", date(2024, 2, 14)),
+], rulings=[FakeRuling(95, "AFFIRM", "creditor", "Affirm", kind="loan")])
+check("a seeded lender is a finding", [e["creditor_name"] for e in bnpl[0]], ["Affirm"])
+check("and not a question", bnpl[1], [])
+
+check("a ruled payee needs no gate word at all",
+      [e["creditor_name"] for e in run_counterparties([CHK], [
+          FakeTransaction(11, 1, "ACH DEBIT DISCOVER 0009", "-310.00", date(2024, 4, 4)),
+      ], rulings=[FakeRuling(96, "DISCOVER", "creditor", "Discover",
+                             kind="credit_card")])[0]],
+      ["Discover"])
+
+# The boundary rule is why the pattern is "ZIP CO" and not "ZIP".
+zip_safe = run_counterparties([CHK], [
+    FakeTransaction(10, 1, "PAYMENT SHIPPING ZIPCODE 75024", "-9.99", date(2024, 3, 3)),
+], rulings=[ZIPCO])
+check("ZIP CO does not match ZIPCODE", [e["creditor_name"] for e in zip_safe[0]], [])
 
 print("")
 if FAILURES:

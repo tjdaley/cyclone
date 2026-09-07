@@ -20,6 +20,7 @@ statement" to "there is a First Financial account ending 4070" is an inference
 the tool makes explicit rather than hides — see ``institution_inferred``.
 """
 import re
+import time
 from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Optional
@@ -51,6 +52,48 @@ _LIABILITY_ACCOUNTS = frozenset({AccountType.credit_card, AccountType.loan})
 # what is asked for, so anything that can exceed one page has to be paged or it
 # silently returns the first page and looks complete.
 _PAGE = 1000
+
+# A full scan of a matter's deposit lines is expected to be a few thousand rows.
+# Past this it is worth knowing about, because the scan is deliberately uncapped
+# — an undisclosed-account list that stopped early would look complete and be
+# the exact failure this module exists to prevent.
+_LOUD_SCAN = 50_000
+
+# What a custodian ruling can say it holds. Deliberately NOT ``AccountType``:
+# this vocabulary says what to ASK FOR, and "a deposit balance" is the request
+# whether the platform calls it checking, spending, or a wallet.
+_HOLDS_LABEL = {
+    "deposit": "deposit balance",
+    "brokerage": "brokerage account",
+    "crypto": "crypto holdings",
+    "retirement": "retirement account",
+    "credit_card": "credit card",
+    "line_of_credit": "line of credit",
+    "loan": "loan",
+    "other": "account",
+}
+
+# Which produced account discharges which request. **Per KIND, not per
+# institution** — and that is the difference from the creditor scan, where a
+# produced card at an institution explains every payment to it. A PayPal
+# balance produced as a checking account answers the deposit half of PayPal and
+# says nothing whatever about PayPal Credit, so an institution-wide test would
+# quietly retire a finding nobody has answered.
+_HOLDS_SATISFIED_BY = {
+    "deposit": frozenset({AccountType.checking, AccountType.savings}),
+    "brokerage": frozenset({AccountType.brokerage}),
+    # A brokerage counts: an account holding crypto may well have been produced
+    # under the type that existed before 036 added one for it.
+    "crypto": frozenset({AccountType.crypto, AccountType.brokerage}),
+    "retirement": frozenset({AccountType.retirement}),
+    "credit_card": frozenset({AccountType.credit_card}),
+    "line_of_credit": frozenset({AccountType.credit_card, AccountType.loan}),
+    "loan": frozenset({AccountType.loan}),
+    # "other" is discharged by anything produced at the platform. A kind nothing
+    # can satisfy would be a row that never goes away however much is produced,
+    # and a list with permanent residents stops being read.
+    "other": frozenset(AccountType),
+}
 
 # A description has to be about a transfer before any number in it is read as
 # an account. Without this, every REF# and confirmation number on the statement
@@ -529,6 +572,38 @@ def _payee_key(description: Optional[str]) -> str:
     return " ".join(text.split()).strip(" -–—,:;#*").upper()
 
 
+def _last_match(rulings: list[Any], *prepared: tuple[str, frozenset[int]]) -> Optional[Any]:
+    """
+    The last ruling whose pattern appears in any of these prepared texts.
+
+    Last rather than first, and that is the override: ``_rulings`` returns the
+    firm's layer before the matter's, so a matter ruling that contradicts a
+    firm-wide one is the answer that survives.
+
+    **BOTH THE DESCRIPTION AND THE SCRAPED PAYEE ARE OFFERED, and neither alone
+    is enough.** The description is needed because the scrape may have eaten the
+    very word a hand-written ruling names. The scrape is needed because of a
+    failure that reached production: the triage button on the report creates a
+    ruling whose pattern IS the scraped payee, and ``_payee_key`` removes noise
+    from the MIDDLE of a description as readily as from its ends --
+
+        PASSPORTSERVICES 8005551212 CHECK   ->   PASSPORTSERVICES CHECK
+
+    -- so the pattern is a join of two fragments that were never adjacent.
+    ``matches`` requires a contiguous run on word boundaries, correctly, so that
+    ruling could never fire against the line it was made from. The row stayed on
+    the queue, the paralegal clicked again, and the second attempt came back as
+    a duplicate key: the ruling existed and did nothing. Matching the pattern
+    against the scrape as well makes it exact, and repairs every ruling already
+    stored without touching the data.
+    """
+    found = None
+    for candidate in rulings:
+        if any(matches(text, candidate.pattern) for text in prepared):
+            found = candidate
+    return found
+
+
 class AccountDiscoveryService:
     """Finds accounts named in a matter's transactions but not produced."""
 
@@ -810,8 +885,16 @@ class AccountDiscoveryService:
     def creditors(
         self, manager: DatabaseManager, matter_id: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The creditor halves of :meth:`counterparties`, for callers wanting only those."""
+        owed, unreviewed, _platforms = self.counterparties(manager, matter_id)
+        return owed, unreviewed
+
+    def counterparties(
+        self, manager: DatabaseManager, matter_id: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """
-        Creditors the matter pays but holds no account for, and the residue.
+        Creditors the matter pays but holds no account for, the residue, and the
+        platforms holding value that nobody produced.
 
         Two lists, and the split is the whole point. The first is a finding: a
         payee this firm has said is a creditor, or one whose payments a person
@@ -820,13 +903,42 @@ class AccountDiscoveryService:
         Presenting the second as the first is the confident-wrong failure this
         module exists to avoid, so they never share a list.
 
+        **Platforms are the third list and they are NOT the same problem**, even
+        though the description looks identical. A creditor needs a human ruling
+        because the answer genuinely is not in the text — "Payment To Mr. Cooper"
+        and "Payment To Frontier" are the same sentence. "VENMO PAYMENT" is not
+        like that: Venmo holds a balance on every matter that will ever be
+        opened, and so does Coinbase, and so does Robinhood. The answer is
+        knowable in advance, so those are seeded (036) and never triaged. Only
+        the long tail — a credit union's payment app, a fintech that did not
+        exist last year — reaches the ruling table.
+
+        A payee can be a custodian **and** ruled ``not_creditor`` at the same
+        time, and Venmo is exactly that: not a lender, and holding money. The
+        two axes are therefore matched against separate ruling lists, or the
+        true statement "Venmo is not a creditor" would silently delete the
+        finding that it holds a balance.
+
         The scan runs over the matter's **deposit-side** accounts only. A
         payment arriving on a credit card ("Payment Thank You") says nothing
         about a creditor — it says something about the checking account that
-        funded it, which is a different report and a different question.
+        funded it, which is a different report and a different question. It also
+        keeps one sign rule for the platform arithmetic: money that left the
+        produced deposit accounts. **Known limitation:** crypto bought directly
+        on a produced credit card is therefore not seen.
 
-        :return: ``(creditors, candidates)``, each largest total first.
-        :rtype: tuple[list[dict[str, Any]], list[dict[str, Any]]]
+        **One scan, not one per word.** The creditor gate is three substrings
+        and was pushed to the database. The platform vocabulary is dozens of
+        proper nouns, it is *data* a user can add to, and "COINBASE.COM" carries
+        no gate word at all — so a query built from it would have to be rebuilt
+        from the rulings on every call and would silently drift from the parser
+        the first time somebody added a ruling. The lines are fetched once and
+        matched in Python instead. The creditor gate is unchanged in substance:
+        the same substrings, applied in the same case-insensitive way, one layer
+        later.
+
+        :return: ``(creditors, candidates, platforms)``, each largest first.
+        :rtype: tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
         """
         account_repo = FinancialAccountRepository(manager)
         statement_repo = FinancialAccountStatementRepository(manager)
@@ -839,7 +951,7 @@ class AccountDiscoveryService:
         by_id = {a.id: a for a in accounts}
         scope = sorted(a.id for a in accounts if a.account_type not in _LIABILITY_ACCOUNTS)
         if not scope:
-            return [], []
+            return [], [], []
 
         # Only a produced CREDIT account explains a creditor payment. A produced
         # Chase checking account says nothing about a Chase card.
@@ -850,27 +962,49 @@ class AccountDiscoveryService:
         rejected = statement_repo.rejected_ids(matter_id)
         liability = set(TransactionCategoryRepository(manager).liability_ids())
         rulings = self._rulings(manager, matter_id)
+        # Two axes, two lists, and they must not see each other. "Venmo is not a
+        # creditor" is true, and it must not delete "Venmo holds a balance".
+        # Order is preserved inside each, because the last match wins and that
+        # is what makes a matter ruling an override.
+        custodians = [r for r in rulings
+                      if r.classification == "custodian" and getattr(r, "holds", None)]
+        payee_rulings = [r for r in rulings if r.classification != "custodian"]
 
         found: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-        seen_rows: set[int] = set()
+        platform_rows: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
-        def absorb(rows: list[Any]) -> None:
-            for row in rows:
-                if row.id in seen_rows:
-                    continue
-                seen_rows.add(row.id)
-                self._collect_creditor(row, by_id, liability, rulings, found)
+        started = time.monotonic()
+        rows = self._page(transaction_repo, scope, rejected)
+        for row in rows:
+            # Flattened once and matched several times. Both axes ask the same
+            # question of the same text, and the scraped payee is needed by the
+            # creditor collector anyway -- measured at 13us a row, which is
+            # nothing beside the fetch that produced it.
+            prepared = prepare(row.description)
+            payee = _payee_key(row.description)
+            forms = (prepared, prepare(payee)) if payee else (prepared,)
 
-        # Two fetches, because neither alone is enough. The text gate finds the
-        # payments nobody has categorized — the whole of the candidate list. The
-        # category fetch finds a card payment worded so plainly that no gate
-        # word appears in it ("ACH DEBIT DISCOVER"), which a person has already
-        # filed and which would otherwise be missing from the findings.
-        for term in _PAYMENT_TERMS:
-            absorb(self._page(transaction_repo, scope, rejected, text=term))
-        if liability:
-            absorb(self._page(transaction_repo, scope, rejected,
-                              category_ids=sorted(liability)))
+            if custodians:
+                holder = _last_match(custodians, *forms)
+                if holder is not None:
+                    self._collect_platform(row, holder, by_id, platform_rows)
+
+            ruling = _last_match(payee_rulings, *forms)
+            # THE GATE GOVERNS QUESTIONS, NOT FINDINGS, and that distinction is
+            # the whole of it. An unruled payee has to say "payment" before it
+            # becomes a candidate, or every grocery run on the matter turns into
+            # something a person must answer and the queue stops being read. A
+            # payee somebody has already ruled on is not a question at all, so
+            # it counts wherever it appears -- which matters because the ruling
+            # that most needs this is exactly the one whose descriptions carry
+            # no such word: "AFFIRM PAY MZWQ4XK", "KLARNA*", "ACH DEBIT DISCOVER".
+            # Seeding a lender and then gating it behind a word its statements
+            # do not print would have been a feature that silently did nothing.
+            text = (row.description or "").lower()
+            if ruling is not None or any(term in text for term in _PAYMENT_TERMS) or (
+                row.category_id is not None and row.category_id in liability
+            ):
+                self._collect_creditor(row, ruling, payee, by_id, liability, found)
 
         creditors: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
@@ -880,14 +1014,56 @@ class AccountDiscoveryService:
                 continue  # an account at this creditor was produced
             (creditors if entry["reason"] != "unreviewed" else candidates).append(entry)
 
+        platforms = self._unproduced_platforms(platform_rows, accounts)
+
         creditors.sort(key=lambda e: (-e["money_out"], e["payee"]))
         candidates.sort(key=lambda e: (-e["money_out"], e["payee"]))
-        LOGGER.info(
-            "account_discovery: matter=%s scanned %d payment line(s), %d creditor(s), "
-            "%d unreviewed payee(s)", matter_id, len(seen_rows), len(creditors),
-            len(candidates),
+        # The unreturned figure is the headline, and its SIGN does not rank it:
+        # money that went in and never came back, and money that came out having
+        # never gone in, are both findings — for opposite reasons.
+        platforms.sort(key=lambda e: (-abs(e["unreturned"]), -e["money_out"], e["platform"]))
+
+        elapsed = time.monotonic() - started
+        report = LOGGER.warning if len(rows) >= _LOUD_SCAN else LOGGER.info
+        report(
+            "account_discovery: matter=%s scanned %d line(s) in %.1fs - %d creditor(s), "
+            "%d unreviewed payee(s), %d platform(s)", matter_id, len(rows), elapsed,
+            len(creditors), len(candidates), len(platforms),
         )
-        return creditors, candidates
+        return creditors, candidates, platforms
+
+    @staticmethod
+    def _unproduced_platforms(
+        collected: "OrderedDict[str, dict[str, Any]]",
+        accounts: list[Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Drop the platforms already produced, and say which halves are still missing.
+
+        Per KIND, not per institution. A produced PayPal balance discharges the
+        deposit half of PayPal and nothing else; treating the institution as
+        answered would retire PayPal Credit on the strength of a document that
+        says nothing about it.
+        """
+        platforms: list[dict[str, Any]] = []
+        for entry in collected.values():
+            names = [n for n in (_squash(entry["platform"]), _squash(entry["pattern"])) if n]
+            produced = {
+                a.account_type for a in accounts
+                if a.institution and any(
+                    name in _squash(a.institution) or _squash(a.institution) in name
+                    for name in names
+                )
+            }
+            entry["produced_types"] = sorted(getattr(t, "value", str(t)) for t in produced)
+            entry["missing"] = [
+                kind for kind in entry["holds"]
+                if not (produced & _HOLDS_SATISFIED_BY.get(kind, frozenset()))
+            ]
+            entry["unreturned"] = entry["money_out"] - entry["money_in"]
+            if entry["missing"]:
+                platforms.append(entry)
+        return platforms
 
     @staticmethod
     def _page(
@@ -933,11 +1109,87 @@ class AccountDiscoveryService:
             return []
 
     @staticmethod
+    def _collect_platform(
+        row: Any,
+        ruling: Any,
+        by_id: dict[int, Any],
+        found: "OrderedDict[str, dict[str, Any]]",
+    ) -> None:
+        """
+        Fold one line into the running tally for the platform it names.
+
+        **Both directions count, and this is the difference from a creditor.**
+        A creditor is only ever paid; money arriving from one is a refund or a
+        cash advance and proves nothing. A custodian is a container, so traffic
+        either way proves the container exists — and the two totals together are
+        the finding:
+
+            $47,300 went to Coinbase from the produced accounts.
+            $6,100 came back. $41,200 left and did not return.
+
+        That figure is arithmetic on produced records, not an estimate. What it
+        must never be called is a **balance**: money that did not come back may
+        be sitting there, may have been spent from the platform directly, or may
+        have moved on to an account nobody produced. All three are worth
+        compelling and only the first is a balance, so the number is reported as
+        "not returned to the produced accounts" and nothing stronger. A
+        pass-through user racks up a large one with nothing sitting anywhere,
+        and a figure labelled "balance" that turns out to be zero is exactly the
+        confident-wrong finding this module exists to avoid.
+        """
+        key = _squash(ruling.pattern)
+        entry = found.get(key)
+        if entry is None:
+            entry = {
+                "platform": ruling.creditor_name or ruling.pattern,
+                "pattern": ruling.pattern,
+                "holds": list(ruling.holds or []),
+                "classification_id": ruling.id,
+                "is_firm_wide": ruling.matter_id is None,
+                "transactions": 0,
+                "money_out": ZERO,
+                "money_in": ZERO,
+                "first_seen": None,
+                "last_seen": None,
+                "seen_on": [],
+                "examples": [],
+            }
+            found[key] = entry
+
+        amount = row.amount or ZERO
+        entry["transactions"] += 1
+        # Signed the way the statement prints it, as everywhere else: money
+        # leaving the produced account went to the platform.
+        if amount < 0:
+            entry["money_out"] += -amount
+        elif amount > 0:
+            entry["money_in"] += amount
+
+        when = row.transaction_date
+        if when:
+            if entry["first_seen"] is None or when < entry["first_seen"]:
+                entry["first_seen"] = when
+            if entry["last_seen"] is None or when > entry["last_seen"]:
+                entry["last_seen"] = when
+
+        source = by_id.get(row.financial_account_id)
+        if source is not None:
+            label = "%s%s" % (
+                source.institution,
+                " ····%s" % source.account_number_last4 if source.account_number_last4 else "",
+            )
+            if label not in entry["seen_on"]:
+                entry["seen_on"].append(label)
+        if len(entry["examples"]) < 3 and row.description not in entry["examples"]:
+            entry["examples"].append(row.description)
+
+    @staticmethod
     def _collect_creditor(
         row: Any,
+        ruling: Any,
+        payee: str,
         by_id: dict[int, Any],
         liability: set,
-        rulings: list[Any],
         found: "OrderedDict[str, dict[str, Any]]",
     ) -> None:
         """Fold one payment into the running tally for its payee."""
@@ -948,18 +1200,9 @@ class AccountDiscoveryService:
         if amount >= 0:
             return
 
-        payee = _payee_key(row.description)
         if len(payee) < 3:
             return
 
-        # A ruling is matched against the description, not the scraped payee: the
-        # scrape may have eaten the very word the ruling names. The last match
-        # wins, which is what makes the matter layer an override.
-        prepared = prepare(row.description)
-        ruling = None
-        for candidate in rulings:
-            if matches(prepared, candidate.pattern):
-                ruling = candidate
         if ruling is not None and ruling.classification == "not_creditor":
             return
 
@@ -1049,7 +1292,7 @@ class AccountDiscoveryService:
         # is a work queue and not evidence — putting it in a document filed with
         # a court would assert of the City of Lewisville exactly what it asserts
         # of American Express.
-        owed, _candidates = self.creditors(manager, matter.id)
+        owed, _candidates, platforms = self.counterparties(manager, matter.id)
         caption, warnings = caption_lines(matter, exhibit_name)
 
         rows = list(
@@ -1121,10 +1364,36 @@ class AccountDiscoveryService:
                     "; ".join(entry["seen_on"]),
                 ), depth=1))
 
+        # Platforms are the fourth block, and the one a client is least likely to
+        # think of as an account at all -- they call it "my app". The two money
+        # columns carry the whole argument: what went in, what came back.
+        if platforms:
+            rows.append(Row(
+                cells=("Platforms holding value, with no account produced",
+                       "", "", "", "", "", "", "", "", ""),
+                heading=True,
+            ))
+            for entry in platforms:
+                asked = ", ".join(_HOLDS_LABEL.get(kind, kind) for kind in entry["missing"])
+                rows.append(Row(cells=(
+                    entry["platform"],
+                    "",
+                    asked,
+                    str(entry["transactions"]),
+                    str(entry["money_in"]),
+                    str(entry["money_out"]),
+                    str(-entry["unreturned"]),
+                    entry["first_seen"].isoformat() if entry["first_seen"] else "",
+                    entry["last_seen"].isoformat() if entry["last_seen"] else "",
+                    "; ".join(entry["seen_on"]),
+                ), depth=1))
+
         total_in = sum((e["money_in"] for e in found), start=ZERO)             + sum((e["money_in"] for e in wired), start=ZERO)
+        total_in += sum((e["money_in"] for e in platforms), start=ZERO)
         total_out = (sum((e["money_out"] for e in found), start=ZERO)
                      + sum((e["money_out"] for e in wired), start=ZERO)
-                     + sum((e["money_out"] for e in owed), start=ZERO))
+                     + sum((e["money_out"] for e in owed), start=ZERO)
+                     + sum((e["money_out"] for e in platforms), start=ZERO))
         accounts = FinancialAccountRepository(manager).get_by_matter(matter.id)
 
         footnotes = []
@@ -1149,6 +1418,22 @@ class AccountDiscoveryService:
                 "except where a last four is shown, the account number itself is not printed on "
                 "the statements produced."
             )
+        if platforms:
+            footnotes.append(
+                "A platform is listed because money moved between it and an account produced "
+                "here. The figure shown as a net is money that left the produced accounts "
+                "through that platform and did not come back to them; it is NOT a balance. "
+                "Money that did not return may remain on the platform, may have been spent "
+                "from it directly, or may have moved on to an account that has also not been "
+                "produced. Where the flow runs the other way, the platform was funded from "
+                "somewhere these records do not contain."
+            )
+            footnotes.append(
+                "The kinds of account requested are what each platform is capable of holding, "
+                "not a representation that all of them exist. One platform commonly carries "
+                "several -- a balance, a credit line, a brokerage -- and which of them a "
+                "household holds cannot be determined from a transaction description."
+            )
         if any(entry["institution_inferred"] for entry in found):
             footnotes.append(
                 "† The description gave an account number but no bank, so the account is assumed "
@@ -1171,14 +1456,22 @@ class AccountDiscoveryService:
                 ("Wires", "Read for the sending institution and its routing number"),
                 ("Creditors", "Payees whose payments are filed under a category naming a debt, "
                               "or that are card issuers, lenders or mortgage servicers of record"),
+                ("Platforms", "Counterparties known to hold value for their customers -- "
+                              "wallets, brokerages, crypto exchanges -- matched by name against "
+                              "every line on the deposit accounts produced"),
+                ("Not searched", "Cash withdrawals, and money moved between two accounts "
+                                 "neither of which was produced. Neither leaves a trace in "
+                                 "these records"),
                 ("Accounts listed", str(len(found))),
                 ("Institutions listed", str(len(wired))),
                 ("Creditors listed", str(len(owed))),
+                ("Platforms listed", str(len(platforms))),
             ),
             summary=(
                 ("Accounts referenced but not produced", str(len(found))),
                 ("Institutions referenced but not produced", str(len(wired))),
                 ("Creditors paid, with no account produced", str(len(owed))),
+                ("Platforms holding value, with no account produced", str(len(platforms))),
                 ("Total received from them", money(total_in)),
                 ("Total sent to them", money(total_out)),
             ),

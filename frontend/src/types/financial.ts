@@ -513,6 +513,47 @@ export interface Creditor {
   examples: string[]
 }
 
+/**
+ * A counterparty that holds value for our party and produced no statement.
+ *
+ * Venmo, PayPal, Cash App, Coinbase, Robinhood, a brokerage. Not the creditor
+ * finding in different words: a creditor is only ever paid, so only money
+ * leaving means anything, while a custodian is a container and traffic in
+ * either direction proves the container exists.
+ *
+ * These need no ruling from anybody. Whether Mr. Cooper is a lender cannot be
+ * read off a description; whether Venmo holds a balance is the same answer on
+ * every matter, so they are seeded firm-wide and never triaged.
+ */
+export interface ValuePlatform {
+  platform: string
+  /** The ruling pattern that matched, so the UI can offer to change it. */
+  pattern: string
+  /** Every kind of account this platform can hold. */
+  holds: string[]
+  /** The kinds still unaccounted for. Per KIND — a produced PayPal balance
+   *  answers the deposit half and says nothing about PayPal Credit. */
+  missing: string[]
+  /** Account types already on the matter at this platform. */
+  produced_types: string[]
+  transactions: number
+  money_out: string
+  money_in: string
+  /**
+   * money_out less money_in. **Never call this a balance.** Money that did not
+   * come back may be sitting on the platform, may have been spent from it, or
+   * may have moved to another account nobody produced. A negative figure is
+   * the opposite finding: the platform was funded from somewhere these records
+   * do not contain.
+   */
+  unreturned: string
+  first_seen: string | null
+  last_seen: string | null
+  seen_on: string[]
+  examples: string[]
+  is_firm_wide: boolean
+}
+
 /** Everything the production names but does not contain, by how it was found. */
 export interface UndisclosedReport {
   accounts: UndisclosedAccount[]
@@ -520,6 +561,8 @@ export interface UndisclosedReport {
   creditors: Creditor[]
   /** Payees nobody has ruled on. A work queue, never a finding, never exported. */
   candidates: Creditor[]
+  /** Wallets, brokerages and exchanges holding value nobody produced. */
+  platforms: ValuePlatform[]
 }
 
 /**
@@ -611,6 +654,8 @@ export interface PayeeClassification {
   classification: string
   creditor_name: string | null
   creditor_type: string | null
+  /** Only a custodian carries this: every kind of account the platform holds. */
+  holds: string[]
   note: string | null
   is_active: boolean
   decided_by_staff_id: number | null
@@ -619,10 +664,24 @@ export interface PayeeClassification {
 
 export interface PayeeClassificationPayload {
   pattern: string
-  classification: 'creditor' | 'not_creditor'
+  classification: 'creditor' | 'custodian' | 'not_creditor'
   matter_id?: number | null
   creditor_name?: string | null
   creditor_type?: string | null
+  /** Required on a custodian, rejected on anything else. */
+  holds?: string[]
   note?: string | null
   is_active?: boolean
+}
+
+/** What a custodian can hold, and how to say it to a person. */
+export const HOLDS_LABEL: Record<string, string> = {
+  deposit: 'Deposit balance',
+  brokerage: 'Brokerage account',
+  crypto: 'Crypto holdings',
+  retirement: 'Retirement account',
+  credit_card: 'Credit card',
+  line_of_credit: 'Line of credit',
+  loan: 'Loan',
+  other: 'Account',
 }

@@ -122,12 +122,15 @@ class FakeClassificationRepo:
 
 
 class FakeRuling:
-    def __init__(self, id, pattern, classification, name=None, kind=None):
+    def __init__(self, id, pattern, classification, name=None, kind=None,
+                 holds=None, matter_id=None):
         self.id = id
+        self.matter_id = matter_id
         self.pattern = pattern
         self.classification = classification
         self.creditor_name = name
         self.creditor_type = kind
+        self.holds = list(holds or [])
 
 
 def build(accounts=ACCOUNTS, rows=ROWS, name="Accounts Referenced But Not Produced",
@@ -261,6 +264,47 @@ check_true("the footnote explains what a creditor row is and is not",
 
 md = to_markdown(with_creditors).decode("utf-8")
 check_true("and it survives into the document", "Creditors paid" in md)
+
+print("\nPlatforms holding value")
+
+PLATFORM_ROWS = [
+    FakeTransaction(80, 1, "VENMO PAYMENT 1042956", "-12000.00", date(2024, 1, 4)),
+    FakeTransaction(81, 1, "VENMO CASHOUT 1042956", "2500.00", date(2024, 8, 9)),
+    FakeTransaction(82, 1, "COINBASE.COM 8887 8889", "-8000.00", date(2024, 3, 3)),
+]
+with_platforms = build(rows=PLATFORM_ROWS, rulings=[
+    FakeRuling(90, "VENMO", "custodian", "Venmo", holds=["deposit"]),
+    FakeRuling(91, "COINBASE", "custodian", "Coinbase", holds=["crypto", "deposit"]),
+])
+grid = "\n".join(" | ".join(row) for row in with_platforms.rows)
+
+check_true("the block has its own heading", "Platforms holding value" in grid)
+check_true("the platform is named", "Venmo" in grid)
+check_true("what went to it", "12000.00" in grid)
+check_true("what came back", "2500.00" in grid)
+check_true("and what a request for production should ask for",
+           "deposit balance" in grid and "crypto holdings" in grid)
+check("counted in the summary",
+      dict(with_platforms.summary)["Platforms holding value, with no account produced"], "2")
+
+# THE WORD "BALANCE" MUST NOT APPEAR against that figure. Money that did not
+# come back may be on the platform, may have been spent from it, or may have
+# gone to another account nobody produced -- and only the first is a balance.
+notes = " ".join(with_platforms.footnotes)
+check_true("the footnote says what the figure is not", "it is NOT a balance" in notes)
+check_true("and names all three explanations",
+           "may remain on the platform" in notes and "spent" in notes and "moved on" in notes)
+check_true("the kinds requested are not asserted to exist",
+           "not a representation that all of them exist" in notes)
+
+# The report says what it did NOT look at. A stated limit is a limit; a
+# discovered one is a failure, and cash is the biggest hole any of this has.
+selection = dict(with_platforms.selection)
+check_true("the exhibit states its own blind spot",
+           "Cash withdrawals" in selection["Not searched"])
+
+md = to_markdown(with_platforms).decode("utf-8")
+check_true("and the block survives into the document", "Platforms holding value" in md)
 
 print("\nAn empty list still produces a document")
 

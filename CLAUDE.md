@@ -132,6 +132,7 @@ cyclone/
 │       ├── 033_creditor_discovery.sql    # categories.is_liability + payee classifications
 │       ├── 034_statement_boundary.sql    # statements.boundary — opening/closing/intermediate
 │       ├── 035_production_scope.sql      # matters.*_produces_since; accounts.production_responsibility
+│       ├── 036_value_platforms.sql      # custodian rulings; holds[]; crypto account type; BNPL + platform seeds
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -750,7 +751,122 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
   matter. The query terms and the regexes are deliberately the same words —
   including the mask term, or a line the parser would accept is never fetched.
 
-Covered by `tests/test_account_discovery.py` and `tests/test_undisclosed_exhibit.py`.
+- **A custodian is a container, and that is a different finding from a
+  creditor.** Venmo, PayPal, Cash App, Coinbase, Robinhood, the brokerages: they
+  hold a balance, they issue nothing anybody recognises as a bank statement, and
+  the client does not experience them as accounts — they call it "my app". A
+  creditor is only ever *paid*, so only money leaving means anything; a
+  custodian is a box, so **traffic in either direction proves the box exists**
+  and both totals are kept.
+- **The net is arithmetic on produced records, and it is NOT a balance.**
+  `money_out - money_in` is money that left the produced deposit accounts
+  through a platform and did not come back to them. It may be sitting there, it
+  may have been spent from the platform, or it may have moved on to another
+  account nobody produced — all three are worth compelling and only the first is
+  a balance. It is reported as "not returned" everywhere, in the UI and in the
+  exhibit, and a pass-through user racks up a large one with nothing sitting
+  anywhere. **The reverse sign is the stronger finding**: money out of a
+  platform the produced accounts never funded means something else did.
+- **These are SEEDED and never triaged, and that is the whole design.** The 033
+  ruling mechanism exists because the answer is genuinely absent from the text —
+  "Payment To Mr. Cooper" and "Payment To Frontier" are the same sentence.
+  "VENMO PAYMENT" is not like that: Venmo holds a balance on every matter that
+  will ever be opened. Building a queue for a question the firm can answer once
+  makes a paralegal answer it weekly, and a queue nobody can finish is a queue
+  nobody reads. Only the long tail — a credit union's app, a fintech from last
+  year — reaches the ruling table.
+- **Seed additions, never seed suppressions.** 033 forbids seeding
+  `not_creditor` because suppression hides evidence and must always be somebody's
+  recorded decision. A seeded `custodian` does the opposite: the worst case is a
+  paralegal reading one row and dismissing it. The asymmetry is the rule.
+- **A payee can be a custodian AND `not_creditor` at once**, and Venmo is
+  exactly that — not a lender, and holding money. The two axes are matched
+  against **separate ruling lists**, or the true statement "Venmo is not a
+  creditor" silently deletes the finding that it holds a balance.
+- **Suppression is per KIND, not per institution** — the one place this differs
+  from the creditor scan, where a produced card at an institution explains every
+  payment to it. PayPal is a balance, a Synchrony credit line, a debit card and
+  a savings account; a produced PayPal *balance* answers the deposit half and
+  says nothing whatever about PayPal Credit. `holds` is therefore a set, the
+  report asks for everything the platform *can* hold, and the row disappears
+  only when every kind has a produced account. What a household actually holds
+  cannot be read off a description, so the exhibit says the list is capability
+  and not an assertion that all of them exist.
+- **A ruling is matched against the description AND the scraped payee, and
+  neither alone is enough.** The description is needed because a hand-written
+  ruling may name a word `_payee_key` threw away. The scrape is needed because
+  the triage button stores the *scraped payee* as the pattern, and the scrape
+  removes noise from the MIDDLE of a description as readily as from its ends:
+
+      PASSPORTSERVICES 8005551212 CHECK   ->   PASSPORTSERVICES CHECK
+
+  The pattern is then a join of two fragments that were never adjacent, and
+  `matches` requires a contiguous run on word boundaries — correctly — so the
+  ruling could never fire against the line it was made from. **This reached
+  production.** The row stayed on the queue after being ruled, the paralegal
+  clicked again, and the second attempt returned a duplicate key: the ruling
+  existed and did nothing. Fixing it in the matcher rather than at write time
+  repairs every ruling already stored, with no migration.
+- **A slow list plus an unmoved row produces a second click.** Ruling on a payee
+  now triggers a full rescan, so the queue took seconds to update and the
+  natural response was to press the button again — which is where the duplicate
+  keys came from. Three things, and they belong together: the row is removed
+  optimistically the moment the write returns, the row shows *Saving…* with a
+  spinner rather than only disabling its buttons (a disabled button looks
+  exactly like one nobody pressed), and a duplicate-key rejection is treated as
+  **success** — the ruling is stored, which is what the person wanted.
+- **The gate governs questions, not findings**, and this nearly shipped broken.
+  An unruled payee must say "payment" before it becomes a candidate, or every
+  grocery run turns into something a person has to answer. A payee somebody has
+  already ruled on is not a question, so it counts wherever it appears — which
+  matters because the rulings that most need it are the ones whose descriptions
+  carry no such word: `AFFIRM PAY MZWQ4XK`, `KLARNA*`, `ACH DEBIT DISCOVER`.
+  Seeding a lender and gating it behind a word its statements do not print is a
+  feature that silently finds nothing.
+- **One scan, not one search per word.** The creditor gate was three substrings
+  pushed to the database. The platform vocabulary is dozens of proper nouns, it
+  is **data a user can add to**, and `COINBASE.COM` carries no gate word at all —
+  so a query built from it would have to be rebuilt from the rulings on every
+  call and would drift from the parser the first time somebody added one. The
+  matter's deposit lines are fetched once and matched in Python instead; the
+  creditor gate is unchanged in substance, one layer later. Deliberately
+  uncapped, and the row count and elapsed time are logged, at WARNING past
+  `_LOUD_SCAN` — a list that stopped early would look complete.
+- **Deposit accounts only**, as with creditors, which keeps one sign rule for
+  the arithmetic. **Known limitation:** crypto bought directly on a produced
+  credit card is not seen.
+- **A seeded pattern is firm-wide and silent**, so one that is also ordinary
+  English mis-files evidence on every matter at once — a wider blast radius than
+  the `TARGET`/`STARGETTER` failure it rhymes with. `tests/test_platform_seeds.py`
+  reads the patterns out of the migration and tries them against plausible
+  merchants; it caught `STASH` (a barbecue restaurant), `WISE` (a pizza place),
+  `ACORNS` (a preschool) and `MERRILL` (a retirement community), all now
+  qualified. Four are kept bare as a **recorded trade** — SOFI, KRAKEN, VARO,
+  BETTERMENT — because none is an ordinary word and qualifying them costs more
+  than it saves: SoFi alone prints SOFI BANK, SOFI SECURITIES and SOFI LENDING,
+  so any one qualified pattern misses two of its three products.
+- **Matching flattens spaces, so a spaced alias is a duplicate.** `E TRADE` and
+  `ETRADE` are one pattern; seeding both would double every E*TRADE figure on
+  the report. `CASH APP` and `SQUARE CASH` share no words and are a real pair.
+- **BNPL needed no code at all** — Affirm, Klarna, Afterpay, Sezzle, Zip are
+  rows in 036 that the existing creditor scan finds. It is the debt least likely
+  to be disclosed: rarely on a credit report, not experienced as borrowing, and
+  indistinguishable from a subscription on a statement.
+- **Zelle is deliberately absent, and adding it would be a false statement.** It
+  holds no balance — an interbank rail, money moving account to account with
+  nothing resting in between — so there is no Zelle statement to compel and no
+  Zelle balance to divide. The same error as reading the routing number inside
+  an ACH trace as an account. Zelle traffic is still evidence and answers a
+  different question: a repeated Zelle to one individual is a private loan, a
+  gift, or money parked with a friend — a finding about a **counterparty**. That
+  is what tags are for, and the paralegals already do it that way.
+- **The exhibit states its own blind spot.** No list of this kind can be
+  complete — cash withdrawals alone guarantee a permanent hole — so the
+  Selection block names what was searched *and* what was not. A stated limit is
+  a limit; a discovered one is a failure.
+
+Covered by `tests/test_account_discovery.py`, `tests/test_undisclosed_exhibit.py`
+and `tests/test_platform_seeds.py`.
 
 ### Compliance Service (`compliance_service.py`)
 
@@ -1494,10 +1610,12 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
 | Undisclosed accounts (referenced but never produced) | ✅ Built — transfer references matched against the matter's accounts, plus institutions named by wires, plus creditors named by payments |
 | Creditor discovery from payments | ✅ Built — `is_liability` on the category, `transaction_payee_classifications` for the rest, and a triage queue that never reaches an exhibit |
+| Undisclosed value platforms (wallets, brokerages, crypto) | ✅ Built — 036 seeds ~35 custodians; traffic in either direction is the finding, and the net is reported as "not returned", never as a balance |
+| Buy-now-pay-later as a creditor | ✅ Built — seed rows only; the 033 scan finds them. Needed the gate change so a ruled payee counts without a payment word |
+| Payee-classification management screen | ✅ Built — `PayeeRulingManager`, reached from the undisclosed-accounts panel. Both layers, editable, including firm-wide with a warning |
 | Re-import a document (Retry) | ✅ Built — discards every statement the upload produced, then re-reads the PDF. Verifies the source is retrievable **before** deleting anything |
 | Combined statements (several accounts, no page break) | ✅ Built — the document is cut at each account's printed header, not by page |
 | Open a statement's source PDF | ✅ Built — signed URL as JSON, opened at the statement's first transaction page; says which of the three failures happened |
-| Payee-classification management screen | ❌ Not started — the endpoints exist and the triage queue writes through them, but there is no screen to review or reverse a firm-wide ruling |
 | Card funded from an unproduced account | ❌ Not started — a "Payment Thank You" on a produced card with no matching debit on any produced deposit account means the funding account was not produced. Same finding, opposite direction, and the match is exact on date and amount |
 | Exhibit caption (system-wide template) | ✅ Built — `matters.case_style` + `client_alignment`; per-firm override not built |
 | "Documents summarized in this exhibit" block | ✅ Built for the transaction export — filename and Bates range per upload, above the Rule 1006 notice. Not yet on the FIS schedule or the undisclosed-accounts exhibit, which summarize documents too |
@@ -1746,6 +1864,19 @@ Three things to get right when it is built:
 | Infer that a statement is an account's first | An opening balance of zero is not proof — accounts are swept to zero routinely. A person marks it |
 | Let a boundary marker suppress a gap between two statements | The account demonstrably existed on both sides. Markers suppress the outer holes only |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
+| Match a ruling only against the description | The triage button stores the SCRAPED payee, and the scrape drops noise from the middle. `PASSPORTSERVICES 8005551212 CHECK` becomes a pattern that cannot match its own line |
+| Report a duplicate-key ruling as a failure | The ruling is stored; that is what the user wanted. It means they clicked twice because the row had not moved |
+| Signal "working" by disabling a button | It looks identical to one nobody pressed. Say *Saving…* |
+| Wait for a rescan to remove a row you already know the answer to | Drop it optimistically. The delay is what produces the second click |
+| Build a triage queue for a question the firm can answer once | Venmo holds a balance on every matter. Seed it. A queue nobody can finish is a queue nobody reads |
+| Call the money that did not come back from a platform a "balance" | It may be there, may have been spent from it, or may have moved to another unproduced account. "Not returned to the produced accounts" |
+| Let a `not_creditor` ruling suppress a custodian finding | Venmo is both. Two axes, two ruling lists — or a true statement deletes a real finding |
+| Discharge a platform because its institution appears on the matter | A produced PayPal balance says nothing about PayPal Credit. Per KIND, not per institution |
+| Gate a ruled payee behind a movement word | "AFFIRM PAY", "KLARNA*", "ACH DEBIT DISCOVER" carry none. The gate is for questions; a ruling is already an answer |
+| Seed a pattern that is also an ordinary word | Firm-wide and silent, so it mis-files on every matter at once. STASH matched a barbecue restaurant; MERRILL a retirement community |
+| Seed both "E TRADE" and "ETRADE" | Matching flattens spaces, so they are one pattern and two rows double every figure |
+| Put Zelle on the account list | It holds no balance — a rail, not a custodian. There is nothing to compel. The finding there is about a counterparty, and it belongs to a tag |
+| Ship a discovery report without saying what it did not search | Cash withdrawals are a permanent hole. A stated limit is a limit; a discovered one is a failure |
 | Read a trailing digit run on a PAYMENT as an account number | On a transfer it is a bank convention; on a payment it is a confirmation number. `Zelle Payment To Kathy Gunn 20928990159` became an undisclosed account belonging to Kathy Gunn |
 | Decide from the text whether a payee is a creditor | "Payment To Mr. Cooper" and "Payment To Frontier" are the same sentence. It comes from the category a person filed it under, or a recorded ruling — nowhere else |
 | Put an unclassified payee in the exhibit | It asserts of a water utility what it asserts of American Express. Candidates are a screen-only work queue |

@@ -3,8 +3,12 @@ import {
   getUndisclosedAccounts, exportUndisclosedAccounts, createPayeeClassification,
 } from '../../lib/api'
 import ExportButtons from '../../components/ExportButtons'
+import PayeeRulingManager from './PayeeRulingManager'
 import { money, formatDate } from '../../lib/money'
-import type { UndisclosedAccount, ReferencedInstitution, Creditor } from '../../types'
+import type {
+  UndisclosedAccount, ReferencedInstitution, Creditor, ValuePlatform,
+} from '../../types'
+import { HOLDS_LABEL } from '../../types'
 
 /**
  * True for a numeric string that is zero, without parsing it.
@@ -49,6 +53,8 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
   const [institutions, setInstitutions] = useState<ReferencedInstitution[]>([])
   const [creditors, setCreditors] = useState<Creditor[]>([])
   const [candidates, setCandidates] = useState<Creditor[]>([])
+  const [platforms, setPlatforms] = useState<ValuePlatform[]>([])
+  const [showRulings, setShowRulings] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -65,6 +71,7 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
       setInstitutions(report.institutions)
       setCreditors(report.creditors)
       setCandidates(report.candidates)
+      setPlatforms(report.platforms)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not scan the transactions')
     } finally {
@@ -97,17 +104,32 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
         classification,
         matter_id: firmWide ? null : matterId,
       })
-      await load()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save that ruling')
-    } finally {
-      setRuling(null)
+      // ALREADY RULED IS NOT A FAILURE. The rescan below is a full pass over
+      // the matter's transactions and takes seconds, so a paralegal working
+      // down the queue reasonably clicks twice on a row that has not moved yet.
+      // Reporting the second click as an error told them something had gone
+      // wrong when the ruling was safely stored on the first.
+      const already = e instanceof Error && /already/i.test(e.message)
+      if (!already) {
+        setError(e instanceof Error ? e.message : 'Could not save that ruling')
+        setRuling(null)
+        return
+      }
     }
+    // The row goes NOW, not when the rescan returns. It is the one thing on
+    // screen we already know the answer to, and waiting several seconds to
+    // remove it is what made the queue feel broken -- and what produced the
+    // second click in the first place.
+    setCandidates(current => current.filter(row => row.payee !== payee))
+    setRuling(null)
+    await load()
   }, [matterId, load])
 
   // The dagger is only worth explaining if something on screen carries one.
   const anyInferred = rows.some(r => r.institution_inferred)
-  const nothingFound = rows.length === 0 && institutions.length === 0 && creditors.length === 0
+  const nothingFound = rows.length === 0 && institutions.length === 0
+    && creditors.length === 0 && platforms.length === 0
 
   return (
     <div className="card p-5 space-y-4">
@@ -140,7 +162,7 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
       )}
 
       {(rows.length > 0 || institutions.length > 0 || creditors.length > 0
-        || candidates.length > 0) && (
+        || candidates.length > 0 || platforms.length > 0) && (
         <>
         {rows.length > 0 && (
           <div className="overflow-x-auto">
@@ -347,12 +369,98 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
             </div>
           )}
 
+          {/* A wallet, a brokerage, an exchange. The client does not think of
+              these as accounts — they call it "my app" — and nothing about them
+              ever arrives looking like a bank statement. Unlike a creditor,
+              nobody has to rule on whether Venmo holds money, so these are
+              findings on arrival. */}
+          {platforms.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium text-navy">
+                Platforms holding value, with no account produced
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wide
+                                   text-text-secondary border-b border-border">
+                      <th className="py-2 pr-4 font-medium">Platform</th>
+                      <th className="py-2 pr-4 font-medium text-right">Lines</th>
+                      <th className="py-2 pr-4 font-medium text-right">Sent to</th>
+                      <th className="py-2 pr-4 font-medium text-right">Came back</th>
+                      <th className="py-2 pr-4 font-medium text-right">Not returned</th>
+                      <th className="py-2 font-medium">Activity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {platforms.map(row => (
+                      <tr key={row.pattern}
+                        className="border-b border-border last:border-0 align-top">
+                        <td className="py-2.5 pr-4">
+                          <div className="font-medium text-navy">{row.platform}</div>
+                          <div className="flex flex-wrap items-center gap-1 mt-1">
+                            {/* What a request for production should ask for. One
+                                platform commonly carries several, and which of
+                                them exist cannot be read off a description — so
+                                the list is what it CAN hold, not what it does. */}
+                            {row.missing.map(kind => (
+                              <span key={kind}
+                                className="text-[11px] px-1.5 py-0.5 rounded
+                                           bg-warning/15 text-warning">
+                                {HOLDS_LABEL[kind] ?? kind}
+                              </span>
+                            ))}
+                            {row.produced_types.length > 0 && (
+                              <span className="text-[11px] text-text-secondary">
+                                ({row.produced_types.length} already produced)
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-2.5 pr-4 text-right tabular-nums">
+                          {row.transactions}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right tabular-nums text-danger">
+                          {isZero(row.money_out) ? '—' : money(row.money_out)}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right tabular-nums text-success">
+                          {isZero(row.money_in) ? '—' : money(row.money_in)}
+                        </td>
+                        <td className="py-2.5 pr-4 text-right tabular-nums font-medium">
+                          {money(row.unreturned)}
+                        </td>
+                        <td className="py-2.5 whitespace-nowrap text-text-secondary">
+                          {row.first_seen
+                            ? `${formatDate(row.first_seen)} – ${formatDate(row.last_seen)}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* THE WORD "BALANCE" DOES NOT APPEAR HERE, deliberately. Money
+                  that did not come back may be on the platform, may have been
+                  spent from it, or may have moved to another unproduced
+                  account — and a figure labelled "balance" that turns out to be
+                  zero is the confident-wrong finding this whole report avoids. */}
+              <p className="text-xs text-text-secondary">
+                "Not returned" is money that left the produced accounts through the platform
+                and did not come back to them. It is not a balance: it may still be there, it
+                may have been spent from the platform, or it may have moved on to another
+                account nobody produced. A negative figure is the opposite finding — the
+                platform was funded from somewhere these records do not contain.
+              </p>
+            </div>
+          )}
+
           {/* The exhibit behind a motion to compel: the other side's own
               statements naming accounts they did not produce. */}
           <ExportButtons
             name={exhibitName}
             onNameChange={setExhibitName}
-            count={rows.length + institutions.length + creditors.length}
+            count={rows.length + institutions.length + creditors.length
+              + platforms.length}
             hint="CSV is data only; MD, DOCX and PDF are exhibits with the case caption"
             onExport={format => exportUndisclosedAccounts(
               matterId, format, exhibitName.trim() || 'Accounts Referenced But Not Produced')}
@@ -422,20 +530,36 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
                                 : '—'}
                             </td>
                             <td className="py-2.5 whitespace-nowrap">
-                              <button type="button" disabled={busy}
-                                className="btn-secondary text-xs mr-2"
-                                title="A card issuer, lender, or servicer. Saved firm-wide —
-                                       it is the same creditor in every case."
-                                onClick={() => void rule(row.payee, 'creditor', true)}>
-                                Creditor
-                              </button>
-                              <button type="button" disabled={busy}
-                                className="btn-secondary text-xs"
-                                title="A vendor. Hidden on this matter; nothing is hidden
-                                       from other cases on one judgment."
-                                onClick={() => void rule(row.payee, 'not_creditor', false)}>
-                                Vendor
-                              </button>
+                              {/* A disabled button is not a signal -- it looks
+                                  the same as one nobody has pressed. Saving is
+                                  a round trip plus a full rescan, so the row
+                                  says what it is doing. */}
+                              {busy ? (
+                                <span className="inline-flex items-center gap-1.5
+                                                 text-xs text-text-secondary">
+                                  <span aria-hidden="true"
+                                    className="animate-spin w-3 h-3 border-2 border-navy/20
+                                               border-t-navy rounded-full" />
+                                  Saving…
+                                </span>
+                              ) : (
+                                <>
+                                  <button type="button"
+                                    className="btn-secondary text-xs mr-2"
+                                    title="A card issuer, lender, or servicer. Saved firm-wide —
+                                           it is the same creditor in every case."
+                                    onClick={() => void rule(row.payee, 'creditor', true)}>
+                                    Creditor
+                                  </button>
+                                  <button type="button"
+                                    className="btn-secondary text-xs"
+                                    title="A vendor. Hidden on this matter; nothing is hidden
+                                           from other cases on one judgment."
+                                    onClick={() => void rule(row.payee, 'not_creditor', false)}>
+                                    Vendor
+                                  </button>
+                                </>
+                              )}
                             </td>
                           </tr>
                         )
@@ -450,6 +574,28 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
 
           {/* The reasoning behind the list, stated where the list is read. An
               inference presented without its basis is just an assertion. */}
+          {/* THE RULINGS WERE WRITE-ONLY UNTIL NOW. The triage buttons above
+              created them and nothing could show, change or undo one -- and a
+              `not_creditor` removes a payee from the report permanently and
+              silently. The reach belongs here, where somebody looking at a row
+              they disagree with already is. */}
+          <div className="border-t border-border pt-3">
+            <button type="button"
+              className="text-sm text-navy hover:underline"
+              onClick={() => setShowRulings(!showRulings)}>
+              {showRulings ? '\u25be' : '\u25b8'} Standing rulings about payees
+            </button>
+            <p className="text-xs text-text-secondary mt-1">
+              What this firm has decided a payee is, including anything suppressed from
+              the report above. Review, change, or undo a ruling here.
+            </p>
+            {showRulings && (
+              <div className="mt-3">
+                <PayeeRulingManager matterId={matterId} onChanged={() => { void load() }} />
+              </div>
+            )}
+          </div>
+
           <div className="text-xs text-text-secondary space-y-1 pt-1 border-t border-border">
             {anyInferred && (
               <p>

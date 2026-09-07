@@ -26,6 +26,11 @@ class AccountType(str, Enum):
     checking = "checking"
     savings = "savings"
     brokerage = "brokerage"
+    # Crypto is not a brokerage account wearing a different name. It divides
+    # differently, it is valued on a date somebody has to argue for, and it is
+    # the asset most easily moved while a case is pending — so it has to be
+    # filterable rather than buried under "brokerage" or "other". Added by 036.
+    crypto = "crypto"
     credit_card = "credit_card"
     retirement = "retirement"
     hsa = "hsa"
@@ -639,7 +644,16 @@ class PayeeClassification(BaseModel):
     )
     classification: str = Field(
         ...,
-        description="creditor | not_creditor",
+        description="creditor | custodian | not_creditor. A custodian HOLDS value for our party "
+                    "— a wallet, a portfolio, crypto — and is reported from traffic in either "
+                    "direction, because any traffic proves the account exists",
+    )
+    holds: list[str] = Field(
+        default_factory=list,
+        description="For a custodian: every kind of account the platform can hold, so one "
+                    "request for production asks for all of them. PayPal is a balance, a credit "
+                    "line and a savings account, and which of them a household has cannot be "
+                    "read off a description. Empty on a creditor row, which uses creditor_type",
     )
     creditor_name: Optional[str] = Field(
         default=None,

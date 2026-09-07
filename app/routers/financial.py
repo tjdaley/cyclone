@@ -40,6 +40,7 @@ from schemas.financial import (
     ComplianceExportRequest,
     ComplianceMatrix,
     CreditorResponse,
+    ValuePlatformResponse,
     ExhibitExportRequest,
     PayeeClassificationResponse,
     PayeeClassificationWriteRequest,
@@ -248,12 +249,19 @@ def list_undisclosed_accounts(
     finding, they never reach an exhibit, and a caller that renders them beside
     the findings has misrepresented them.
 
+    **Platforms** come from traffic with a counterparty known to hold value --
+    a wallet, a brokerage, an exchange. They need no ruling from anybody:
+    whether Mr. Cooper is a lender cannot be read off a description, but
+    whether Venmo holds a balance is the same answer on every matter, so those
+    are seeded and only the long tail is triaged. They are findings and belong
+    beside the accounts, not in the queue.
+
     Read-only and derived on demand — nothing is stored, so the answer always
     reflects the accounts and statements as they stand right now. Adding the
     missing account to the matter makes it disappear from this list, which is
     the workflow: the list is the outstanding question, not a record.
     """
-    creditors, candidates = account_discovery_service.creditors(manager, matter_id)
+    creditors, candidates, platforms = account_discovery_service.counterparties(manager, matter_id)
     return UndisclosedReport(
         accounts=[
             UndisclosedAccountResponse(**entry)
@@ -265,6 +273,7 @@ def list_undisclosed_accounts(
         ],
         creditors=[CreditorResponse(**entry) for entry in creditors],
         candidates=[CreditorResponse(**entry) for entry in candidates],
+        platforms=[ValuePlatformResponse(**entry) for entry in platforms],
     )
 
 

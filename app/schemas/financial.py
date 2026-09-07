@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from db.models.financial import (
     AccountOwnership,
@@ -774,6 +774,15 @@ class CreditorResponse(BaseModel):
     examples: list[str] = Field(default_factory=list)
 
 
+# What a custodian ruling may say it holds. Mirrors the CHECK in 036 -- the
+# database is the authority, and this exists so a typo comes back as a sentence
+# naming the bad value instead of a 500 from PostgREST.
+_HOLDS = frozenset({
+    "deposit", "brokerage", "crypto", "retirement",
+    "credit_card", "line_of_credit", "loan", "other",
+})
+
+
 class UndisclosedReport(BaseModel):
     """
     Everything the production names but does not contain, by how it was found.
@@ -790,6 +799,66 @@ class UndisclosedReport(BaseModel):
         description="Payees nobody has ruled on, largest first. A question for a person, never "
                     "an assertion — a utility and a card issuer are indistinguishable here",
     )
+    platforms: list["ValuePlatformResponse"] = Field(
+        default_factory=list,
+        description="Wallets, brokerages and exchanges holding value that no produced statement "
+                    "accounts for. A finding, not a queue: unlike a creditor, nobody has to rule "
+                    "on whether Venmo holds money",
+    )
+
+
+class ValuePlatformResponse(BaseModel):
+    """
+    A counterparty that holds value for our party and produced no statement.
+
+    Venmo, PayPal, Cash App, Coinbase, Robinhood, a brokerage. Not the creditor
+    finding wearing different words: a creditor is only ever paid, so only money
+    leaving means anything, while a custodian is a container and traffic in
+    either direction proves the container exists.
+
+    Unlike a creditor this needs no ruling from anybody. Whether Mr. Cooper is a
+    lender cannot be read off a description; whether Venmo holds a balance is
+    the same answer on every matter that will ever be opened, so these are
+    seeded firm-wide and only the long tail is ever triaged.
+    """
+    platform: str = Field(..., description="What to call it on a motion")
+    pattern: str = Field(..., description="The ruling pattern that matched the descriptions")
+    holds: list[str] = Field(
+        ...,
+        description="Every kind of account this platform can hold. One platform commonly "
+                    "carries several and which of them exist cannot be read off a description, "
+                    "so the request asks for all of them",
+    )
+    missing: list[str] = Field(
+        ...,
+        description="The kinds still unaccounted for. Computed per KIND, not per institution: "
+                    "a produced PayPal balance answers the deposit half and says nothing "
+                    "whatever about PayPal Credit",
+    )
+    produced_types: list[str] = Field(
+        ...,
+        description="Account types already on the matter at this platform. A row disappears "
+                    "only when every kind it can hold has one",
+    )
+    transactions: int = Field(..., description="Lines naming the platform")
+    money_out: Decimal = Field(..., description="Money that left the produced accounts for it")
+    money_in: Decimal = Field(..., description="Money that came back from it")
+    unreturned: Decimal = Field(
+        ...,
+        description="money_out less money_in. NOT A BALANCE, and it must never be labelled one: "
+                    "money that did not return may be sitting on the platform, may have been "
+                    "spent from it, or may have moved to another unproduced account. A negative "
+                    "figure is the opposite finding — the platform was funded from somewhere "
+                    "these records do not contain",
+    )
+    first_seen: Optional[date] = None
+    last_seen: Optional[date] = None
+    seen_on: list[str] = Field(..., description="Produced accounts the traffic appears on")
+    examples: list[str] = Field(..., description="Descriptions, verbatim, up to three")
+    is_firm_wide: bool = Field(
+        ...,
+        description="Whether the ruling behind this row governs every case or only this one",
+    )
 
 
 class PayeeClassificationWriteRequest(BaseModel):
@@ -800,8 +869,10 @@ class PayeeClassificationWriteRequest(BaseModel):
                     "'AT&T BILL PAYMENT' and 'ATT* BILL'. Three characters minimum",
     )
     classification: str = Field(
-        ..., pattern="^(creditor|not_creditor)$",
-        description="creditor puts the payee on the report; not_creditor removes it for good",
+        ..., pattern="^(creditor|custodian|not_creditor)$",
+        description="creditor puts the payee on the report as a debt; custodian puts it there as "
+                    "a container holding value; not_creditor removes it for good. The first two "
+                    "are independent — Venmo is not a creditor AND holds a balance",
     )
     matter_id: Optional[int] = Field(
         default=None,
@@ -813,8 +884,42 @@ class PayeeClassificationWriteRequest(BaseModel):
         default=None,
         pattern="^(credit_card|loan|mortgage|line_of_credit|other)$",
     )
+    holds: list[str] = Field(
+        default_factory=list,
+        description="Required on a custodian and forbidden elsewhere: every kind of account the "
+                    "platform can hold. deposit | brokerage | crypto | retirement | credit_card "
+                    "| line_of_credit | loan | other",
+    )
     note: Optional[str] = Field(default=None, max_length=300)
     is_active: bool = Field(default=True)
+
+    @field_validator("holds")
+    @classmethod
+    def _known_kinds(cls, value: list[str]) -> list[str]:
+        """Reject a kind the database CHECK would reject, with a sentence saying which."""
+        unknown = [kind for kind in value if kind not in _HOLDS]
+        if unknown:
+            raise ValueError("Unknown kind of account: %s" % ", ".join(sorted(unknown)))
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def _shape_matches_classification(self) -> "PayeeClassificationWriteRequest":
+        """
+        A custodian says what it holds; nothing else may.
+
+        That set IS the request for production, so a custodian without one is a
+        row that can never produce a usable finding. And letting a creditor
+        carry one would put the same answer in two columns, which is how they
+        start disagreeing.
+        """
+        if self.classification == "custodian" and not self.holds:
+            raise ValueError(
+                "A custodian must say what it holds — that list is what the request for "
+                "production asks for"
+            )
+        if self.classification != "custodian" and self.holds:
+            raise ValueError("Only a custodian carries 'holds'; a creditor uses creditor_type")
+        return self
 
 
 class PayeeClassificationResponse(BaseModel):
@@ -824,6 +929,7 @@ class PayeeClassificationResponse(BaseModel):
     classification: str
     creditor_name: Optional[str]
     creditor_type: Optional[str]
+    holds: list[str] = Field(default_factory=list)
     note: Optional[str]
     is_active: bool
     decided_by_staff_id: Optional[int]

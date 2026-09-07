@@ -1005,6 +1005,21 @@ export async function getUndisclosedAccounts(matterId: number): Promise<Undisclo
  * right scope for a utility or a national card issuer; a Zelle payee who might
  * be a private lender belongs to one household and takes the matter id.
  */
+/**
+ * One layer of rulings, for the management screen.
+ *
+ * Omit `matterId` for the firm's own; give one for that case's overrides. One
+ * layer at a time rather than the merged set the scan uses: a list that blurred
+ * them would offer to change the firm's answer from inside a matter, and
+ * silently alter what every other case reports.
+ */
+export async function getPayeeClassifications(
+  matterId?: number,
+): Promise<PayeeClassification[]> {
+  const query = matterId === undefined ? '' : `?matter_id=${matterId}`
+  return apiFetch<PayeeClassification[]>(`/api/v1/payee-classifications${query}`)
+}
+
 export async function createPayeeClassification(
   payload: PayeeClassificationPayload,
 ): Promise<PayeeClassification> {
