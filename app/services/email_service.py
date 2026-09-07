@@ -72,7 +72,8 @@ class EmailService:
         msg.set_content(body_text)
 
         context = ssl.create_default_context()
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port,
+                          timeout=settings.mail_timeout_seconds) as smtp:
             if settings.smtp_use_tls:
                 smtp.starttls(context=context)
             if settings.smtp_username:
@@ -121,7 +122,20 @@ class EmailService:
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _imap(self) -> IMAPClient:
-        client = IMAPClient(settings.imap_host, port=settings.imap_port, use_uid=True, ssl=True)
+        """
+        A connection to the intake mailbox.
+
+        **The timeout is not optional.** Without one the socket waits forever,
+        and this runs inside the CRM tick, which holds the fleet-wide poller
+        lock — so a mail host that accepts the connection and then stops talking
+        stops every node from polling until the lock TTL expires. A dropped TLS
+        handshake is the loud version of that failure; a half-open socket is the
+        quiet one, and the quiet one is worse.
+        """
+        client = IMAPClient(
+            settings.imap_host, port=settings.imap_port, use_uid=True, ssl=True,
+            timeout=settings.mail_timeout_seconds,
+        )
         client.login(settings.imap_username, settings.imap_password)
         return client
 

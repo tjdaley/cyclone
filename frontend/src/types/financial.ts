@@ -14,6 +14,25 @@ export type AccountType =
 export type PropertyCharacter =
   | 'community' | 'separate_petitioner' | 'separate_respondent' | 'mixed' | 'disputed'
 
+/**
+ * Whether a statement is an account's first, its last, or neither.
+ *
+ * Set by a person — nothing on the page says which it is. It only ever
+ * suppresses a gap the compliance report would otherwise raise, so the default
+ * is the cautious one.
+ */
+export type StatementBoundary = 'opening' | 'closing' | 'intermediate'
+
+/**
+ * Who must produce statements for an account.
+ *
+ * Not the same question as ownership, though they usually agree: ownership
+ * decides how an asset divides, this decides whose motion to compel it is. It
+ * selects which compliance report the account appears on, and therefore which
+ * look-back date bounds it.
+ */
+export type ProductionResponsibility = 'client' | 'opposing' | 'both' | 'unknown'
+
 export type StatementReviewStatus =
   | 'auto_accepted' | 'needs_review' | 'accepted' | 'rejected'
 
@@ -59,6 +78,7 @@ export interface FinancialAccount {
   account_number_masked: string | null
   name_on_account: string | null
   opposing_party_id: number | null
+  production_responsibility: ProductionResponsibility
   ownership: AccountOwnership
   property_character: PropertyCharacter | null
   purpose: string | null
@@ -75,6 +95,7 @@ export interface FinancialAccountUpdatePayload {
   account_number_masked?: string | null
   name_on_account?: string | null
   opposing_party_id?: number | null
+  production_responsibility?: ProductionResponsibility
   ownership?: AccountOwnership
   property_character?: PropertyCharacter | null
   purpose?: string | null
@@ -99,6 +120,7 @@ export interface AccountStatement {
   printed_totals: Record<string, unknown>
   flags: ExtractionFlag[]
   review_status: StatementReviewStatus
+  boundary: StatementBoundary
   storage_path: string | null
   source_job_id: string | null
   ingested_by_staff_id: number
@@ -513,6 +535,72 @@ export interface StatementRetryResult {
   transactions_discarded: number
   accounts_deleted: number
   source_filename: string | null
+}
+
+/** One statement, in the month it closes in. */
+export interface ComplianceCell {
+  statement_id: number
+  bates: string | null
+  bates_last: string | null
+  source_filename: string | null
+  boundary: StatementBoundary
+  review_status: StatementReviewStatus
+  reconciled: boolean
+  period_start: string
+  period_end: string
+  /** False once the source PDF has been purged from storage. */
+  has_pdf: boolean
+}
+
+/** Days no produced statement accounts for. */
+export interface ComplianceGap {
+  start: string
+  end: string
+  days: number
+}
+
+export interface ComplianceAccount {
+  account_id: number
+  production_responsibility: ProductionResponsibility
+  institution: string
+  last4: string | null
+  account_type: AccountType
+  type_label: string
+  label: string
+  is_closed: boolean
+  /** Keyed "YYYY-MM" on the month each statement CLOSES in. */
+  cells: Record<string, ComplianceCell[]>
+  opening_month: string | null
+  closing_month: string | null
+  statements: number
+  /**
+   * Days between two produced statements that nothing covers.
+   *
+   * A month with a statement in it is not a covered month — periods run 4
+   * March to 5 April — and only these belong in a motion.
+   */
+  gaps: ComplianceGap[]
+  /** Earliest date produced, when the first statement is not marked opening. */
+  nothing_before: string | null
+  /** Latest date produced, when the last statement is not marked closing. */
+  nothing_after: string | null
+}
+
+/** Which obligation a report is measured against. */
+export interface ComplianceScope {
+  /** client = what our side must produce; opposing = theirs; null = everything. */
+  side: 'client' | 'opposing' | null
+  /** Earliest date the governing request reaches back to. */
+  since: string | null
+  through: string | null
+  bounded: boolean
+}
+
+export interface ComplianceMatrix {
+  years: number[]
+  accounts: ComplianceAccount[]
+  totals: { accounts: number; statements: number; gaps: number; unassigned: number }
+  scope: ComplianceScope
 }
 
 /** What the firm has decided about a payee. */

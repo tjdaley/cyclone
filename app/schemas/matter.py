@@ -54,6 +54,8 @@ class MatterUpdateRequest(BaseModel):
     notes: Optional[str] = None
     case_style: Optional[str] = None
     client_alignment: Optional[ClientAlignment] = None
+    client_produces_since: Optional[date] = None
+    opposing_produces_since: Optional[date] = None
 
 
 class MatterResponse(BaseModel):
@@ -80,6 +82,8 @@ class MatterResponse(BaseModel):
     notes: Optional[str]
     case_style: Optional[str]
     client_alignment: Optional[ClientAlignment]
+    client_produces_since: Optional[date] = None
+    opposing_produces_since: Optional[date] = None
 
 
 class MatterRateOverrideRequest(BaseModel):

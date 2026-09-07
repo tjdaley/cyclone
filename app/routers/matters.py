@@ -104,11 +104,21 @@ def update_matter(
     manager=Depends(get_db_manager),
     _=Depends(require_role(["attorney", "admin"])),
 ) -> MatterResponse:
-    """Partially update a matter."""
+    """
+    Partially update a matter.
+
+    **``exclude_unset``, not ``exclude_none``.** With the latter a null was
+    indistinguishable from an absent field, so nothing on this endpoint could
+    ever be *cleared*: a court name typed in error, a closed date set on the
+    wrong matter, a discovery look-back that turned out to be the other side's
+    — all of them stuck forever, with the save reporting success. Every caller
+    sends only the fields it means to write, so honouring a null it sent is the
+    correct reading of a PATCH and fixes the clear for all of them at once.
+    """
     repo = MatterRepository(manager)
     if repo.select_one(condition={"id": matter_id}) is None:
         raise HTTPException(status_code=404, detail="Matter not found")
-    updates = body.model_dump(exclude_none=True)
+    updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No fields provided for update")
     LOGGER.info("matters.update: matter_id=%s", matter_id)

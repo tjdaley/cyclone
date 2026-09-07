@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     imap_password: str = ""
     imap_mailbox: str = "INBOX"
     imap_spam_folder: str = "Spam"
+    #: Seconds to wait on a mail server before giving up, for IMAP and SMTP alike.
+    #:
+    #: Both ran with no timeout, which means the socket default of *never*. A
+    #: mail host that accepts a connection and then stops talking would hang the
+    #: CRM tick indefinitely — and the tick holds the fleet-wide poller lock, so
+    #: one wedged node stops every node from polling until the lock TTL expires.
+    #: A dropped handshake is the visible version of that problem; the silent
+    #: hang is the worse one.
+    mail_timeout_seconds: int = 30
 
     # Telegram (agent escalations to lead responders)
     telegram_bot_token: str = ""

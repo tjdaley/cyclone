@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getMatter, getOpposingParties,
-  queueStatement, awaitStatementJob, retryStatement,
+  queueStatement, awaitStatementJob, retryStatement, setStatementBoundary,
   getFinancialAccounts, updateFinancialAccount,
   getAccountStatements, getStatementExceptions, reviewStatement,
   getStatementTransactions, getAccountTransactions,
@@ -13,6 +13,7 @@ import { money, isNegative, formatDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
 import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import FisPanel from './FisPanel'
+import CompliancePanel from './CompliancePanel'
 import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import type {
@@ -20,7 +21,8 @@ import type {
   FinancialAccount, AccountType, PropertyCharacter, AccountOwnership,
   AccountMergePreview, AccountDeletePreview,
   AccountStatement, StatementReviewStatus, AccountTransaction,
-  StatementIngestSummary, StatementJobStatus, ExtractionFlag,
+  StatementIngestSummary, StatementJobStatus, ExtractionFlag, StatementBoundary,
+  ProductionResponsibility,
 } from '../../types'
 
 const ACCOUNT_TYPES: AccountType[] = [
@@ -54,11 +56,12 @@ const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
  * and nothing else: importing is an event, curating accounts is bookkeeping,
  * and searching is analysis.
  */
-type Tab = 'import' | 'accounts' | 'transactions' | 'fis'
+type Tab = 'import' | 'accounts' | 'compliance' | 'transactions' | 'fis'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'import', label: 'Import' },
   { id: 'accounts', label: 'Accounts' },
+  { id: 'compliance', label: 'Compliance' },
   { id: 'transactions', label: 'Transactions' },
   { id: 'fis', label: 'FIS' },
 ]
@@ -73,6 +76,24 @@ const OWNERSHIP_LABEL: Record<AccountOwnership, string> = {
   joint:         'Jointly held',
   third_party:   'A third party',
   unknown:       'Not yet determined',
+}
+
+const RESPONSIBILITIES: ProductionResponsibility[] = ['unknown', 'client', 'opposing', 'both']
+
+/**
+ * Who must produce statements for an account.
+ *
+ * Deliberately not derived from "Held by" above. They usually agree and
+ * sometimes do not — a joint account both sides were ordered to produce, or an
+ * account the other party holds whose statements we have and they do not.
+ * Ownership decides how an asset divides; this decides whose motion to compel
+ * it is, and which compliance report the account appears on.
+ */
+const RESPONSIBILITY_LABEL: Record<ProductionResponsibility, string> = {
+  unknown:  'Not yet decided',
+  client:   'We produce it',
+  opposing: 'They produce it',
+  both:     'Both sides ordered to',
 }
 
 const OWNERSHIP_COLOR: Record<AccountOwnership, string> = {
@@ -563,6 +584,26 @@ export default function MatterFinancialsPage() {
     } finally { setBusy(false) }
   }
 
+  /**
+   * Record whether a statement is the account's first, its last, or neither.
+   *
+   * Nothing on the page says which it is — an opening balance of zero is not
+   * proof, since accounts get swept to zero routinely — so it is a judgment,
+   * kept beside the other judgments on this data. It only ever suppresses a gap
+   * the compliance report would otherwise raise, which is why the default is
+   * the cautious one and marking is deliberate.
+   */
+  async function markBoundary(statement: AccountStatement, boundary: StatementBoundary) {
+    setBusy(true)
+    try {
+      const updated = await setStatementBoundary(statement.id, boundary)
+      setStatements(prev => prev.map(s => (s.id === updated.id ? updated : s)))
+      setExceptions(prev => prev.map(s => (s.id === updated.id ? updated : s)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not mark the statement')
+    } finally { setBusy(false) }
+  }
+
   async function saveAccount(accountId: number, patch: Record<string, unknown>) {
     setBusy(true)
     try {
@@ -932,6 +973,8 @@ export default function MatterFinancialsPage() {
         <TransactionSearchPanel matterId={matterId} accounts={accounts} />
       )}
 
+      {tab === 'compliance' && <CompliancePanel matterId={matterId} />}
+
       {tab === 'fis' && <FisPanel matterId={matterId} accounts={accounts} />}
 
       {tab === 'accounts' && (<>
@@ -1018,6 +1061,17 @@ export default function MatterFinancialsPage() {
                           </span>
                         )}
                         <span className="ml-auto flex items-baseline gap-3">
+                          {/* Marks the edges of the account's life, which is
+                              what lets the compliance matrix tell a hole in the
+                              production from a month that never existed. */}
+                          <select className="text-xs border border-border rounded px-1 py-0.5 bg-white"
+                            value={s.boundary} disabled={busy}
+                            title="Is this the account's first statement, its last, or neither?"
+                            onChange={e => markBoundary(s, e.target.value as StatementBoundary)}>
+                            <option value="intermediate">neither end</option>
+                            <option value="opening">first statement †</option>
+                            <option value="closing">last statement ‡</option>
+                          </select>
                           <span className="text-xs text-text-secondary tabular-nums">
                             {money(s.beginning_balance)} → {money(s.ending_balance)}
                           </span>
@@ -1122,6 +1176,7 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
     account_number_last4: account.account_number_last4 ?? '',
     name_on_account: account.name_on_account ?? '',
     opposing_party_id: account.opposing_party_id,
+    production_responsibility: account.production_responsibility,
     ownership: account.ownership,
     property_character: account.property_character,
     purpose: account.purpose ?? '',
@@ -1164,6 +1219,21 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
           onChange={e => set('ownership', e.target.value as AccountOwnership)}>
           {OWNERSHIPS.map(o => <option key={o} value={o}>{OWNERSHIP_LABEL[o]}</option>)}
         </select>
+      </div>
+      <div>
+        <label className="label" htmlFor={`resp-${account.id}`}>Who produces</label>
+        <select id={`resp-${account.id}`} className="input mt-1"
+          value={draft.production_responsibility}
+          onChange={e => set('production_responsibility',
+                             e.target.value as ProductionResponsibility)}>
+          {RESPONSIBILITIES.map(r => (
+            <option key={r} value={r}>{RESPONSIBILITY_LABEL[r]}</option>
+          ))}
+        </select>
+        <p className="text-xs text-text-secondary mt-1">
+          Which compliance report this account appears on. Usually follows &ldquo;Held by&rdquo;
+          and sometimes does not.
+        </p>
       </div>
       <div>
         <label className="label" htmlFor={`char-${account.id}`}>Characterization</label>

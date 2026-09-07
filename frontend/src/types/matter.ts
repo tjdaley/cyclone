@@ -56,6 +56,16 @@ export interface Matter {
   case_style: string | null
   /** Which side our client is on, in caption vocabulary. Titles every exhibit. */
   client_alignment: ClientAlignment | null
+  /**
+   * How far back each side must produce.
+   *
+   * Named for WHO PRODUCES, not for who asked: the look-back opposing counsel
+   * propounded is the one that binds our client. Two of them because there are
+   * two requests running in opposite directions, and the same joint account can
+   * sit under both with a different start date on each.
+   */
+  client_produces_since: string | null
+  opposing_produces_since: string | null
 }
 
 /**

@@ -66,6 +66,45 @@ class AccountOwnership(str, Enum):
     unknown = "unknown"          # Not yet determined — the honest default
 
 
+class ProductionResponsibility(str, Enum):
+    """
+    Who has to produce statements for an account.
+
+    Not the same question as ``ownership``, though they usually agree. Ownership
+    decides how an asset divides; this decides whose motion to compel it is —
+    and the two come apart often enough to matter: a joint account both sides
+    were ordered to produce, or an account the other party holds whose
+    statements we have and they do not.
+
+    It selects which compliance report an account appears on, and therefore
+    which look-back date bounds it. ``unknown`` is the default because deriving
+    it from ownership would be a legal conclusion drawn by a schema.
+    """
+    client = "client"
+    opposing = "opposing"
+    both = "both"
+    unknown = "unknown"
+
+
+class StatementBoundary(str, Enum):
+    """
+    Whether a statement is the first of an account, the last, or neither.
+
+    The fact a gap report needs and cannot derive. An account opened in March
+    2021 is not missing the fourteen months before it, and an account closed in
+    November is not missing December — but nothing on the page says so, and an
+    opening balance of zero is not proof, because accounts are swept to zero
+    routinely. So it is set by a person, like ownership and property character.
+
+    ``intermediate`` is the default because it is the safe answer: it means
+    "expect statements on both sides", which errs toward asking for a document
+    that exists rather than assuming one does not.
+    """
+    opening = "opening"
+    closing = "closing"
+    intermediate = "intermediate"
+
+
 class StatementReviewStatus(str, Enum):
     """
     Where a statement sits in the exceptions workflow.
@@ -120,6 +159,12 @@ class FinancialAccount(BaseModel):
         default=None,
         description="Which other party is involved: the sole owner when ownership is "
                     "'opposing_sole', the co-holder when it is 'joint'",
+    )
+    production_responsibility: ProductionResponsibility = Field(
+        default=ProductionResponsibility.unknown,
+        description="Who must produce statements for this account. Selects which compliance "
+                    "report it appears on and which look-back date bounds it. Usually follows "
+                    "ownership and sometimes does not — set by a person, never derived",
     )
     ownership: AccountOwnership = Field(
         default=AccountOwnership.unknown,
@@ -183,6 +228,13 @@ class FinancialAccountStatement(BaseModel):
         description="Statement-level findings: NO_ACCOUNT_MATCH, DUPLICATE_PERIOD, UNRECONCILED",
     )
     review_status: StatementReviewStatus = Field(default=StatementReviewStatus.needs_review)
+    boundary: StatementBoundary = Field(
+        default=StatementBoundary.intermediate,
+        description="Whether this is the account's first statement, its last, or neither. "
+                    "Read by the compliance matrix to tell a gap in a production from the "
+                    "edge of an account's life — nothing is missing before an opening "
+                    "statement or after a closing one",
+    )
     storage_path: Optional[str] = Field(default=None, description="Supabase Storage path to the source PDF")
     raw_text: Optional[str] = Field(default=None, description="Extracted text, kept for re-extraction")
     extraction: dict[str, Any] = Field(

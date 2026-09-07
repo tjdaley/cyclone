@@ -37,6 +37,8 @@ from schemas.financial import (
     BulkCategorizeRequest,
     BulkResultResponse,
     BulkTagRequest,
+    ComplianceExportRequest,
+    ComplianceMatrix,
     CreditorResponse,
     ExhibitExportRequest,
     PayeeClassificationResponse,
@@ -46,6 +48,7 @@ from schemas.financial import (
     StatementIngestJobResponse,
     StatementIngestSummary,
     StatementJobStatusResponse,
+    StatementBoundaryRequest,
     StatementPdfUrlResponse,
     StatementRetryResult,
     StatementRejectResult,
@@ -69,6 +72,7 @@ from schemas.financial import (
     UndisclosedReport,
 )
 from services.account_discovery_service import account_discovery_service
+from services.compliance_service import compliance_service
 from services.audit_logger import AuditLogger
 from services import exhibit_service
 from services.job_service import job_service
@@ -304,6 +308,114 @@ def export_undisclosed_accounts(
         headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
 
     return Response(content=content, media_type=media_type, headers=headers)
+
+
+@router.get("/matters/{matter_id}/compliance", response_model=ComplianceMatrix)
+def get_compliance_matrix(
+    matter_id: int,
+    side: Optional[str] = Query(
+        default=None,
+        pattern="^(client|opposing)$",
+        description="client = what our side must produce; opposing = what theirs must. Omit "
+                    "for every account over the range the data covers",
+    ),
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> ComplianceMatrix:
+    """
+    Which statements a production holds, by account and month — and which days
+    nothing accounts for.
+
+    The grid a firm otherwise builds by hand in a spreadsheet, and its value is
+    entirely in the blanks. Two things it does that a pivot table cannot:
+
+    * **A blank is not always a gap.** Nothing is missing before a statement
+      marked ``opening`` or after one marked ``closing``, so an account opened
+      in March does not report the year before it as a hole. That is what stops
+      a motion to compel documents nobody has.
+    * **A filled month is not a covered month.** Statement periods run 4 March
+      to 5 April, so `gaps` counts the days no statement accounts for. The
+      matrix says which months have a statement; only the gaps belong in a
+      motion.
+    * **There are two of these, not one.** Opposing counsel propounds on us and
+      sets how far back we must go; we propound on them and set how far back
+      they must go. `side` chooses which obligation is being measured, and each
+      brings its own look-back from the matter. An account marked `both`
+      appears on either report, bounded differently on each.
+
+    Derived on demand and stores nothing: producing the missing statement takes
+    it off the report, which is the workflow.
+    """
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    return ComplianceMatrix(**compliance_service.matrix(manager, matter_id, side=side))
+
+
+@router.post("/matters/{matter_id}/compliance/export")
+def export_compliance_matrix(
+    matter_id: int,
+    body: ComplianceExportRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> Response:
+    """
+    The matrix as a document — the attachment to a motion to compel.
+
+    **Landscape in every format that has an orientation**, and not by
+    preference: fourteen columns in portrait wrap the Bates numbers and the grid
+    stops being scannable, which is the only thing a grid is for.
+
+    ``csv`` stays the clean extraction — a flat grid of account, year, and
+    twelve months, which is what the workbook this replaces was for. The other
+    three carry the caption, the daggers with their legend, the gap list, and
+    the Rule 1006 notice.
+    """
+    matter = MatterRepository(manager).select_one(condition={"id": matter_id})
+    if matter is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    try:
+        exhibit = compliance_service.build_exhibit(
+            manager, matter, side=body.side,
+            exhibit_name=body.exhibit_name.strip() or "Statements Produced and Not Produced",
+        )
+        content, media_type, filename = exhibit_service.render(exhibit, body.format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a renderer failure must not read as an empty export
+        LOGGER.error("financial.export_compliance_matrix: matter=%s format=%s failed: %s",
+                     matter_id, body.format, str(e))
+        raise HTTPException(status_code=500, detail="Could not build the export") from e
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="%s"' % filename,
+        "X-Exhibit-Rows": str(len(exhibit.rows)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Exhibit-Rows, X-Exhibit-Warnings",
+    }
+    if exhibit.warnings:
+        headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
+@router.patch("/statements/{statement_id}/boundary", response_model=StatementResponse)
+def set_statement_boundary(
+    statement_id: int,
+    body: StatementBoundaryRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementResponse:
+    """
+    Record whether a statement is an account's first, its last, or neither.
+
+    A judgment, not an extraction: nothing on the page says which it is, and an
+    opening balance of zero is not proof — accounts are swept to zero routinely.
+    It only ever *suppresses* a gap the report would otherwise raise, so the
+    default is the cautious one and marking is a deliberate act.
+    """
+    repo = FinancialAccountStatementRepository(manager)
+    if repo.select_one(condition={"id": statement_id}) is None:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    return _statement_response(repo.update(statement_id, {"boundary": body.boundary.value}))
 
 
 @router.post("/statements/{statement_id}/retry", response_model=StatementRetryResult)

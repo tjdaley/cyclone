@@ -460,6 +460,8 @@ export default function MatterDetailPage() {
       {/* ── Exhibit caption ── */}
       <CaptionSection matter={matter} onSaved={setMatter} />
 
+      <ProductionScopeSection matter={matter} onSaved={setMatter} />
+
       {/* ── Opposing parties ── */}
       <Section title="Opposing parties" count={parties.length}
         actionLabel={addingParty ? 'Cancel' : '+ Add party'}
@@ -932,6 +934,106 @@ export default function MatterDetailPage() {
  * the case, not about one document. Set once, and every exhibit the matter ever
  * produces is headed correctly.
  */
+/**
+ * How far back each side has to go, and therefore what the compliance matrix
+ * measures against.
+ *
+ * TWO DATES, BECAUSE THERE ARE TWO REQUESTS RUNNING IN OPPOSITE DIRECTIONS.
+ * Opposing counsel propounds on us and sets how far back our client must go; we
+ * propound on them and set how far back they must go. The same joint account
+ * can sit under both at once with a different start date on each — which is
+ * ordinary when the other side will not stipulate to authenticity and both
+ * parties end up producing the same statements under Rule 193.7.
+ *
+ * Both fields are named for **who produces**, never for who asked. The date
+ * opposing counsel propounded is the one that binds our client, and labelling
+ * it the other way round is the mistake this wording exists to prevent.
+ *
+ * On the matter rather than on each account, deliberately. A request is written
+ * as "all accounts to which the party has access since X" — it does not vary by
+ * bank. If it ever needs to vary, the shape is an override layer of the kind
+ * tags and category rules already use, and nothing here has to change to add
+ * one.
+ */
+function ProductionScopeSection({ matter, onSaved }: {
+  matter: Matter
+  onSaved: (m: Matter) => void
+}) {
+  const [ours, setOurs] = useState(matter.client_produces_since ?? '')
+  const [theirs, setTheirs] = useState(matter.opposing_produces_since ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const dirty = ours !== (matter.client_produces_since ?? '')
+    || theirs !== (matter.opposing_produces_since ?? '')
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    try {
+      onSaved(await updateMatter(matter.id, {
+        client_produces_since: ours || null,
+        opposing_produces_since: theirs || null,
+      }))
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Section title="Discovery scope">
+      <p className="text-sm text-text-secondary mb-3">
+        How far back each side has to produce. These bound the compliance matrix: without
+        them it can only say what falls <em>between</em> the statements produced, never what
+        is missing from either end — and &ldquo;anything before 4 December 2019&rdquo; is not
+        something a request for production can ask for.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="label" htmlFor="client-since">Our client produces from</label>
+          <input id="client-since" type="date" className="input text-sm w-full"
+            value={ours} onChange={e => setOurs(e.target.value)} />
+          <p className="text-xs text-text-secondary mt-1">
+            The look-back in the request <strong>opposing counsel served on us</strong>.
+            Bounds the &ldquo;We produce&rdquo; report.
+          </p>
+        </div>
+        <div>
+          <label className="label" htmlFor="opposing-since">The other side produces from</label>
+          <input id="opposing-since" type="date" className="input text-sm w-full"
+            value={theirs} onChange={e => setTheirs(e.target.value)} />
+          <p className="text-xs text-text-secondary mt-1">
+            The look-back in the request <strong>we served on them</strong>. Bounds the
+            &ldquo;They produce&rdquo; report.
+          </p>
+        </div>
+      </div>
+
+      <p className="text-xs text-text-secondary mt-3">
+        Each report runs from its date through today. Which accounts fall under which is set
+        per account, on the matter&rsquo;s Financials page — an account both sides were
+        ordered to produce appears on both, bounded differently on each.
+      </p>
+
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+
+      <div className="flex items-center gap-3 mt-3">
+        <button type="button" className="btn-primary text-sm"
+          disabled={!dirty || busy} onClick={() => void save()}>
+          {busy ? 'Saving…' : 'Save scope'}
+        </button>
+        {saved && <span className="text-xs text-success">Saved</span>}
+      </div>
+    </Section>
+  )
+}
+
 function CaptionSection({ matter, onSaved }: {
   matter: Matter
   onSaved: (m: Matter) => void

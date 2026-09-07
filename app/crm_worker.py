@@ -10,9 +10,12 @@ Run from the app directory (same image as the API):
 
     python crm_worker.py
 """
+import imaplib
+import socket
+import ssl
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from dependencies import get_db_manager, get_landing_pages_db
 from services.crm_agent_service import crm_agent_service
@@ -145,6 +148,34 @@ def _run_jobs(pool: ThreadPoolExecutor, capacity: int) -> None:
                     len(claimed), len(_IN_FLIGHT), capacity)
 
 
+# Failures that are the network being the network: a mail host that drops a TLS
+# handshake, a DNS blip, a refused connection. They are worth one line, not a
+# traceback — the tick repeats every minute, and a stack dump per minute for a
+# condition nobody can act on buries the failures somebody can.
+_NETWORK_FAULTS = (OSError, ssl.SSLError, socket.timeout, imaplib.IMAP4.error)
+
+
+def _step(name: str, run: Callable[[], None]) -> None:
+    """
+    Run one part of the tick, and let the rest of it happen either way.
+
+    The three parts used to run in a bare sequence, so the first one to raise
+    took the other two with it: an intake mailbox that dropped a TLS handshake
+    silently stopped the diff explainer, which has nothing to do with mail. They
+    share only a lock, and a lock is not a reason to share a fate.
+    """
+    try:
+        run()
+    except _NETWORK_FAULTS as e:
+        LOGGER.warning("crm_worker: %s could not reach its service (%s: %s)",
+                       name, type(e).__name__, str(e) or "no detail")
+    except Exception as e:  # noqa: BLE001 — one bad step must not stop the others
+        # Traceback kept for the unexpected: this catches everything from the
+        # landing-pages database to the LLM, and the one line that identifies
+        # which is worth the width.
+        LOGGER.error("crm_worker: %s failed err=%s", name, str(e), exc_info=True)
+
+
 def _tick() -> None:
     # TTL covers a few cycles so the holder keeps the lock across one tick's
     # work, but frees within minutes if the node dies (failover).
@@ -152,9 +183,9 @@ def _tick() -> None:
         if not got:
             LOGGER.debug("crm_worker: another node holds the poller lock; idling this tick")
             return
-        _poll_welcomes()
-        _poll_inbound()
-        _run_diff_explainer()
+        _step("welcome poll", _poll_welcomes)
+        _step("inbound mail poll", _poll_inbound)
+        _step("diff explainer", _run_diff_explainer)
 
 
 def main() -> None:

@@ -130,6 +130,8 @@ cyclone/
 │       ├── 031_fis_category_settings.sql  # payment schedules per category, per person
 │       ├── 032_category_rules.sql        # keyword rules + category provenance on transactions
 │       ├── 033_creditor_discovery.sql    # categories.is_liability + payee classifications
+│       ├── 034_statement_boundary.sql    # statements.boundary — opening/closing/intermediate
+│       ├── 035_production_scope.sql      # matters.*_produces_since; accounts.production_responsibility
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -750,6 +752,174 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
 
 Covered by `tests/test_account_discovery.py` and `tests/test_undisclosed_exhibit.py`.
 
+### Compliance Service (`compliance_service.py`)
+
+The grid a firm otherwise builds by hand in a workbook, one tab per account
+type: accounts down, months across, a Bates number in every filled cell. Its
+value is entirely in the blanks, and two of them are not what a pivot table
+would give you.
+
+- **A blank is not always a gap.** An account opened in March 2021 has no
+  January statement and never will. `financial_account_statements.boundary`
+  (034) is where a person records that — `opening`, `closing`, or the default
+  `intermediate` — and it is the reason the column exists: without it every
+  account reports holes back to the start of the year range, and somebody either
+  files a motion to compel documents nobody has or spends an afternoon proving
+  they do not exist. **Nobody can extract it**: a statement does not say it is
+  the first, and an opening balance of zero is not proof because accounts are
+  swept to zero routinely. So it sits with `ownership` and `property_character`
+  as a judgment, defaulted to the cautious answer.
+- **A filled month is not a covered month.** Statement periods run 4 March to
+  5 April, so a cell can be filled while days at either end of the month are
+  missing. The grid answers "which months have a statement"; `gaps` answers
+  "which days does nothing account for", **in days**, and only the second
+  belongs in a motion.
+- **The markers suppress the outer holes only.** A gap between two produced
+  statements is a gap whatever the edges say — the account demonstrably existed
+  on both sides. The leading and trailing reports are open-ended by
+  construction: with no look-back period there is no date to run back to, and
+  asserting one would invent a requirement nobody set.
+- **Cells are keyed on the month a statement CLOSES in.** A period running 4
+  March to 5 April is the April statement by every convention a bank uses;
+  keying on the start files it a month early and makes consecutive statements
+  look like they skip months.
+- **One year range for the whole matter**, not one per account, so an account
+  with a shorter history shows its blank years instead of the grid ending early.
+- Rejected extractions fill no cell — a discarded read is not evidence a month
+  was produced.
+
+- **There are two of these reports, not one.** Opposing counsel propounds on us
+  and sets how far back WE must go; we propound on them and set how far back
+  THEY must go. `side` selects which, `financial_accounts.production_responsibility`
+  says whose an account is, and `matters.client_produces_since` /
+  `opposing_produces_since` carry the dates. An account marked `both` appears on
+  each report, **bounded differently on each** — two obligations over the same
+  documents. The matter columns are named for **who produces, not who asked**:
+  the date opposing counsel propounded is the one that binds our client, and a
+  column called `opposing_lookback` holding it would be misread by everyone.
+- **The look-back changes the shape of a gap, not just its size.** Unbounded,
+  the outer holes can only be open-ended — "anything before 4 December 2019" —
+  which no request for production can use. Given the date a request reaches back
+  to, they become ordinary gaps with two ends, a gap wholly before it stops
+  being a gap at all, and an account with **nothing** produced reports the whole
+  window. That last finding is one an unbounded report structurally cannot make.
+- **Responsibility is not derived from `ownership`.** They usually agree and
+  sometimes do not, and deriving one from the other would be a legal conclusion
+  drawn by a schema. Unassigned accounts are **counted and reported** rather than
+  silently dropped: an unmarked account would otherwise appear on neither report
+  and never be chased.
+- `discovery_documents.look_back_date` already extracts the inbound date at
+  ingest, but that module models only discovery *served on our client*, so the
+  outbound one has no home there — and scope is settled by agreement at least as
+  often as by a filed request. Pre-filling from an ingested request is a later
+  convenience, not a substitute.
+
+- **DOCX tables are set in Aptos 9pt, and OOXML has no font stack.** A run names
+  one face per script class; there is no list to fall through. The nearest thing
+  is `w:altName` in `fontTable.xml`, which names what to use when the face is
+  missing — Word honours it, LibreOffice reads it, Google Docs substitutes by
+  its own rules and probably ignores it. Times New Roman is the fallback because
+  nobody lacks it (LibreOffice maps it to Liberation Serif), so the worst case
+  reads plainly rather than reflowing. `_docx_declare_font` edits the part
+  directly, because python-docx models styles and not the font table, and
+  swallows any failure: a missing hint costs a substitution somebody else picks,
+  a raised exception costs the export.
+- **Set the face on all four script classes.** `run.font.name` writes only
+  `w:ascii` and `w:hAnsi`; a character Word classes as complex-script or East
+  Asian then renders in the document default, and one stray glyph in another
+  face is invisible until it is printed.
+- **The DOCX is one table per account, not one table with spanning rows.**
+  Word repeats a header row across a *natural* page break and **not across a
+  manual one**, so an author who splits a long table where they want it loses
+  the month names on every page after — which is the whole reason they split it
+  there. A `full_width` row therefore ends one table and begins another, with
+  the account name as a centred heading paragraph between them. Each grid keeps
+  its own repeating header for the rare account tall enough to need it. Page
+  breaks are still not forced there: one table per account is what gives the
+  author the control.
+- **`margin_inches` narrows the DOCX left and right only.** Width is what a wide
+  grid runs out of; the top and bottom stay at Word's inch, where a filing
+  expects them.
+- **`depth` on a data row is an indent in every renderer.** The compliance year
+  rows carried `depth=1` from when they sat under a type heading that the title
+  replaced, and in the DOCX that pushed "2019" far enough right to wrap it onto
+  four lines inside a column wide enough to hold it twice over. Indentation is
+  for hierarchy that is still there.
+- **A title leading a page-chunk is promoted above the header row.** The PDF
+  re-emits the column headings on every page, so a title left in row order sits
+  *under* the month names and the account it names reads as part of the data
+  rather than as the caption of the grid. `_pdf_rows` carries an is-a-title flag
+  beside the markup and `fits()` lifts a leading one out. Markdown and DOCX need
+  nothing: their header appears once at the top, so a title in row order already
+  sits above its own rows.
+- **Half-inch margins, because the grid does not otherwise fit.** Measured:
+  twelve nine-character Bates numbers plus a year column need 648pt, and
+  landscape letter at one-inch margins leaves exactly 648pt — so December fell
+  off the right edge, and the header was not on the page at all.
+  `Exhibit.margin_inches` carries it, a property of the document like
+  `landscape`. Half an inch buys a whole extra column and stays inside the
+  non-printable border of the copiers an exhibit passes through; a quarter inch
+  buys 36pt more and risks losing the edge on any of them.
+- **The built-in sans is not the answer, and this was measured too.** MuPDF's
+  base-14 Helvetica is **10% wider** than Times-Roman for a Bates number
+  (48.2pt against 43.9pt at 8.5pt) — switching to it makes the overflow worse.
+  Only a *condensed* face helps, and there is no condensed font in the base
+  fourteen, so it would mean vendoring a TTF. Not needed once the margin is
+  right.
+- **The page-number baseline follows the margin.** Hard-coded 50pt from the
+  foot, it lands back inside the table as soon as the margin narrows.
+- **The account is a title above its grid, not a column beside it.** Repeated
+  down every year row the name wraps and takes width from twelve months that
+  need it more. `Row.full_width` draws it as one centred cell spanning the
+  table; `Column.csv_only` keeps the account and its type in the row's cells so
+  the CSV can still sort, filter and pivot on them. Same data, two
+  presentations — and the CSV skips full-width rows outright, because a heading
+  dropped into the middle of the data breaks every filter applied to it.
+  Markdown cannot span columns, so the title takes the first cell there and the
+  rest go blank; that is as close as the format gets.
+- **Each account's grid starts its own page in the PDF.** These are read one
+  account at a time across a counsel table, and an account whose years straddle
+  a fold is the one thing the grid must not do — the reader loses the column
+  headings and has to count months to find August. `Row.page_break` carries it;
+  the paging loop caps a batch at the next break so the fit search can never
+  propose one spanning two grids. The mark goes on the first row of the block,
+  which is the type heading when one opens it — on the year row beneath, the
+  heading strands at the foot of the previous page.
+- **The break is honoured in the PDF and nowhere else, deliberately.** Markdown
+  has no pages, and a .docx is edited before it is filed: an author who wants
+  two small grids on one sheet should not have to delete a break somebody
+  guessed at. The PDF is the one output handed over as printed.
+- **Blank rows are the argument, so they are never trimmed.** Prosecuting a
+  motion, the blanks are the point; defending one, the author exports DOCX and
+  edits. A report that hid them to look tidier would be arguing the other side's
+  case.
+- **The exhibit is landscape, and not by preference.** Account plus year plus
+  twelve months is fourteen columns; in portrait the Bates numbers wrap and the
+  grid stops being scannable, which is the only thing a grid is for.
+- **Colour cannot survive into a .docx cell, so the daggers carry it** — and the
+  legend travels with them. An em dash marks a month outside the account's life;
+  a blank marks one nobody produced. The distinction is the report.
+- **The gaps are `findings`, not rows.** Prose of no fixed width, one per
+  account, and the most important content on the page: a cell of a
+  fourteen-column table is the wrong container and a footnote is the wrong
+  weight. `Exhibit.findings` / `findings_title` render like `selection`,
+  directly after the table.
+- **The account's life is not the cell its statement sits in.** A first
+  statement running 4 January to 3 February is placed in February, but the
+  account was alive through January — so `opening_month` comes from the
+  statement's period **start**. Taking the cell's month greys January out as
+  "before the account existed", which is an assertion and a false one. A blank
+  is a question, and a wrong question is recoverable where a wrong assertion is
+  not.
+- The CSV stays the flat grid — account, year, twelve months, no preamble —
+  because the workbook this replaces is what it is for.
+
+**KNOWN LIMITATION:** an account opened and closed inside one period cannot be
+expressed. Rare, and the fix is a fourth value (`only`) rather than a different
+shape, so nothing has to change to add it.
+
+Covered by `tests/test_compliance_matrix.py`.
+
 ### Exhibit Service (`exhibit_service.py`)
 
 Turns any query result into a court exhibit. One `Exhibit` describes the
@@ -785,6 +955,20 @@ Anything in Cyclone that produces a table worth taking to court builds an
   the person pulling it needs the whole thing. An unstamped production says "no
   Bates stamp detected" rather than leaving a blank, because a reader cannot
   tell a blank from nobody having looked. Absent from the CSV, like the caption.
+- **`Column.center` is for a column of MARKS, not of values.** The compliance
+  grid prints a Bates number where the production carried one and a bare `X`
+  where it did not, and a lone X hanging off the left edge of a wide month
+  column reads as an accident rather than an entry. Centring is per column, so
+  the Bates numbers centre with it — accepted, and better for a grid. The word
+  `held` used to fill that cell; it read as a value and invited somebody to go
+  looking for it in the production. `numeric` still wins where both are set.
+- **The DOCX heading takes its column's alignment too** (`_docx_align`, called
+  from the header loop and the cell loop). Word leaves a paragraph left unless
+  told, so a centred X sat under a left-hugging "Feb" and read as the month
+  before it — on a grid whose entire content is position, the one mistake it
+  cannot afford. Markdown's separator and the PDF's `th` class had always
+  aligned heading with column; only Word did not, which also left every
+  numeric column's heading adrift from its figures.
 - **`footnotes` ride with the table**, not in `selection`. A reader meeting a
   dagger in a cell looks directly below the table for what it means; a mark
   whose explanation stayed on the screen is worse than no mark, because the
@@ -1093,6 +1277,22 @@ Rules learned the hard way:
 - **Job claiming is deliberately outside the `crm:poller` lock.** That lock makes mailbox polling fleet-wide single-runner; jobs are claimed individually, so every node should take work.
 - **Failures land on the job,** with the reason in `error`. A failed upload must be able to tell the attorney what happened.
 - **Polling is scoped to the requester** (`get_for_staff`) — a result holds the full text of someone's pleading.
+- **Each part of the CRM tick is isolated.** They used to run as a bare
+  sequence, so the first to raise took the rest with it — an intake mailbox that
+  dropped a TLS handshake silently stopped the diff explainer, which has nothing
+  to do with mail. `_step()` runs each one and carries on. They share a lock,
+  and a lock is not a reason to share a fate.
+- **A network fault gets one line, not a traceback.** The tick repeats every
+  minute, and a stack dump per minute for a dropped handshake nobody can act on
+  buries the failures somebody can. `_NETWORK_FAULTS` → WARNING; everything else
+  keeps the traceback, because that handler catches the landing-pages database,
+  IMAP, SMTP, and the LLM, and the line identifying which is worth the width.
+- **Mail connections carry a timeout** (`mail_timeout_seconds`, IMAP and SMTP
+  alike). Neither had one, which means the socket default of *never* — and the
+  tick holds the fleet-wide poller lock, so a host that accepts a connection and
+  then stops talking would stop **every** node from polling until the lock TTL
+  expired. A dropped handshake is the loud version of that failure; a half-open
+  socket is the quiet one, and the quiet one is worse.
 - The worker runs **two cadences**: jobs every `job_poll_interval_seconds` (short — someone is watching a spinner), CRM polls on their own much slower schedule.
 - **Jobs run in a pool of `job_concurrency` (default 5), and the loop never waits on one.** It used to run each job to completion inline, so a single statement — a thirteen-month upload still going at 1,600 seconds — stopped everything: no other job started, and the CRM tick did not run either, which is why a long ingest was indistinguishable from a dead worker. `claim_pending` takes only what there is free capacity for and `run_claimed` runs it on a pool thread. A worker at capacity claims **nothing**, leaving the queue for a node with room rather than building a private backlog.
 - **A manager per job, never per worker.** `SupabaseManager` is not thread-safe (`dependencies.get_db_manager` says so); one shared across pool threads interleaves two ingests' requests down a single connection.
@@ -1316,7 +1516,11 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Matter-close workflow | ❌ Not started — must purge soft-deleted transactions |
 | Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
 | Rule 1006 exhibit export | ✅ Built for transaction queries — every exhibit carries the verification notice |
-| Compliance matrix (statements held, by year and month) | ❌ Not started — needs a `matter_preferences` table for the look-back year. Ends with the referenced-but-not-produced list; it is the exhibit behind a motion to compel |
+| Compliance matrix export (CSV / MD / DOCX / PDF) | ✅ Built — landscape, per side, with the gap list as `findings` and the dagger legend |
+| Compliance matrix (statements held, by year and month) | ✅ Built as an in-app grid — accounts by type, years down, months across, Bates in the cell, click through to the PDF. Opening/closing markers suppress the edges; per-account coverage names the missing **days**. Export to an exhibit not built |
+| Statement boundary (opening / closing / intermediate) | ✅ Built — 034, set from the Accounts tab. The fact that tells a gap from the edge of an account's life |
+| Look-back dates per side + production responsibility | ✅ Built — 035, set on the matter detail page under "Discovery scope". Two reports, each bounded by its own request; unassigned accounts counted, not hidden |
+| `matter_preferences` (other firm/user defaults) | ❌ Not started — the caption override still wants it |
 | Export on the undisclosed-accounts report | ✅ Built — its own account-shaped columns; the dagger travels with its footnote |
 | OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
 | Large-transaction query (dollar threshold) | ❌ Not started |
@@ -1419,6 +1623,7 @@ Three things to get right when it is built:
 | `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_MAX_TOKENS` | Backend | Global sampling defaults |
 | `LLM_TIMEOUT_SECONDS` | Backend | Per-call ceiling (default 90). Keep ≥10 — Gemini rejects shorter deadlines |
 | `JOB_POLL_INTERVAL_SECONDS` | Worker | How often queued jobs are picked up (default 3) |
+| `MAIL_TIMEOUT_SECONDS` | Worker | Seconds to wait on a mail server, IMAP and SMTP alike (default 30). Without one a host that stops talking hangs the tick, which holds the fleet-wide poller lock |
 | `JOB_CONCURRENCY` | Worker | Jobs one worker runs at once (default 5). Throughput for a stack of statements; trades against vendor rate limits |
 | `LEAD_POLL_INTERVAL_SECONDS` | Worker | CRM mailbox/lead polling cadence (default 60) |
 | `REDIS_URL` | Worker | Poller lock + job claim; job claiming degrades gracefully if unreachable |
@@ -1517,6 +1722,29 @@ Three things to get right when it is built:
 | Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
 | Require a movement verb before reading a masked number | Nobody masks a confirmation number. `Deposit from … XXXXXXX3640` was invisible for want of the word "transfer" |
 | Add a parser route without adding its database term | The gate is pushed to the query. A line the regex would accept is never fetched to be parsed |
+| Mark an account's life from the cell its opening statement sits in | It is placed by period END. The account was alive from the period START, and greying that month out asserts something false |
+| Expect a CSS-style font stack in a .docx | OOXML has none. `w:altName` in the font table is the whole mechanism, and only some readers honour it |
+| Set a run's font with `run.font.name` alone | It writes ascii and hAnsi only. A complex-script glyph then renders in the document default |
+| Rely on a DOCX header row repeating after a manual page break | It repeats across natural breaks only. One table per section, or the split loses its headings |
+| Leave `depth` on a row whose hierarchy has gone | Every renderer indents the first column. It wrapped a four-character year onto four lines |
+| Reach for a sans font to fit a wide table | MuPDF's Helvetica is 10% wider than its Times for digits. Measure before switching; only a condensed face helps |
+| Fix an overflowing exhibit in the renderer | It is the document that does not fit. `margin_inches`, like `landscape` |
+| Repeat a long label down a column of a wide grid | It wraps and steals width from the columns carrying the data. A `full_width` title costs one row |
+| Zip a row's cells against the visible columns | A row always carries every cell, including CSV-only ones. Zip shifts every value one place left |
+| Emit a full-width title into the CSV | The same fact is a column there. A heading mid-data breaks every filter |
+| Let a grid split across a page in the PDF | The reader loses the headings and counts months. `Row.page_break`, and the batch never crosses one |
+| Force a page break into a .docx or markdown | They are edited before they are filed. Only the printed output gets a guessed break |
+| Trim blank rows to make a compliance exhibit tidier | The blanks are the argument. Trimming them argues the other side's case |
+| Put a sentence in a cell of a fourteen-column table | Use `findings`. A row is the wrong container for prose and a footnote is the wrong weight |
+| Read a filled month on the compliance grid as a covered month | Periods run 4 March to 5 April. The grid says which months have a statement; only the day-level gaps go in a motion |
+| Key a statement's month on its period start | It is the April statement. Keying on the start makes consecutive statements look like they skip months |
+| Use `exclude_none` on a PATCH body | A null then cannot be told from an absent field, so nothing can ever be *cleared* — and the save reports success. `exclude_unset` |
+| Derive who must produce an account from who owns it | They usually agree and sometimes do not. One decides how an asset divides, the other whose motion to compel it is |
+| Hide accounts nobody has assigned from both reports | They would never be chased. Count them and say so |
+| Name a look-back column for who asked | The date opposing counsel propounded binds OUR client. Name it for who produces |
+| Report an unbounded gap as if a motion could use it | "Anything before 4 Dec 2019" has one end. A look-back gives it two |
+| Infer that a statement is an account's first | An opening balance of zero is not proof — accounts are swept to zero routinely. A person marks it |
+| Let a boundary marker suppress a gap between two statements | The account demonstrably existed on both sides. Markers suppress the outer holes only |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
 | Read a trailing digit run on a PAYMENT as an account number | On a transfer it is a bank convention; on a payment it is a confirmation number. `Zelle Payment To Kathy Gunn 20928990159` became an undisclosed account belonging to Kathy Gunn |
 | Decide from the text whether a payee is a creditor | "Payment To Mr. Cooper" and "Payment To Frontier" are the same sentence. It comes from the category a person filed it under, or a recorded ruling — nowhere else |
@@ -1557,6 +1785,9 @@ Three things to get right when it is built:
 | Accept a model's account number without checking it against the page | Compare each printed run separately. An answer that is not printed there was invented |
 | Store a masked account number with no digits in it | It is the caption, scraped. `"Account Number:"` reached production twice |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
+| Open a mail connection with no timeout | The socket default is *never*, and the tick holds a fleet-wide lock. One wedged node stops all of them |
+| Run the CRM tick's steps as a bare sequence | The first to raise takes the rest with it. Mail failing must not stop the diff explainer |
+| Log a network blip as ERROR with a traceback | It repeats every minute and buries what matters. One line for the network, tracebacks for the unexpected |
 | Run a job to completion on the worker's main loop | One long statement then blocks every other job and the CRM tick. Claim to capacity, run in the pool |
 | Share one `SupabaseManager` across pool threads | It is not thread-safe. A manager per job, and it is cheap to make |
 | Gate a drop zone's busy state on the job | The job does not exist until every upload finishes. A dozen files is 10–15 seconds of a screen that looks untouched, and the natural response is to drag them again |

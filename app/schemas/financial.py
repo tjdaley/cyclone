@@ -11,7 +11,9 @@ from db.models.financial import (
     AccountOwnership,
     AccountType,
     DateProvenance,
+    ProductionResponsibility,
     PropertyCharacter,
+    StatementBoundary,
     StatementReviewStatus,
 )
 
@@ -103,6 +105,7 @@ class FinancialAccountResponse(BaseModel):
     account_number_masked: Optional[str]
     name_on_account: Optional[str]
     opposing_party_id: Optional[int]
+    production_responsibility: ProductionResponsibility
     ownership: AccountOwnership
     property_character: Optional[PropertyCharacter]
     purpose: Optional[str]
@@ -124,6 +127,7 @@ class FinancialAccountUpdateRequest(BaseModel):
     account_number_masked: Optional[str] = None
     name_on_account: Optional[str] = None
     opposing_party_id: Optional[int] = None
+    production_responsibility: Optional[ProductionResponsibility] = None
     ownership: Optional[AccountOwnership] = None
     property_character: Optional[PropertyCharacter] = None
     purpose: Optional[str] = None
@@ -185,6 +189,7 @@ class StatementResponse(BaseModel):
     printed_totals: dict[str, Any]
     flags: list[dict[str, Any]]
     review_status: StatementReviewStatus
+    boundary: StatementBoundary
     storage_path: Optional[str]
     source_job_id: Optional[str]
     ingested_by_staff_id: int
@@ -570,6 +575,131 @@ class StatementRetryResult(BaseModel):
                     "carrying a characterization is kept",
     )
     source_filename: Optional[str] = Field(default=None, description="The document being re-read")
+
+
+class StatementBoundaryRequest(BaseModel):
+    """Mark a statement as an account's first, its last, or neither."""
+    boundary: StatementBoundary = Field(
+        ...,
+        description="opening = nothing is missing before this one; closing = nothing after; "
+                    "intermediate = expect statements on both sides",
+    )
+
+
+class ComplianceExportRequest(BaseModel):
+    """How to render the compliance matrix, and which of the two reports."""
+    format: str = Field(default="csv", pattern="^(csv|md|docx|pdf)$")
+    exhibit_name: str = Field(default="Statements Produced and Not Produced", max_length=200)
+    side: Optional[str] = Field(
+        default=None,
+        pattern="^(client|opposing)$",
+        description="Which obligation the exhibit measures. Omit for every account over the "
+                    "range the data covers — useful internally, but a document filed with a "
+                    "court almost always wants one side named",
+    )
+
+
+class ComplianceCell(BaseModel):
+    """One statement, in the month it closes in."""
+    statement_id: int
+    bates: Optional[str] = Field(default=None, description="Stamp on the statement's first page")
+    bates_last: Optional[str] = None
+    source_filename: Optional[str] = None
+    boundary: StatementBoundary
+    review_status: StatementReviewStatus
+    reconciled: bool
+    period_start: date
+    period_end: date
+    has_pdf: bool = Field(..., description="False once the source has been purged from storage")
+
+
+class ComplianceGap(BaseModel):
+    """Days no produced statement accounts for."""
+    start: date
+    end: date
+    days: int
+
+
+class ComplianceAccount(BaseModel):
+    """One row of the matrix, and the coverage summary printed beneath it."""
+    account_id: int
+    production_responsibility: ProductionResponsibility
+    institution: str
+    last4: Optional[str]
+    account_type: AccountType
+    type_label: str
+    label: str
+    is_closed: bool
+    cells: dict[str, list[ComplianceCell]] = Field(
+        default_factory=dict,
+        description="Keyed \"YYYY-MM\" on the month each statement CLOSES in — a period running "
+                    "4 March to 5 April is the April statement, and keying on the start would "
+                    "make consecutive statements look like they skip months",
+    )
+    opening_month: Optional[str] = Field(
+        default=None, description="Month of the statement marked opening, if any",
+    )
+    closing_month: Optional[str] = None
+    statements: int
+    gaps: list[ComplianceGap] = Field(
+        default_factory=list,
+        description="Days between two produced statements that nothing covers. A month with a "
+                    "statement in it is not a month that is covered: periods do not line up "
+                    "with calendar months",
+    )
+    nothing_before: Optional[date] = Field(
+        default=None,
+        description="Earliest date produced, when the first statement is NOT marked opening — "
+                    "so anything before it may exist and was not produced. Null when it is "
+                    "marked, because then there is nothing before it to want",
+    )
+    nothing_after: Optional[date] = Field(
+        default=None,
+        description="Latest date produced, when the last statement is NOT marked closing",
+    )
+
+
+class ComplianceTotals(BaseModel):
+    accounts: int
+    statements: int
+    gaps: int
+    unassigned: int = Field(
+        default=0,
+        description="Accounts nobody has said who must produce. Counted rather than shown, "
+                    "because an unmarked account would otherwise appear on neither report and "
+                    "never be chased",
+    )
+
+
+class ComplianceScope(BaseModel):
+    """Which obligation this report is measured against."""
+    side: Optional[str] = Field(
+        default=None,
+        description="client = what our side must produce; opposing = what theirs must; null = "
+                    "every account, over the range the data itself covers",
+    )
+    since: Optional[date] = Field(
+        default=None,
+        description="Earliest date the governing request reaches back to. Null when the matter "
+                    "has no look-back recorded, and then the outer gaps can only be stated as "
+                    "open-ended dates",
+    )
+    through: Optional[date] = Field(default=None, description="Today — an obligation runs to the present")
+    bounded: bool = Field(..., description="Whether a look-back date was found for this side")
+
+
+class ComplianceMatrix(BaseModel):
+    """
+    What the production holds, by account and month — and what it does not.
+
+    The years span the whole matter rather than each account, so an account with
+    a shorter history shows its blank years instead of ending early. The blanks
+    are the report.
+    """
+    years: list[int] = Field(default_factory=list)
+    accounts: list[ComplianceAccount] = Field(default_factory=list)
+    totals: ComplianceTotals
+    scope: ComplianceScope
 
 
 class StatementPdfUrlResponse(BaseModel):

@@ -261,6 +261,19 @@ class Matter(BaseModel):
                     "MARRIAGE OF JANE DOE AND JOHN DOE'. Distinct from matter_name, which is the "
                     "internal short name — it heads every exhibit this matter produces",
     )
+    client_produces_since: Optional[date] = Field(
+        default=None,
+        description="Earliest date OUR client must produce documents for — the look-back in the "
+                    "request opposing counsel served on us. Named for who produces, not who "
+                    "asked: the other way round reads backwards at every call site. Bounds the "
+                    "compliance matrix for accounts we are responsible for",
+    )
+    opposing_produces_since: Optional[date] = Field(
+        default=None,
+        description="Earliest date the OTHER side must produce documents for — the look-back in "
+                    "the request we served on them. Bounds the compliance matrix for accounts "
+                    "they are responsible for",
+    )
     client_alignment: Optional[ClientAlignment] = Field(
         default=None,
         description="Which side our client is on, in caption vocabulary. Titles every exhibit: "

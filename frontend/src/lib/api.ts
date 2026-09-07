@@ -26,6 +26,7 @@ import type {
   StatementReviewResult, StatementRejectResult, AccountDeletePreview,
   UndisclosedReport, ExportFormat, DownloadedFile,
   PayeeClassification, PayeeClassificationPayload, StatementRetryResult,
+  ComplianceMatrix, StatementBoundary,
   FisRequest, FisStatement, FisSetting, FisSettingPayload, FisSchedule,
 } from '../types'
 
@@ -947,6 +948,49 @@ export async function openStatementPdf(statementId: number): Promise<void> {
 export async function retryStatement(statementId: number): Promise<StatementRetryResult> {
   return apiFetch<StatementRetryResult>(`/api/v1/statements/${statementId}/retry`, {
     method: 'POST',
+  })
+}
+
+/**
+ * What the production holds by account and month, and what it does not.
+ *
+ * Derived on demand: producing a missing statement takes it off the report.
+ */
+export async function getComplianceMatrix(
+  matterId: number,
+  side?: 'client' | 'opposing',
+): Promise<ComplianceMatrix> {
+  const query = side ? `?side=${side}` : ''
+  return apiFetch<ComplianceMatrix>(`/api/v1/matters/${matterId}/compliance${query}`)
+}
+
+/**
+ * The compliance matrix as a document — landscape in every format that has an
+ * orientation, because fourteen columns in portrait wrap the Bates numbers.
+ *
+ * `side` names which of the two obligations the exhibit measures. A document
+ * filed with a court almost always wants one named.
+ */
+export async function exportComplianceMatrix(
+  matterId: number,
+  format: ExportFormat,
+  exhibitName: string,
+  side?: 'client' | 'opposing',
+): Promise<DownloadedFile> {
+  return apiDownload(
+    `/api/v1/matters/${matterId}/compliance/export`,
+    { format, exhibit_name: exhibitName, side: side ?? null },
+  )
+}
+
+/** Mark a statement as an account's first, its last, or neither. */
+export async function setStatementBoundary(
+  statementId: number,
+  boundary: StatementBoundary,
+): Promise<AccountStatement> {
+  return apiFetch<AccountStatement>(`/api/v1/statements/${statementId}/boundary`, {
+    method: 'PATCH',
+    body: JSON.stringify({ boundary }),
   })
 }
 

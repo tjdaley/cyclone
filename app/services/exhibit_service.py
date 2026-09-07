@@ -54,6 +54,22 @@ NOTICE = (
 )
 
 
+# The .docx table face. Aptos is Microsoft's current default — a humanist sans
+# that stays legible small, which is what lets twelve months of Bates numbers sit
+# at 9pt without crowding.
+#
+# OOXML HAS NO FONT STACK. A run names exactly one face per script class; there
+# is no CSS-style list to fall through. The nearest thing is `w:altName` in
+# fontTable.xml, which names what to use when the font is missing — Word honours
+# it, LibreOffice reads it, and Google Docs substitutes by its own rules and
+# will likely ignore it. Times New Roman is the fallback because it is present
+# or auto-substituted everywhere (LibreOffice maps it to Liberation Serif), so
+# the worst case is a document that reads plainly rather than one that reflows.
+_DOCX_TABLE_FONT = "Aptos"
+_DOCX_TABLE_FALLBACK = "Times New Roman"
+_DOCX_TABLE_PT = 9
+
+
 # ── The document description ─────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -84,6 +100,24 @@ class Column:
     heading: str
     numeric: bool = False
     money: bool = False
+    center: bool = False
+    """
+    Centre the column in the exhibit formats. No effect on the CSV.
+
+    For a column of marks rather than values. The compliance grid puts an X in
+    a month it holds an unstamped statement for, and a mark hanging off the left
+    edge of a wide cell reads as an accident rather than an entry.
+    """
+    csv_only: bool = False
+    """
+    Carried in the data file, left out of the printed exhibit.
+
+    For a value the exhibit shows some other way. The compliance matrix names
+    its account in a centred title above each grid — repeating it down a column
+    wraps the name and steals width from twelve months — but the CSV has no
+    titles, and a grid whose rows do not say which account they belong to cannot
+    be sorted, filtered, or pivoted. Same data, two presentations.
+    """
 
 
 @dataclass(frozen=True)
@@ -105,6 +139,19 @@ class Row:
     heading: bool = False
     #: A total: ruled off above, and bold.
     rule: bool = False
+    #: Draw as one centred cell spanning the table, rather than as columns.
+    #:
+    #: A title, not a row of data: the compliance matrix puts the account name
+    #: above its grid this way. The CSV skips these entirely — it carries the
+    #: same fact in a `csv_only` column, where it can be sorted on.
+    full_width: bool = False
+    #: Start a fresh page here, in the formats that have pages.
+    #:
+    #: Honoured by the PDF and nowhere else, on purpose. Markdown has no pages,
+    #: and a .docx is edited before it is filed — an author who wants two small
+    #: grids on one sheet should not have to delete a break somebody guessed at.
+    #: The PDF is the one output handed across a counsel table as printed.
+    page_break: bool = False
 
     def __iter__(self):
         return iter(self.cells)
@@ -137,6 +184,20 @@ class Exhibit:
     #: dagger in a cell looks directly below the table for what it means, and a
     #: mark whose explanation is missing is worse than no mark at all.
     footnotes: tuple[str, ...] = ()
+    findings: tuple[tuple[str, str], ...] = ()
+    """
+    What the table is evidence *of*, when that cannot be a row.
+
+    The compliance matrix is the case this exists for: its grid says which
+    months hold a statement, but the thing a motion asks for is the days nothing
+    covers — prose, per account, of no fixed width. A row of a fourteen-column
+    table is the wrong container for a sentence, and a footnote is the wrong
+    weight for the most important content on the page.
+
+    Rendered like `selection` — label, then value — under `findings_title`, and
+    placed directly after the table so it reads as the table's conclusion.
+    """
+    findings_title: str = "Findings"
     sources: tuple[tuple[str, str], ...] = ()
     """
     The documents this exhibit summarizes: ``(filename, Bates range)`` each.
@@ -158,6 +219,22 @@ class Exhibit:
     A property of the document, not of the renderer: a seven-column schedule is
     cramped in portrait whether it is a PDF or a .docx, while a two-column
     statement is wrong sideways in both.
+    """
+    margin_inches: float = 1.0
+    """
+    Page margin for the PDF, on all four sides.
+
+    A property of the document for the same reason ``landscape`` is: an exhibit
+    that does not fit is not fixed by the renderer trying harder. One inch is
+    right for a caption-led table of transactions and wrong for a grid of twelve
+    months — measured, the compliance matrix needs 648pt and one-inch margins on
+    landscape letter leave exactly 648pt, so December falls off the edge by a
+    hair.
+
+    Half an inch is the smallest value worth using. It buys a whole extra
+    column's width, and it stays inside the non-printable border of the copiers
+    and scanners these documents pass through — a quarter inch buys another 36pt
+    and risks losing the edge of the page on any of them.
     """
     show_headers: bool = True
     """
@@ -378,6 +455,18 @@ def money(value: Any) -> str:
     return "%s$%s.%s" % ("-" if negative else "", grouped, cents)
 
 
+def _visible(exhibit: Exhibit) -> list[tuple[int, Column]]:
+    """
+    The columns the printed exhibit draws, with their index into a row's cells.
+
+    The index is what matters: a row always carries every cell, including those
+    only the CSV wants, so a renderer that zipped cells against visible columns
+    would silently shift every value one place left.
+    """
+    return [(index, column) for index, column in enumerate(exhibit.columns)
+            if not column.csv_only]
+
+
 def _cell(value: str, column: Column) -> str:
     """One table cell, formatted for an exhibit rather than for a spreadsheet."""
     return money(value) if column.money else (value or "")
@@ -402,7 +491,12 @@ def to_csv(exhibit: Exhibit) -> bytes:
     writer.writerow([column.heading for column in exhibit.columns])
     # Cells only. Depth is presentation, and leading whitespace in a CSV cell is
     # something every reader then has to strip.
-    writer.writerows(row.cells for row in _as_rows(exhibit.rows))
+    #
+    # A full-width row is skipped outright: it is a title the printed exhibit
+    # draws above a grid, and this file carries the same fact in a column, where
+    # it can be sorted on. Emitting both would put a heading in the middle of
+    # the data and break every filter applied to it.
+    writer.writerows(row.cells for row in _as_rows(exhibit.rows) if not row.full_width)
     return buffer.getvalue().encode("utf-8-sig")
 
 
@@ -426,13 +520,25 @@ def to_markdown(exhibit: Exhibit) -> bytes:
     if exhibit.columns:
         # The separator row is required even when the headings are blank:
         # without it the block is not a table, just lines with pipes in them.
-        headings = [c.heading if exhibit.show_headers else "" for c in exhibit.columns]
+        headings = [c.heading if exhibit.show_headers else ""
+                    for _, c in _visible(exhibit)]
         out.append("| " + " | ".join(headings) + " |")
-        out.append("| " + " | ".join("---:" if c.numeric else "---" for c in exhibit.columns) + " |")
+        out.append("| " + " | ".join(
+            "---:" if c.numeric else ":---:" if c.center else "---"
+            for _, c in _visible(exhibit)) + " |")
         for row in _as_rows(exhibit.rows):
+            visible = _visible(exhibit)
+            if row.full_width:
+                # Markdown tables cannot span columns. The title takes the first
+                # cell with the rest blank — as close as the format gets, and it
+                # still reads as a heading above the grid.
+                out.append("| " + " | ".join(
+                    ["**%s**" % _md_cell(row.cells[0] if row.cells else "")]
+                    + [""] * (len(visible) - 1)) + " |")
+                continue
             cells = [
-                _md_cell(_cell(value, column))
-                for value, column in zip(row.cells, exhibit.columns)
+                _md_cell(_cell(row.cells[index] if index < len(row.cells) else "", column))
+                for index, column in visible
             ]
             if cells:
                 # Non-breaking spaces: a markdown table parser strips ordinary
@@ -443,6 +549,13 @@ def to_markdown(exhibit: Exhibit) -> bytes:
                     if len(cells) > 1 and cells[-1].strip():
                         cells[-1] = "**%s**" % cells[-1]
             out.append("| " + " | ".join(cells) + " |")
+        out.append("")
+
+    if exhibit.findings:
+        out.append("## %s" % exhibit.findings_title)
+        out.append("")
+        for label, value in exhibit.findings:
+            out.append("- **%s:** %s" % (label, value))
         out.append("")
 
     if exhibit.footnotes:
@@ -559,6 +672,59 @@ def _docx_repeat_header(table: Any) -> None:
     properties.append(repeat)
 
 
+def _docx_face(run: Any, bold: bool = False) -> None:
+    """
+    Put one run in the table face.
+
+    Set on all four script classes, not just `run.font.name`. python-docx writes
+    only `w:ascii` and `w:hAnsi`; a cell containing a character Word classes as
+    complex-script or East Asian then renders in the document default, and a
+    single stray glyph in a different face is the kind of thing nobody sees
+    until it is printed.
+    """
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    run.font.name = _DOCX_TABLE_FONT
+    run.font.size = Pt(_DOCX_TABLE_PT)
+    run.bold = bold
+    fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
+    for attribute in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+        fonts.set(qn(attribute), _DOCX_TABLE_FONT)
+
+
+def _docx_declare_font(document: Any) -> None:
+    """
+    Tell a reader without the table face what to use instead.
+
+    OOXML has no font stack. `w:altName` in fontTable.xml is the whole of the
+    fallback mechanism: Word uses it when the named font is missing and
+    LibreOffice reads it too. Google Docs substitutes by its own rules and will
+    probably ignore it, which is why the fallback is a face nobody lacks.
+
+    Written by editing the part directly — python-docx models styles and not the
+    font table — and any failure is swallowed. A missing declaration costs a
+    substitution somebody else picks; a raised exception would cost the export.
+    """
+    try:
+        part = next(p for p in document.part.package.iter_parts()
+                    if "fontTable" in str(p.partname))
+        text = part.blob.decode("utf-8")
+        if _DOCX_TABLE_FONT in text or "</w:fonts>" not in text:
+            return
+        declaration = (
+            '<w:font w:name="%s">'
+            '<w:altName w:val="%s"/>'
+            '<w:charset w:val="00"/>'
+            '<w:family w:val="swiss"/>'
+            '<w:pitch w:val="variable"/>'
+            "</w:font>" % (_DOCX_TABLE_FONT, _DOCX_TABLE_FALLBACK)
+        )
+        part._blob = text.replace("</w:fonts>", declaration + "</w:fonts>").encode("utf-8")
+    except Exception as e:  # noqa: BLE001 — a font hint must never cost the document
+        LOGGER.warning("exhibit_service: could not declare the table font: %s", str(e))
+
+
 def _docx_light_borders(table: Any) -> None:
     """
     Horizontal hairlines only.
@@ -588,6 +754,22 @@ def _docx_light_borders(table: Any) -> None:
     properties.append(borders)
 
 
+def _docx_align(paragraph: Any, column: "Column") -> None:
+    """Set a paragraph to its column's alignment, header cell or data cell.
+
+    Word leaves a paragraph left-aligned unless told otherwise, so a column
+    whose numbers are right-aligned and whose heading is not reads as two
+    columns overlapping. One function, called from both places, is what keeps
+    them from drifting apart again.
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    if column.numeric:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    elif column.center:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
 def to_docx(exhibit: Exhibit) -> bytes:
     """The exhibit as a Word document, caption centred and table ruled."""
     from docx import Document
@@ -604,6 +786,14 @@ def to_docx(exhibit: Exhibit) -> bytes:
         section = document.sections[0]
         section.orientation = WD_ORIENT.LANDSCAPE
         section.page_width, section.page_height = section.page_height, section.page_width
+
+    # Left and right only. Width is what a wide grid runs out of; the top and
+    # bottom stay at Word's inch, where a filing expects them and nothing is
+    # under pressure.
+    if exhibit.margin_inches != 1.0:
+        margins = document.sections[0]
+        margins.left_margin = Inches(exhibit.margin_inches)
+        margins.right_margin = Inches(exhibit.margin_inches)
 
     footer = document.sections[0].footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -624,28 +814,69 @@ def to_docx(exhibit: Exhibit) -> bytes:
             document.add_paragraph()
 
     if exhibit.columns:
-        table = document.add_table(rows=1 if exhibit.show_headers else 0,
-                                   cols=len(exhibit.columns))
-        table.style = "Table Grid"
-        _docx_light_borders(table)
-        if exhibit.show_headers:
-            for cell, column in zip(table.rows[0].cells, exhibit.columns):
-                cell.text = ""
-                run = cell.paragraphs[0].add_run(column.heading)
-                run.bold = True
-            _docx_repeat_header(table)
-        for row in _as_rows(exhibit.rows):
+        visible = _visible(exhibit)
+
+        def start_table():
+            """A fresh grid, with its own repeating header."""
+            fresh = document.add_table(rows=1 if exhibit.show_headers else 0,
+                                       cols=len(visible))
+            fresh.style = "Table Grid"
+            _docx_light_borders(fresh)
+            if exhibit.show_headers:
+                for cell, (_, column) in zip(fresh.rows[0].cells, visible):
+                    cell.text = ""
+                    _docx_face(cell.paragraphs[0].add_run(column.heading), bold=True)
+                    # THE HEADING FOLLOWS ITS COLUMN. A centred X sitting under a
+                    # left-hugging "Feb" reads as belonging to the month before
+                    # it, which on a grid whose whole content is position is the
+                    # one mistake it cannot afford. Markdown and the PDF have
+                    # always aligned the two together; only Word did not.
+                    _docx_align(cell.paragraphs[0], column)
+                _docx_repeat_header(fresh)
+            return fresh
+
+        # A FULL-WIDTH ROW ENDS ONE TABLE AND BEGINS ANOTHER, rather than
+        # spanning inside a single one. Word repeats a header row across a
+        # *natural* page break and not across a manual one, so an author who
+        # splits a long table where they want it loses the month names for every
+        # page after — which is the whole reason to break it there. One table
+        # per account gives them the break for free, and each grid keeps its own
+        # repeating header if it is tall enough to need it.
+        _docx_declare_font(document)
+        drawn_rows = _as_rows(exhibit.rows)
+        opens_with_title = bool(drawn_rows) and drawn_rows[0].full_width
+        table = None if opens_with_title else start_table()
+
+        for row in drawn_rows:
+            if row.full_width:
+                if table is not None:
+                    document.add_paragraph()
+                heading = document.add_paragraph()
+                heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                heading.add_run(row.cells[0] if row.cells else "").bold = True
+                table = None
+                continue
+            if table is None:
+                table = start_table()
             cells = table.add_row().cells
-            for index, (cell, value, column) in enumerate(
-                    zip(cells, row.cells, exhibit.columns)):
+            for position, (cell, (index, column)) in enumerate(zip(cells, visible)):
                 cell.text = ""
                 paragraph = cell.paragraphs[0]
-                drawn = paragraph.add_run(_cell(value, column))
-                drawn.bold = row.heading or row.rule
-                if index == 0 and row.depth:
+                value = row.cells[index] if index < len(row.cells) else ""
+                _docx_face(paragraph.add_run(_cell(value, column)),
+                           bold=row.heading or row.rule)
+                if position == 0 and row.depth:
                     paragraph.paragraph_format.left_indent = Inches(0.2 * row.depth)
-                if column.numeric:
-                    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                _docx_align(paragraph, column)
+        document.add_paragraph()
+
+    if exhibit.findings:
+        heading = document.add_paragraph()
+        heading.add_run(exhibit.findings_title).bold = True
+        for label, value in exhibit.findings:
+            paragraph = document.add_paragraph(style="List Bullet")
+            paragraph.add_run("%s: " % label).bold = True
+            paragraph.add_run(value)
         document.add_paragraph()
 
     for note in exhibit.footnotes:
@@ -697,6 +928,9 @@ _PDF_STYLE = ("<style>"
               "th,td{border:0;border-bottom:0.5px solid #d8d8d8;padding:3.5px 4px;"
               "font-size:8.5pt;text-align:left}"
               "th{border-bottom:1px solid #999;font-weight:bold}"
+              "td.c,th.c{text-align:center}"
+              "td.t{text-align:center;font-weight:bold;font-size:9.5pt;"
+              "padding-top:7px;border-bottom:1px solid #999}"
               "td.n,th.n{text-align:right}"
               "td.r{border-top:1px solid #666;border-bottom:0}"
               "p{margin:2pt 0}"
@@ -741,26 +975,44 @@ def _pdf_header_row(exhibit: Exhibit) -> str:
     if not exhibit.show_headers:
         return ""
     return "<tr>%s</tr>" % "".join(
-        '<th class="n">%s</th>' % _esc(c.heading) if c.numeric else "<th>%s</th>" % _esc(c.heading)
-        for c in exhibit.columns
+        '<th class="%s">%s</th>' % ("n" if c.numeric else "c" if c.center else "",
+                                    _esc(c.heading))
+        for _, c in _visible(exhibit)
     )
 
 
-def _pdf_rows(exhibit: Exhibit) -> list[str]:
-    rows = []
+def _pdf_rows(exhibit: Exhibit) -> list[tuple[str, bool, bool]]:
+    """
+    The table rows as ``(markup, starts_a_page, is_a_title)``.
+
+    The flags travel with the markup because by the time the paging loop sees a
+    row it is a bare string: the loop still needs to know where it may not cut,
+    and which rows are titles that belong above a header rather than below it.
+    """
+    rows: list[tuple[str, bool, bool]] = []
     for row in _as_rows(exhibit.rows):
+        visible = _visible(exhibit)
+        if row.full_width:
+            # One centred cell spanning the grid: the account's name as a title
+            # over its own table, rather than a column repeated down every year
+            # row where it wraps and steals width from twelve months.
+            rows.append(('<tr><td class="t" colspan="%d">%s</td></tr>'
+                         % (len(visible), _esc(row.cells[0] if row.cells else "")),
+                         row.page_break, True))
+            continue
         drawn = []
-        for index, (value, column) in enumerate(zip(row.cells, exhibit.columns)):
+        for position, (index, column) in enumerate(visible):
+            value = row.cells[index] if index < len(row.cells) else ""
             text = _esc(_cell(value, column))
             if row.heading or row.rule:
                 text = "<b>%s</b>" % text
-            classes = "n" if column.numeric else ""
+            classes = "n" if column.numeric else "c" if column.center else ""
             if row.rule:
                 classes = (classes + " r").strip()
             style = (' style="padding-left:%dpt"' % (4 + row.depth * 12)
-                     if index == 0 and row.depth else "")
+                     if position == 0 and row.depth else "")
             drawn.append('<td class="%s"%s>%s</td>' % (classes, style, text))
-        rows.append("<tr>%s</tr>" % "".join(drawn))
+        rows.append(("<tr>%s</tr>" % "".join(drawn), row.page_break, False))
     return rows
 
 
@@ -786,8 +1038,9 @@ def to_pdf(exhibit: Exhibit) -> bytes:
     import pymupdf
 
     page_rect = pymupdf.paper_rect("letter-l" if exhibit.landscape else "letter")
-    # One-inch margins, with the bottom pulled up to leave the footer its band.
-    content = page_rect + (72, 72, -72, -90)
+    # The bottom is pulled up a further 18pt to leave the footer its band.
+    margin = max(18.0, exhibit.margin_inches * 72)
+    content = page_rect + (margin, margin, -margin, -(margin + 18))
     header = _pdf_header_row(exhibit)
     rows = _pdf_rows(exhibit)
 
@@ -824,8 +1077,16 @@ def to_pdf(exhibit: Exhibit) -> bytes:
         """place() reports the filled area as a plain (x0, y0, x1, y1) tuple."""
         return float(filled[3])
 
-    def fits(batch: list[str], rect: Any):
-        story = pymupdf.Story(html=_PDF_STYLE + "<table>" + header + "".join(batch) + "</table>")
+    def fits(batch: list[tuple[str, bool, bool]], rect: Any):
+        # A TITLE LEADING A CHUNK GOES ABOVE THE HEADER, NOT BELOW IT. The
+        # header is re-emitted on every page, so a title left in row order sits
+        # under the month names — the account it names reads as though it were
+        # part of the data rather than the caption of the grid.
+        lead, body = "", batch
+        if batch and batch[0][2]:
+            lead, body = batch[0][0], batch[1:]
+        markup = "<table>" + lead + header + "".join(m for m, _, _ in body) + "</table>"
+        story = pymupdf.Story(html=_PDF_STYLE + markup)
         more, filled = story.place(rect)
         return (not more), story, filled
 
@@ -841,12 +1102,23 @@ def to_pdf(exhibit: Exhibit) -> bytes:
             writer.end_page()
             begin()
 
-        count = min(len(pending), guess)
+        # THE BATCH MAY NOT CROSS A PAGE BREAK. A row that asks to start a page
+        # caps how far this one can run, so the fit search below never proposes
+        # a batch spanning two grids — a compliance matrix is read one account
+        # at a time across a counsel table, and an account split over a fold is
+        # the one thing the grid must not do.
+        limit = len(pending)
+        for index in range(1, len(pending)):
+            if pending[index][1]:
+                limit = index
+                break
+
+        count = min(limit, guess)
         ok, story, filled = fits(pending[:count], remaining())
         while not ok and count > 1:
             count = max(1, int(count * 0.85))
             ok, story, filled = fits(pending[:count], remaining())
-        while count < len(pending):
+        while count < limit:
             grown_ok, grown, grown_filled = fits(pending[:count + 1], remaining())
             if not grown_ok:
                 break
@@ -864,6 +1136,14 @@ def to_pdf(exhibit: Exhibit) -> bytes:
         pending = pending[count:]
         guess = max(5, count)
 
+        # The next grid begins. Give it the page it asked for.
+        if pending and pending[0][1]:
+            writer.end_page()
+            begin()
+
+    # Findings before the footnotes: they are the table's conclusion, and the
+    # footnotes only explain the marks inside it.
+    flow(_pdf_list(exhibit.findings_title, exhibit.findings))
     for note in exhibit.footnotes:
         flow('<p class="notice">%s</p>' % _esc(note))
     flow(_pdf_list("Totals", exhibit.summary))
@@ -873,15 +1153,19 @@ def to_pdf(exhibit: Exhibit) -> bytes:
     writer.end_page()
     writer.close()
 
-    return _stamp_page_numbers(buffer.getvalue())
+    return _stamp_page_numbers(buffer.getvalue(), margin)
 
 
-def _stamp_page_numbers(pdf_bytes: bytes) -> bytes:
+def _stamp_page_numbers(pdf_bytes: bytes, margin: float = 72.0) -> bytes:
     """
     Write "Page N of M" centred in the footer band of every page.
 
     Done after layout because M is not known until then — the same reason Word
     stores a NUMPAGES field rather than a number.
+
+    The baseline follows the margin rather than sitting at a fixed height: the
+    footer band is the 18pt strip below the content, and at half-inch margins a
+    number hard-coded 50pt from the foot lands back inside the table.
     """
     import pymupdf
 
@@ -892,7 +1176,7 @@ def _stamp_page_numbers(pdf_bytes: bytes) -> bytes:
             label = "Page %d of %d" % (index, total)
             width = pymupdf.get_text_length(label, fontname="helv", fontsize=9)
             page.insert_text(
-                ((page.rect.width - width) / 2, page.rect.height - 50),
+                ((page.rect.width - width) / 2, page.rect.height - margin - 5),
                 label, fontname="helv", fontsize=9, color=(0.2, 0.2, 0.2),
             )
         return document.tobytes()
