@@ -34,11 +34,18 @@ cyclone/
 │   │   ├── settings.py            # Settings(BaseSettings) singleton — see §5
 │   │   ├── llm_profiles.py        # Loads/resolves the profile catalog — see §11
 │   │   ├── schema_check.py        # Startup diff of live columns vs models — see §15
+│   │   ├── config_spec.py         # What each setting IS: fleet / secret / per-firm / per-node
+│   │   ├── config_fingerprint.py  # The fleet hash — see §5a
+│   │   ├── secret_source.py       # Secrets from SSM under an instance role — see §5a
 │   │   ├── redis_client.py        # claim_once / lock — fleet coordination
 │   │   └── loggerfactory.py       # LoggerFactory — see §6
 │   ├── middleware/
 │   │   └── auth_middleware.py     # JWT validation via JWKS (ES256); injects uid/role/email
-│   ├── db/
+│   ├── config/                        # COMMITTED, non-secret. fleet.env + environments/ — see §5a
+├── scripts/
+│   └── check-fleet.sh             # Do these nodes agree? curl + diff, no SSH
+│   └── seed_ssm.py                # Push .env secrets to SSM; dry-run by default
+├── db/
 │   │   ├── models/                # Pydantic domain + InDB models — see §8
 │   │   │                          # One file per domain: staff, client, matter, billing_*,
 │   │   │                          #   trust_ledger, fee_agreement, matter_event, discovery,
@@ -133,6 +140,7 @@ cyclone/
 │       ├── 034_statement_boundary.sql    # statements.boundary — opening/closing/intermediate
 │       ├── 035_production_scope.sql      # matters.*_produces_since; accounts.production_responsibility
 │       ├── 036_value_platforms.sql      # custodian rulings; holds[]; crypto account type; BNPL + platform seeds
+│       ├── 037_brokerage_cash_flow.sql   # investment categories + rules; statements.portfolio_summary
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -220,6 +228,141 @@ from app.util.settings import settings
 
 ---
 
+---
+
+## 5a. Configuration Layers & Drift (`config_spec`, `config_fingerprint`, `secret_source`)
+
+Two servers' `.env` files drifted and it was found **by luck**. Storage was
+never the problem — *editing* was. While the way to change a setting is "SSH in,
+edit the file, restart the containers", two nodes agree only for as long as
+nobody makes a mistake, and nothing anywhere reports when somebody does.
+
+### Every setting belongs to exactly one layer
+
+`util/config_spec.py` is the single source of truth, and
+`tests/test_config_fingerprint.py` fails if a `Settings` field is unclassified
+or in two buckets. **A setting added without a decision about what it is cannot
+ship.**
+
+| Bucket | Means | Fingerprinted? |
+| ------ | ----- | -------------- |
+| `FLEET` | Identical on every node. Model sampling, intervals, timeouts. **Silent drift lives here.** | ✅ |
+| `SECRET` | Credentials. Hashed by value digest, never by value. | ✅ |
+| `PER_FIRM` | Becomes a `firms` row when a second firm is real. | ✅ |
+| `INFRASTRUCTURE` | Differs per node on purpose — `id`, `host_url`, URLs. | ❌ |
+| `COMPOSE_ONLY` | Read by docker-compose, not the app. | ❌ |
+| `DEPRECATED` | Dead; warned about at startup. | ❌ |
+
+- **The fingerprint covers only what SHOULD match, and that is the whole design.**
+  A hash over `id` would differ between any two machines forever, on purpose —
+  a drift report that always fires is one nobody reads.
+- **A secret is compared, never revealed.** Each contributes `sha256(value)[:12]`.
+  An unset one contributes `<unset>`, deliberately distinct: "both nodes have no
+  Stripe key" and "both hold the same Stripe key" are different states and the
+  first is the dangerous one.
+- **The public summary is a hash and three counts**, on the unauthenticated
+  `GET /api/config` — unauthenticated precisely so nothing stands between
+  somebody and running the check. The breakdown naming *which* setting differs
+  is `GET /api/v1/config/fingerprint`, behind auth: the set of digests is an
+  inventory of what a node holds, and a map is worth a login.
+- `scripts/check-fleet.sh https://a https://b` is the operational form. Exit 0
+  agreed, 1 drift, **2 unreachable** — a node that is down is a different fact
+  from a node that disagrees, and collapsing them lets an outage read as "all
+  clear".
+- **"In use" means somebody set it, not that it holds a value.** `db_type`
+  defaults to `"supabase"`, so testing the value reported it on every node
+  forever. `model_fields_set` is the question being asked.
+
+### `.env.example` is TESTED, because it was broken
+
+`Settings` sets `extra = "forbid"`, and the example listed `SUPABASE_JWT_SECRET`
+and `SUPABASE_ANON_JWT_SECRET` — **not fields at all**. A node provisioned from
+it died on import. Every numeric line was also written blank, and an empty
+string is not a float. The document whose whole job was preventing
+configuration mistakes was one.
+
+The test now builds a `Settings` from the file itself, and asserts every
+credential appears in it. Two line shapes: `NAME=` must be filled in,
+`# NAME=value` documents an optional default. Non-string settings are always the
+commented shape.
+
+**`API_BASE_URL` was a live trap of the same kind**: `docker-compose.yml`
+referenced `${API_BASE_URL}` and nothing declared it, so anyone who set it would
+have stopped the API container booting. It is now a `COMPOSE_ONLY` field.
+
+### Config is a build artifact, not server state
+
+`docker-compose.yml` lists three env files and **later ones win**:
+
+1. `config/fleet.env` — committed, identical everywhere
+2. `config/environments/<env>.env` — committed, non-secret
+3. `.env` — per-node identity and secrets only
+
+A node *can* override a fleet value in its own `.env`, and doing so shows up
+immediately as a different `fleet_hash`. The override is not forbidden —
+sometimes it is needed at 2am — it is merely impossible to do quietly.
+
+### Secrets: SSM under an instance role
+
+`util/secret_source.py`, opt-in via `CYCLONE_SECRETS_SOURCE=ssm`.
+
+- **This is the one thing neither Supabase option could do.** Edge Function
+  secrets are readable only by `Deno.env.get()` on Supabase's infrastructure;
+  Vault is reachable but needs the service-role key to read, so the bootstrap
+  secret remains — and becomes a master key opening both the database and every
+  downstream credential, which are two independent compromises today. **On EC2
+  the instance identity IS the credential.**
+- **The environment name is not typed by a human.** A `CONFIG_SET=production-a`
+  line recreates the problem it solves: the same drift surface, one line instead
+  of forty-eight, and *harder* to diagnose, because two files can be diffed
+  while a central store keyed on a typed identifier hides disagreement until
+  behaviour differs. The name comes from the **EC2 instance tag**
+  (`cyclone:environment`) via IMDS, set by provisioning at launch. `CYCLONE_ENV`
+  is the escape hatch for a laptop, and the tag beats it — letting the variable
+  win would put the typo back where it was removed from.
+- **Nothing already in the environment is overwritten**, which makes the rollout
+  reversible in both directions.
+- **The region is resolved here and passed as `region_name`.** `AWS_REGION` was
+  set in `.env`, reached the process, and `boto3.client("ssm")` still raised
+  `NoRegionError` — botocore's own list of region variables is a detail of
+  whichever version is pinned, and a container that starts or does not start
+  must not turn on that. `AWS_REGION`, then `AWS_DEFAULT_REGION`, then IMDS
+  `placement/region` (the same argument as the tag: the instance knows where it
+  is). Nothing resolvable raises rather than guessing — a wrong region reads a
+  path that does not exist there and reports an empty environment, which is
+  indistinguishable from a correct empty load.
+- **An unreadable SSM raises rather than booting half-configured.** A worker
+  with no Anthropic key does not fail; it silently produces nothing.
+- It must run **above** `settings = Settings()` in `util/settings.py` — the only
+  point the API, the worker and the tests all share. `secret_source` therefore
+  builds its logger **lazily**: importing `LoggerFactory` at module scope closes
+  the loop `settings → secret_source → loggerfactory → settings`.
+
+### The Supabase key deadline
+
+**Supabase retires the legacy `anon` / `service_role` JWT keys at the end of
+2026.** Startup logs a warning with days remaining for any key still in that
+format, detected by the format itself rather than a flag somebody must set —
+so a node that was missed reports itself. It becomes an ERROR once overdue.
+
+The migration is a change of **value in the same variable**, not a rename:
+`db_handler`'s `SupabaseManager` reads `os.environ["SUPABASE_SERVICE_ROLE_KEY"]`
+itself and is third-party, and nothing here parses an API key as a JWT (the only
+`jwt.decode` verifies *user* tokens against JWKS). A second field naming the
+same credential would be two places for the fleet to disagree about which is
+live. Both key systems run in parallel, so the swap is reversible — and secret
+keys are revocable individually, where rotating `service_role` today means
+rotating the project JWT secret and logging every user out.
+
+The swap itself is `docs/supabase-key-migration.md`: keys live under
+**Settings → API Keys** (there is no longer a *Settings → API* page), there are
+**two projects** to do, and the frontend must be **rebuilt** because the anon
+key is a docker build arg compiled into the bundle.
+
+Covered by `tests/test_config_fingerprint.py`. The AWS side — parameters, IAM
+policy, instance role, metadata options, cutover and rollback — is
+`docs/aws-ssm-setup.md`.
+
 ## 6. Logging (`app/util/loggerfactory.py`)
 
 ### Usage — Required Pattern
@@ -244,6 +387,19 @@ LOGGER = LoggerFactory.create_logger(__name__)
 - **No PII in log messages.** Never log client names, financial amounts, SSNs, case facts, or attorney-client communications. Reference records by database ID only.
 - Log level defaults to `settings.log_level` unless overridden at logger creation.
 - `LoggerFactory` sets `propagate = False` — do not set it again.
+- **A module imported by `util.settings` cannot log through the factory,** and a
+  lazy import does not fix it. `util/loggerfactory.py` line 6 imports `settings`
+  for the level, so the ordinary path into configuration is
+  `loggerfactory → settings → <that module>`: by the time the module wants to
+  log, `util.loggerfactory` is in `sys.modules` with `LoggerFactory` **not yet
+  bound**, and `from util.loggerfactory import LoggerFactory` raises
+  `ImportError` instead of recursing. Deferring the import to call time moves
+  the failure without removing it — it breaks the cycle at module scope and does
+  nothing for a call made from inside the cycle. `util/secret_source.py` shows
+  the pattern: try the factory, fall back to a logger-shaped object writing to
+  stderr, and **cache only the real one** so later calls go through the factory
+  like everything else. This crashed the worker in production; see
+  `tests/test_secret_source_bootstrap.py`.
 
 ### Log Levels
 
@@ -394,6 +550,24 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
 - **Chain order is measured, not priced.** The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI complete and correct, Gemini good but stopped at 200 entries, DeepSeek lost and mis-stated amounts and invented JSON keys. `default` and `vision` therefore run Claude → OpenAI → Gemini. **DeepSeek is in no chain and must not be added to one that touches evidence.**
 - **`complete_detailed()` returns `LLMResult`** — the text plus the vendor, model, and how many candidates were tried. Use it wherever the answer becomes part of a record that has to say how it was produced. `complete()` still returns a bare string and is right everywhere else. The profile name says what was *asked for*; it cannot say who answered, and on a long statement read in passes it cannot even be one answer — the chain is walked independently per call, so a single document can be part Claude and part OpenAI.
 - **Vendor SDKs drift, and the failover hides it.** Any exception fails the candidate over with a `WARNING` — including a crash in *our own* parsing, which then reads as "the vendor refused". Two of these ran for a whole session: `response.content[0].text` on Anthropic breaks the moment a model returns extended thinking, because the opening block is a `ThinkingBlock` with no `text` (use `_anthropic_text`, which selects blocks by type); and OpenAI's `chat.completions` no longer accepts `max_tokens`. **When one vendor is always serving, suspect the ones ahead of it in the chain rather than assuming they are down.**
+- **A SAFETY REFUSAL IS NOT A CAPABILITY GAP, AND GEMINI REFUSES THIS FIRM'S
+  ORDINARY EVIDENCE.** Gemini's content filters decline material describing
+  crimes against minors — which in family law is not an edge case but a normal
+  Tuesday: a petition alleging abuse, a protective-order affidavit, a CPS
+  record, an expert report. The document is not unusual; it is the case. This
+  is a second, independent reason Gemini sits **last** in `default` and
+  `vision`, alongside the measured-accuracy argument, and a reason never to
+  promote it.
+- **It presented as an intermittent bug, and that is the lesson.** Two nodes
+  had drifted to different model configuration back when models were named in
+  `.env`, so a pleading was read by Anthropic on one server and Gemini on the
+  other — and which one answered depended on where the load balancer sent the
+  request. The same document processed, then did not, then did. Nobody looks
+  for a configuration difference when the symptom is intermittent; they look
+  for a race, a timeout, a bad PDF. **Model identity must be per-fleet
+  configuration or it produces bugs that cannot be reproduced**, which is why
+  chains live in `app/config/llm_profiles.json` inside the image and not in any
+  environment file: two nodes on the same image tag cannot disagree. See §5a.
 - **Failover:** the first candidate is tried; on *any* failure — network, quota, auth, API error, or an empty response — the service logs a `WARNING` and moves to the next candidate. No same-candidate retry. Chain exhausted → `LLMUnavailableError` (a `RuntimeError`).
 - **An unknown profile name raises `LLMUnavailableError`** listing the known names. Profile names are config; a typo must not silently run on some other model.
 - Candidates whose vendor has no API key, or that can't serve the call type (vision), are **skipped without being called**.
@@ -576,6 +750,84 @@ partial loss beats a silent total one. **The response is never logged** — it i
 a register of transactions, and §6 forbids amounts and payee names in logs; the
 error position and response length distinguish a truncation from a bad escape,
 and the text is recoverable from provenance.
+
+**A brokerage statement is read for cash flow, not for trades.** A stock
+purchase exchanges $8,500 of cash for $8,500 of shares inside one account and
+leaves it worth what it was a second earlier — nothing entered the marital
+estate and nothing left it. The same is true of a sale, a redemption, a
+maturity, an exchange, a reinvestment purchase and a split. So on a `brokerage`
+or `retirement` account those are **not extracted at all**, and what is
+extracted is money that crossed the account boundary: transfers and wires in,
+securities transferred in kind, dividends and capital-gain distributions
+(whether paid in cash or reinvested — the dividend added value, the purchase
+that spent it is the part that nets to nothing), interest, wires/ACH/checks out,
+margin interest and fees. A fifty-line register becomes five, which is the
+point: this project traces sources and uses of cash.
+
+- **The omission is counted and recorded** (`SECURITIES_NOT_EXTRACTED`, info,
+  with the number). A brokerage register showing four lines where the statement
+  shows fifty looks exactly like a failed import; the count is what says the
+  silence was deliberate.
+- **Balances on these accounts are the TOTAL ACCOUNT VALUE** — cash plus
+  securities, from the portfolio summary — never the cash or sweep balance. The
+  cash balance cannot tie against this extraction, because the purchases that
+  turned cash into securities are deliberately absent from it. Both prompts say
+  so; a model left to itself reports the sweep balance.
+- **Change in market value is a LINE, not a column**, and that keeps
+  `beginning + sum(amounts) == ending` true for brokerage as for everything
+  else. No second reconciliation path exists.
+- **But it is only ever the figure the statement PRINTS.** Computing it as
+  closing minus opening minus everything else is forbidden in both prompts and
+  explained there: that number always makes the statement balance, so it would
+  conceal a missing $50,000 wire instead of revealing it — a statement stamped
+  `reconciled = true` that is silently short. Where no such figure is printed
+  the line is omitted, the statement does not tie, and
+  `MARKET_CHANGE_NOT_PRINTED` (info) says which of the two is missing. **A
+  statement that will not reconcile is a statement a person looks at, which is
+  the correct outcome.** This is the same rule as *never invent a row to make a
+  statement reconcile*; a printed figure copied off the page is evidence, a plug
+  computed to close a gap is not, and the distinction is whether the number
+  exists on the document.
+- **`portfolio_summary` is the second source, and it is not optional.** Because
+  market change enters as a line, the ordinary check closes whatever that line
+  says. So the statement's own change-in-value block — opening value, additions,
+  withdrawals, income, change in value, closing value — is stored beside the
+  extraction and the flows are compared against it (`_portfolio_findings`). If
+  the summary prints withdrawals of $51,000 and $1,000 was extracted, that is
+  caught even though the arithmetic ties. Same two-source argument as
+  `_completeness_findings`, and short-only for the same reason.
+- **The bank-shaped completeness check is NOT applied to these accounts.** Its
+  printed counts describe every row including the fifty trades, so it would
+  report a shortfall on every brokerage statement — and a warning that is always
+  on is a warning nobody reads.
+- **Dividends and interest are income. Unrealized gain and loss COUNTS, but not
+  as income.** 037 files Dividend Income and Capital Gain Distribution under
+  `Income`, and Margin Interest under `Debt Payments`; Interest Income and
+  Brokerage Fees already existed and are reused rather than duplicated. Change
+  in market value lands on **`Investment Gain/Loss` under `Other`, on the FIS**
+  (139), with an off-FIS twin `Investment Gain/Loss (not on FIS)` (140) under
+  `Non-Income Investment Activity` for a matter where that is the wrong call —
+  the pairing the firm already uses for Credit Card Payments and Reimbursement.
+  **Both already exist**, built by hand; 037 lists them so a fresh database ends
+  up with the same chart, and skips them here. Spelling them "Unrealized" would
+  have satisfied the file's own NOT EXISTS guard and created a second pair —
+  the quiet version of the id bug below, and the reason the seed test pins the
+  names as well as the parents.
+- **Why on the FIS but outside Income, which is Tom's call and the right one.**
+  It is not net resources under Tex. Fam. Code 154.062(b), and **child support
+  exhibits are built from the `Income` parent**, so it can never reach a support
+  figure. But a party moving $5,000 a month into a brokerage account while
+  accumulating $4,000 a month of unrealized losses is depleting the marital
+  estate, and a report that cannot see that has a money sink off its radar. The
+  separation of concerns is the chart's, not the code's: the subtree a report
+  reads is what decides whether a figure counts.
+- **KNOWN GAP:** a large liquidation that stays in cash inside the account
+  produces no line, because no value crossed the boundary. That is correct for
+  cash-flow tracing and is worth knowing anyway — selling everything the week
+  before filing is usually the prelude to a transfer, and only the transfer
+  shows up here.
+
+Covered by `tests/test_brokerage_cash_flow.py`.
 
 **One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements overlap by more than a single
 boundary page, or share one while naming different institutions. **A shared page
@@ -1540,6 +1792,23 @@ docker compose -f docker-compose.yml up -d    # Production: frontend on :8094, A
 - Healthchecks: API uses `python urllib` against `/api/health`; frontend uses `wget --spider` against `http://127.0.0.1:80/` (must use IPv4 literal, not `localhost`, due to Alpine's IPv6-first resolution)
 - nginx has `proxy_read_timeout 300s` for API calls and `client_max_body_size 50m` for large PDF uploads
 - **haproxy sits in front of nginx and is the real request-duration limit.** Its `timeout server` is shorter than nginx's 300s, so a slow endpoint returns haproxy's own 504 page ("The server didn't respond in time") with nothing in the API log — the request was still running. This is why long work goes through the job queue (§11a). Recognizing whose 504 you have matters: nginx stamps `nginx/<version>` in its error page, haproxy does not.
+- **A seed written after 024 must not name a category id.** 024 seeded the chart
+  with explicit ids; the firm then built the rest of it by hand in the app, so
+  by 037 ids 18-27 were Telephone, HOA Dues, Property Insurance, Household
+  Expenses, Groceries, Supplies, Security Monitoring, Housekeeping,
+  Lawn/Landscaping and Pool. 037's first draft claimed those ids for investment
+  categories: the category inserts would have been skipped harmlessly by
+  `ON CONFLICT`, but its keyword rules named the same ids as **literals**, so
+  every dividend would have been filed under Telephone and every margin interest
+  charge under Housekeeping — firm-wide, silently, into a chart that feeds a
+  sworn document. Resolve by description (`where c.description = ... and
+  c.parent_id is null` for a parent, because "Other", "Transportation",
+  "Miscellaneous" and "Insurance" all appear more than once), skip a rule whose
+  target does not resolve rather than inserting a null, and make the file
+  **repair its own earlier version** — 037 deletes the draft's rules by their
+  exact note strings, so running it on a database that never saw the draft is a
+  no-op and running it on one that did fixes it. Guarded by
+  `tests/test_migration_seeds.py`, which reads the SQL and rejects a literal id.
 - **Migrations are run by hand, in numeric order.** `run_all.sql` only covers `001–005`. When a change needs DDL, name the migration file explicitly so it can be run before the deploy.
 
 ### Running without Docker
@@ -1605,6 +1874,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Lead → client + matter promotion, and linking an existing client | ✅ Built (`converted_to_client_id` / `converted_to_matter_id` now written) |
 | Background job queue (`jobs` table + worker) | ✅ Built — matter intake and statement ingest; see §11a |
 | Account statement ingestion (bank/brokerage/card) | ✅ Built — queued, reconciles itself, exceptions queue |
+| Brokerage statements read for cash flow only | ✅ Built — 037. Trades omitted and counted; change in market value taken from the printed figure and never derived; the statement's own portfolio summary is the independent check. Unrealized gain/loss counts on the FIS, outside `Income`, so it never reaches a support figure |
 | Transaction categories (FIS chart of accounts) | ✅ Built — firm-wide hierarchy, seeded by 024 |
 | Transaction tags (Rule 1006 exhibits) | ✅ Built — firm-wide + per-matter layers, bulk apply, create/edit/retire/delete UI |
 | Transaction search (account/date/category/tag/text) | ✅ Built — `POST /matters/{id}/transactions/search` |
@@ -1644,6 +1914,11 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Large-transaction query (dollar threshold) | ❌ Not started |
 | Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
+| Config drift detection across the fleet | ✅ Built — every node publishes a `fleet_hash` on `GET /api/config`; `scripts/check-fleet.sh` diffs them with no SSH and no credential |
+| Config as a versioned build artifact | ✅ Built — `config/fleet.env` + `config/environments/` committed, layered under the node's `.env` by compose |
+| Secrets from SSM under an IAM instance role | ✅ Built, opt-in — `CYCLONE_SECRETS_SOURCE=ssm`. Path from the EC2 instance tag, so no bootstrap credential and nothing to typo |
+| Supabase legacy key migration | ⏳ Code is ready and format-agnostic; startup warns with days remaining. **The key swap itself is a dashboard + .env change, deadline end of 2026** |
+| Per-firm settings in a `firms` table | ❌ Not started — `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT` are classified `PER_FIRM` and still served per process from `/api/config`. The multi-tenant blocker |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
 | Conflict checking | ⏳ Done manually **outside** Cyclone today. Planned home: at the `leads` table, so every promoted client has passed it. `conflict_check_run` already exists in the lead action enum |
@@ -1749,6 +2024,9 @@ Three things to get right when it is built:
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Backend | Never expose to frontend |
 | `STRIPE_PUBLISHABLE_KEY` | Backend → `/api/config` → Frontend | |
 | `LOG_LEVEL` | Backend | Default: WARNING |
+| `CYCLONE_SECRETS_SOURCE` | Backend + Worker | `ssm` turns on SSM loading (`util/secret_source.py`). Anything else reads `.env` as before |
+| `CYCLONE_ENV` | Backend + Worker | Environment name for anything not on EC2. On EC2 it comes from the `cyclone:environment` instance tag, which wins — nobody types it |
+| `API_BASE_URL` | docker-compose | Frontend build arg. Declared as a Settings field only so `extra = "forbid"` does not refuse the line |
 | `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_BASE_URL` | Frontend build | Baked in at build time via Docker `args` |
 
 `.env.example` must be kept current. Every new env var must appear in `.env.example` in the same commit.
@@ -1761,6 +2039,8 @@ Three things to get right when it is built:
 | ------- | ----------- |
 | Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |
 | Call `logging.getLogger()` directly | `LoggerFactory.create_logger(__name__)` |
+| Fix a logging import cycle with a lazy import alone | It breaks the cycle at module scope and not inside it. A module reached *through* `loggerfactory` still gets `ImportError` from a partially initialized module. Fall back to stderr and cache only the real logger |
+| Return None from a lookup with three different causes | "requests missing", "IMDS unreachable" and "tag not set" read identically in the log and have three different fixes. Name which one happened |
 | Instantiate `Settings()` in app code | `from util.settings import settings` |
 | Call `supabase.create_client()` outside `supabasemanager.py` | Use a repository class |
 | Call `supabase.storage` outside `storage_service.py` | Use `StorageService` |
@@ -1805,6 +2085,8 @@ Three things to get right when it is built:
 | Ask the model for a Bates number when a series was detected | The pattern owns the field — the model's value is discarded, not used as a fallback |
 | Derive a statement's page range from its transactions | Use the span. A worksheet or disclosures page carries no lines and is not missing |
 | Put a cheap model on an extraction that becomes evidence | Chain order here is measured accuracy. A model that invents JSON keys and mis-states amounts costs more than it saves |
+| Promote Gemini in a chain that reads pleadings or affidavits | Its filters decline descriptions of crimes against minors — routine family-law evidence. It belongs last, and the refusal is invisible: failover just serves the next model |
+| Name a model or vendor anywhere a node can differ | Two nodes on different model config made one document process and then not, by load-balancer luck. Chains live in the image (`llm_profiles.json`) |
 | Record only the profile name as an extraction's provenance | A chain has several vendors and a chunked read can use more than one. Use `complete_detailed()` and keep the per-pass record |
 | Index into `response.content[0]` on an Anthropic reply | Extended thinking puts a `ThinkingBlock` first. Select by block type — `_anthropic_text` |
 | Test an Anthropic model family with `"-5" in model` | That matches `claude-haiku-4-5-…` too, and silently drops `temperature` on tasks that ask for 0.0. Use `_anthropic_takes_temperature` |
@@ -1823,6 +2105,16 @@ Three things to get right when it is built:
 | Interpolate a value into a caption before parsing its markup | The value gets read as markup — a blank rule of underscores becomes an underline marker. Parse, then substitute |
 | Print "None" onto a caption a matter cannot fill | Print the blank rule and return a warning. The attorney wants numbers before a cause number exists |
 | Hardcode the caption in a renderer | It is a template (`_SYSTEM_CAPTION`). Firms disagree about wording, never about how .docx stores bold |
+| Name a category id in a migration written after 024 | The firm edits that chart daily. 037's draft would have filed dividends under Telephone. Resolve by description |
+| Look up a parent category by description alone | "Other", "Transportation", "Miscellaneous" and "Insurance" each appear more than once. Add `parent_id is null` |
+| Create a category a chart already has under another parent | Interest Income and Brokerage Fees already existed. A second one splits the same money across two lines of a sworn statement |
+| Ship a seed that cannot repair its own earlier version | A hand-run migration gets run once. If a draft escaped, the fix has to be in the file that replaces it |
+| Extract securities trades from a brokerage statement | A buy exchanges cash for shares inside one account and changes its value by nothing. Extract what crossed the boundary |
+| Omit rows from a register without saying so | Four lines where the statement shows fifty reads as a failed import. Count what was skipped |
+| Derive change in market value by subtraction | It always balances, so it hides a missing wire instead of revealing it. Copy the printed figure or omit the line |
+| Reconcile a brokerage against the cash or sweep balance | The purchases that moved cash into securities are deliberately absent. Balance against total account value |
+| Apply the printed-counts check to a cash-flow-only extraction | Those counts include the trades that were deliberately skipped, so it fires on every statement |
+| Put unrealized market change in FIS income | Not net resources under Tex. Fam. Code 154.062(b), and one month's swing becomes months of "income" nobody received |
 | Sum raw amounts on the FIS without checking the account type | A card purchase is positive by the printed convention. Debit and credit spending then cancel out. `household_amount()` |
 | Average a quarterly or annual bill over the report window | It buys coverage past the window, so the figure moves every time the report runs. Trailing twelve months over twelve |
 | Divide by "months that had activity" | An annual premium would read as its full amount per month. Always the window's months |
@@ -1926,6 +2218,15 @@ Three things to get right when it is built:
 | Take a re-drag as a new upload | It is somebody unsure the first one landed. Refuse it and say so — silence is what caused it |
 | Set a busy ref without releasing it in `finally` | One unexpected throw disables the drop zone for the life of the page, curable only by a reload nobody would think to try |
 | Upload one file and await it before sending the next | The pool then has one job to run whatever was dropped. Queue the whole stack, then wait |
+| Fingerprint every setting to detect drift | `id` and `host_url` differ per node by design, so every pair disagrees forever. Hash only what should match |
+| Key a central config store on a hand-typed identifier | A `CONFIG_SET` line is the same drift surface and harder to diagnose — two files can be diffed; a typed key hides disagreement until behaviour differs |
+| Publish a secret's value to prove two nodes agree | A digest proves it. `sha256(value)[:12]`, and `<unset>` stays distinct from any digest |
+| Report "deprecated setting in use" from its value | `db_type` defaults to `"supabase"`, so it fired on every node forever. `model_fields_set` |
+| Write a non-string setting as `KEY=` in .env.example | An empty string is not a float, an int, a bool or a JSON list, and pydantic refuses the whole file over one |
+| Add a compose `${VARIABLE}` without a Settings field | `extra = "forbid"` refuses the line and the container stops booting. `API_BASE_URL` was exactly that |
+| Let a node boot when its secret source is unreachable | A worker with no Anthropic key does not fail, it silently produces nothing. Raise |
+| Leave the AWS region to botocore's own environment scan | `AWS_REGION` was set and reached the process, and `boto3.client()` still raised `NoRegionError` — which variables botocore reads is a property of the pinned version. Resolve it and pass `region_name` |
+| Import `LoggerFactory` at module scope in anything `settings` imports | It closes the loop `settings → x → loggerfactory → settings`. Build the logger lazily |
 | Do LLM or OCR work inside a request handler | Queue a job and poll — haproxy cuts long requests with a 504 and no server-side error (§11a) |
 | Add a model field without a migration in the same change | The startup schema check will log an `ERROR`, but the insert is already broken |
 | Persist PDF-extracted text straight from PyMuPDF | It can contain NULs; Postgres rejects the row (`22P05`). `pdf_service` sanitizes — use its output |

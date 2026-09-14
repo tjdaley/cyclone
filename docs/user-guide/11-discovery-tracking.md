@@ -193,6 +193,25 @@ It reports four kinds of evidence, each in its own section:
 | **Creditors paid, with no account produced** | A payee that a payment says money is owed to |
 | **Platforms holding value, with no account produced** | Venmo, PayPal and the like. The figure shown is money that **left** the produced accounts through the platform and did not come back — deliberately **not** called a balance: it may still be there, it may have been spent from the platform, or it may have moved on to another unproduced account. A negative figure is the opposite finding — the platform funded the produced accounts from somewhere these records do not contain |
 
+### Reading the platforms section
+
+Each platform row shows how many lines matched, the money **sent to** it, the
+money that **came back**, and the difference — labelled **Not returned**, never
+*balance*.
+
+Beside the platform's name are amber chips: **the kinds of account to ask for.**
+One platform commonly holds several — PayPal is a balance, a card and a PayPal
+Credit line; Robinhood is a brokerage, crypto, an IRA and a margin loan — and **which of them this household actually has cannot be read off a
+transaction description**. So the chips are what the platform is *capable* of
+holding, and the exhibit says so in a footnote. Put the whole list in the
+request for production and let the other side answer it.
+
+Where the matter already holds an account at that platform, the row says so —
+*(1 already produced)* — and the chips shrink to what is still unaccounted for.
+**A platform disappears from the report only when every kind has been
+produced**, because a produced PayPal *balance* answers the deposit half and
+says nothing whatever about PayPal Credit.
+
 ### Reading it carefully
 
 **A dagger means the institution was inferred, not read off the page.** Where
@@ -214,21 +233,83 @@ and **excluded from the exhibit entirely**. Putting an unclassified payee into a
 document filed with a court asserts of a water utility exactly what it asserts
 of American Express.
 
-Rule a payee as **not a creditor** when it plainly is not. That is stored,
-attributed, and reversible — without it, forty utilities come back on every
-matter and the list stops being read.
+---
 
-**The two verdicts are scoped differently, on purpose:**
+## Rulings about payees
 
-- **Creditor** goes **firm-wide** by default. A creditor is nearly always a
-  national brand, so ruling once means it never has to be triaged again.
-- **Not a creditor** is scoped to **this matter** unless you say otherwise.
-  Suppressing a payee across every case in the firm on one person's judgment is
-  how a real account goes missing silently — which is the failure this whole
-  report exists to prevent.
+### The three verdicts
 
-> There is not yet a screen for reviewing or reversing a **firm-wide** ruling.
-> Ask a developer if one needs undoing.
+| Verdict | Where you record it | Scope by default | What it does |
+| ------- | ------------------- | ---------------- | ------------ |
+| **Creditor** | The **Creditor** button on a candidate row | **Firm-wide** | The payee becomes a finding and reaches the exhibit. A creditor is nearly always a national brand, so ruling once means it is never triaged again |
+| **Not a creditor** | The **Vendor** button on a candidate row | **This matter** | Removes the payee from the report. Suppressing one across every case in the firm on one person's judgment is how a real account goes missing silently |
+| **Holds value** | The rulings screen below (there is no button on a candidate row) | Whichever you choose | Marks a counterparty that holds a balance, a portfolio or crypto — traffic in *either* direction then proves the account exists. It must say **what to ask for** |
+
+> **A payee can be "holds value" *and* "not a creditor" at the same time, and
+> Venmo is exactly that** — not a lender, and holding money. The two are matched
+> against separate lists on purpose: otherwise the true statement *"Venmo is not
+> a creditor"* would silently delete the finding that it holds a balance.
+
+### Rulings that are already in place
+
+The firm ships with a body of rulings, so the queue starts short:
+
+- **Thirty-odd platforms** ruled as *holds value* — wallets (Venmo, PayPal, Cash
+  App, Apple Cash), crypto exchanges (Coinbase, Kraken, Crypto.com), brokerages
+  and app-first investment platforms (Robinhood, Fidelity, Vanguard, Schwab,
+  E\*TRADE, Betterment), and the neobanks (SoFi, Chime, Varo, Revolut).
+- **The buy-now-pay-later lenders** ruled as *creditors* — Affirm, Klarna,
+  Afterpay, Sezzle, Zip, Uplift, Katapult, Perpay and Splitit. This is the debt
+  least likely to be disclosed: it is rarely on a credit report, the client does
+  not experience it as borrowing, and on a statement it looks like a
+  subscription.
+
+**Nobody should have to answer the same question every week.** Venmo holds a
+balance on every matter that will ever be opened, so it is answered once, for
+the firm. Only the long tail — a credit union's app, a fintech from last year —
+reaches the triage queue.
+
+> **Some real platforms are deliberately *not* seeded**, because their names are
+> also ordinary English: Current, Dave, Albert, Empower, Public, Gemini. A
+> firm-wide pattern that is also a common word mis-files evidence on every
+> matter at once, so those are left for a **matter** ruling, made by somebody
+> who has looked at the line that prompted it.
+
+### Reviewing, changing, and undoing a ruling
+
+At the foot of the **Referenced but not produced** panel:
+**▸ Standing rulings about payees**.
+
+Two lists, shown separately rather than merged — **This matter** first, then
+**Firm-wide** — so nobody changes the firm's answer while believing they are
+working on one case.
+
+| Control | What it does |
+| ------- | ------------ |
+| **Edit** | Change the pattern, the verdict, the name used in a motion, the kind of debt, the kinds to ask for, the note, or retire it by unticking **Active** |
+| **Delete** | Removes the ruling. The payee returns to the candidate queue on the next scan |
+| **Add a ruling for this matter** | A pattern of three characters or more, a verdict, and a name for a motion. A *holds value* ruling will not save until you tick at least one **Ask for** kind — that set **is** the request for production |
+
+**Deleting is safe in a way most deletes in Cyclone are not.** A ruling is an
+opinion about a payee, not evidence. Nothing is re-filed and nothing is lost:
+the report is recomputed from the transactions every time it is read, so the
+next reading simply reflects the new answer.
+
+> **Editing a firm-wide ruling changes every open case**, and Cyclone asks you
+> to confirm before it does. Usually the better fix is the one the screen
+> suggests: leave the firm ruling alone and **add a matter ruling for the same
+> payee**, which overrides the firm's answer for this case only.
+
+**Write the note.** It is the field that tells whoever inherits the matter why
+somebody decided a payee was a vendor.
+
+### If you click twice
+
+Ruling on a payee triggers a full rescan of the matter, which takes a few
+seconds. The row is removed from the queue **immediately**, and the buttons are
+replaced by *Saving…* while the write is in flight. If you do click twice, the
+second click is not an error — the ruling was stored the first time, and Cyclone
+treats it as the success it is.
 
 ---
 
@@ -239,6 +320,10 @@ matter and the list stops being read.
 - [ ] First and last statements marked on every account you can vouch for
 - [ ] Run the report for **both** sides
 - [ ] Take the coverage lines — the day-level gaps — to the attorney, not the grid
+- [ ] Work the candidate queue down on **Referenced but not produced**, so the
+      exhibit carries every creditor and no unruled payee
+- [ ] Check **Standing rulings about payees** before assuming a payee is absent
+      because nothing was found — it may have been ruled away
 
 ---
 

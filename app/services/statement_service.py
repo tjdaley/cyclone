@@ -126,6 +126,37 @@ extracted text interleaves into one sequence — read it as repeating triples. A
 row whose amount is not a printed figure ("-See above-", blank) is already
 itemised in the debit list; skip it or you will double-count.
 
+BROKERAGE AND RETIREMENT ACCOUNTS — A DIFFERENT RULE ABOUT WHAT COUNTS. On
+those account types, extract money that CROSSED THE ACCOUNT BOUNDARY and nothing
+else. A purchase of stock exchanges cash for shares inside one account and
+leaves it worth what it was; so does a sale, a redemption, a maturity, an
+exchange, a reinvestment, and a split.
+
+  EXTRACT: deposits, transfers and wires in; securities transferred IN in kind
+  at the stated value; dividends and capital gain distributions, cash or
+  reinvested; interest and sweep income; withdrawals, transfers, wires, ACH,
+  checks and cards out; securities transferred OUT in kind; margin interest,
+  advisory, management and account fees; and CHANGE IN MARKET VALUE where the
+  statement prints it as a figure of its own.
+
+  DO NOT EXTRACT: buys, sells, redemptions, maturities, exchanges, reinvestment
+  purchases, splits, spin-offs, CUSIP changes, journal entries between the
+  account's own cash and margin balances, or the per-holding cost basis and
+  unrealized gain columns of a positions table. Count what you passed over and
+  report it as securities_transactions_omitted on the statement.
+
+  CHANGE IN MARKET VALUE IS NEVER ARITHMETIC YOU PERFORM. Report it only if the
+  statement prints such a figure. NEVER compute it as closing value minus
+  opening value minus everything else — that number always balances, so it would
+  conceal a wire nobody extracted instead of revealing it. If it is not printed,
+  leave it out and let the statement fail to reconcile. Description exactly
+  "Change in Market Value"; a gain POSITIVE, a loss NEGATIVE.
+
+  BALANCES ON THESE ACCOUNTS ARE THE TOTAL ACCOUNT VALUE — cash plus securities,
+  from the portfolio or account-value summary — never the cash or sweep balance.
+  The cash balance cannot reconcile against this extraction, because the
+  purchases that turned cash into securities are deliberately absent from it.
+
 These blocks are NOT transaction registers. Never turn one into transactions,
 and never let one become a statement of its own:
   - DAILY ENDING BALANCE, or any table of dates against running balances. These
@@ -170,6 +201,17 @@ statement object has:
     in the account summary. Report them as
     {"deposits_credits": 24, "checks_debits": 262}. Omit a key you cannot find;
     never estimate one from the rows you extracted.
+- portfolio_summary: BROKERAGE AND RETIREMENT ONLY, else null. The statement's
+  own summary of how the account value moved, printed under a heading such as
+  "Change in Account Value" or "Portfolio Summary". Copy what it prints and omit
+  what it does not; NEVER derive one figure from the others:
+    {"opening_value": 412300.11, "additions": 10000.00, "withdrawals": -1000.00,
+     "income": 200.00, "change_in_market_value": 8140.22,
+     "closing_value": 429640.33}
+  This is the independent check on an extraction that deliberately omits trades,
+  so a figure you calculated rather than read defeats the check entirely.
+- securities_transactions_omitted: integer, how many buy/sell/redemption rows
+  you deliberately passed over on this statement. 0 for a non-brokerage account.
 - transactions: array, in printed order. Each has:
   - line_no: 1-based integer
   - transaction_date: "YYYY-MM-DD" or null
@@ -204,6 +246,8 @@ the balance the institution prints:
   * Credit card purchase, cash advance, fee     -> POSITIVE (raises the balance owed)
   * Credit card payment or refund               -> NEGATIVE (lowers the balance owed)
 So for EVERY account type: beginning_balance + sum(amounts) = ending_balance.
+On a brokerage that identity holds against the TOTAL ACCOUNT VALUE, with the
+change in market value as one of the amounts — never against the cash balance.
 If your amounts do not satisfy that, re-check the signs before answering. Do NOT
 add, drop, or alter a transaction to force it to balance — report what is printed.
 
@@ -269,12 +313,25 @@ Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each has:
 - period:
   - start_date / end_date: "YYYY-MM-DD"
 - balances:
-  - beginning_balance / ending_balance: number or null
+  - beginning_balance / ending_balance: number or null. On a BROKERAGE or
+    RETIREMENT account these are the TOTAL ACCOUNT VALUE — cash plus securities
+    — taken from the portfolio or account-value summary, NOT the cash or sweep
+    balance.
   - printed_totals: totals the statement prints, e.g.
     {"deposits_credits": 202100.41, "checks_debits": -195600.04}
 - printed_counts: counts the statement prints, e.g.
   {"deposits_credits": 24, "checks_debits": 262}. Omit a key you cannot find;
   never estimate one.
+- portfolio_summary: BROKERAGE AND RETIREMENT ACCOUNTS ONLY, else null. The
+  statement's own summary of how the account value moved over the period —
+  printed under a heading like "Change in Account Value", "Portfolio Summary",
+  or "Account Summary". Copy the figures it prints; NEVER derive one from the
+  others, and omit any key it does not print:
+    {"opening_value": 412300.11, "additions": 10000.00,
+     "withdrawals": -1000.00, "income": 200.00,
+     "change_in_market_value": 8140.22, "closing_value": 429640.33}
+  This block is what the transaction extraction is checked against, so a value
+  you calculated rather than read would defeat the check entirely.
 
 If the document holds no account statement, return {"statements": []}.
 Respond ONLY with the JSON object. No markdown fences, no explanation.\
@@ -315,8 +372,10 @@ account number than the one named below still appears, stop there: report
 nothing at or after it. Rows belonging to another account are that account's,
 and filing them here puts one person's money in another account's history.
 
-Return ONLY a valid JSON object of the form {"transactions": [ ... ]}, in
-printed order. Each transaction has:
+Return ONLY a valid JSON object of the form
+{"transactions": [ ... ], "securities_transactions_omitted": 0}, in printed
+order. The count is for brokerage accounts and is 0 everywhere else. Each
+transaction has:
   - transaction_date: "YYYY-MM-DD" or null
   - posted_date: "YYYY-MM-DD" or null
   - date_provenance: "printed" if the full date was printed, "derived" if you
@@ -360,6 +419,58 @@ Two things about that table:
     them would double-count. An asterisk beside a number means the numbers
     before it are missing from the sequence, not that the row is special.
 
+BROKERAGE AND INVESTMENT ACCOUNTS — A DIFFERENT RULE ABOUT WHAT COUNTS.
+This applies ONLY when the account type stated above is "brokerage" or
+"retirement". On those, extract money that CROSSED THE ACCOUNT BOUNDARY and
+nothing else.
+
+A purchase of stock is not money moving. It exchanges cash for shares inside
+one account, and the account is worth what it was a second earlier. So is a
+sale, a redemption, a maturity, an exchange, a reinvestment, and a split.
+
+  EXTRACT — value entered or left the account:
+    * Cash in: deposit, transfer in, wire in, ACH credit, contribution, rollover
+    * Securities transferred IN in kind, at the value the statement states
+    * Dividends and capital gain distributions, whether paid in cash or
+      reinvested. A reinvested dividend still ADDED value; the purchase that
+      spent it is the part that nets to nothing.
+    * Interest and sweep income
+    * Cash out: withdrawal, transfer out, wire, ACH debit, check, EFT, card
+    * Securities transferred OUT in kind, at the value the statement states
+    * Margin interest charged, advisory, management and account fees
+    * CHANGE IN MARKET VALUE, and ONLY when the statement prints it as a
+      figure of its own — see the paragraph below.
+
+  DO NOT EXTRACT — value only changed form:
+    * Buy, sell, redeem, mature, exchange, conversion, reinvestment purchase
+    * Stock split, spin-off, name change, CUSIP change
+    * Journal entries between the account's own cash and margin balances
+    * Cost basis, unrealized gain/loss shown PER HOLDING in a positions table
+
+  Instead, count them. Report securities_transactions_omitted: how many buy,
+  sell and similar rows you passed over on these pages. That number is how a
+  reader knows the omission was deliberate. Report 0 if there were none.
+
+CHANGE IN MARKET VALUE IS NOT ARITHMETIC YOU PERFORM. Report it only if the
+statement PRINTS such a figure — "Change in Market Value", "Market
+Appreciation/Depreciation", "Unrealized Gain/Loss for the Period" in a summary
+of how the account value moved. Copy that number.
+
+  * NEVER compute it as closing value minus opening value minus everything
+    else. That number always makes the statement balance, which means it would
+    hide a wire nobody extracted instead of revealing it.
+  * If no such figure is printed, omit the line. A statement that does not
+    reconcile is a statement a person will look at, which is the correct
+    outcome.
+  * Its description must be exactly "Change in Market Value". Sign it the way
+    it moved the account: a gain POSITIVE, a loss NEGATIVE.
+
+BALANCES ON A BROKERAGE STATEMENT ARE THE TOTAL ACCOUNT VALUE — cash plus
+securities — not the cash or sweep balance. Take the opening and closing figures
+from the portfolio or account-value summary. The cash balance alone cannot
+reconcile against this extraction, because the purchases that moved cash into
+securities are deliberately not in it.
+
 These blocks are NOT transactions. Never turn one into an entry:
   - DAILY ENDING BALANCE, or any table of dates against running balances
   - ACCOUNT SUMMARY / SUMMARY OF ACCOUNTS, INTEREST RATE SUMMARY, OVERDRAFT SUMMARY
@@ -371,7 +482,8 @@ FLAGS — record every inference. severity "info" for a routine derivation, "war
 for something a human should look at. Codes: YEAR_INFERRED, LOCATION_INFERRED,
 SIGN_ASSUMED, AMOUNT_UNCLEAR, DESCRIPTION_TRUNCATED.
 
-If these pages carry no transactions at all, return {"transactions": []}.
+If these pages carry no transactions at all, return
+{"transactions": [], "securities_transactions_omitted": 0}.
 Respond ONLY with the JSON object. No markdown fences, no explanation.\
 """
 
@@ -783,6 +895,19 @@ def _bates_value(stamp: str) -> int:
     return int("".join(c for c in stamp if c.isdigit()))
 
 
+def _count(value: Any) -> int:
+    """A non-negative integer from a model's answer, or zero.
+
+    Used for the number of securities trades a brokerage pass was told to skip.
+    A junk value must read as "none reported" rather than raise: the count is
+    reassurance for a reader, and losing it should never cost the extraction.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _page_number(value: Any) -> Optional[int]:
     """A page number, or None. Zero and negatives are model noise, not pages."""
     try:
@@ -949,6 +1074,82 @@ def _completeness_findings(
             )
     return findings
 
+_CASH_FLOW_ACCOUNTS = frozenset({AccountType.brokerage, AccountType.retirement})
+
+# The prompt asks for the description "Change in Market Value", but a model
+# sensibly sometimes copies the heading the statement actually printed, and
+# brokerages print all of these for the same figure.
+_MARKET_CHANGE = (
+    "change in market value",
+    "unrealized gain",
+    "unrealized loss",
+    "market appreciation",
+    "market depreciation",
+)
+
+
+def _is_market_change(line: dict[str, Any]) -> bool:
+    """
+    Whether an extracted line is the printed change-in-value figure.
+
+    Used to keep it out of the flow totals compared against the statement's own
+    summary: it is not money that crossed the account boundary, and letting it
+    count as one would paper over the missing withdrawal that check exists to
+    find.
+    """
+    text = (line.get("description") or "").strip().lower()
+    return any(phrase in text for phrase in _MARKET_CHANGE)
+
+
+def _portfolio_findings(
+    lines: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> list[str]:
+    """
+    Check a brokerage extraction against the statement's own value summary.
+
+    **This is the only real check a brokerage statement gets, and the reason it
+    is not optional.** The ordinary one — beginning + sum == ending — closes as
+    soon as the change-in-market-value line is present, whatever that line says.
+    A model that computed the figure instead of reading it would produce a
+    statement that reconciles perfectly and conceals a missing $50,000 wire.
+
+    So the flows are compared against what the statement prints for itself, the
+    same two-source argument ``_completeness_findings`` makes on a bank
+    statement: additions against the money we found coming in, withdrawals
+    against the money we found going out.
+
+    Reported only where the extraction falls SHORT of the printed figure, never
+    where it exceeds it. A statement may split its additions across named
+    buckets, so extracting all of them correctly can read as too many against
+    one; a shortfall has no innocent explanation.
+    """
+    if not summary:
+        return []
+
+    findings: list[str] = []
+    flows = [line for line in lines if not _is_market_change(line)]
+    for key, want_sign, label in (
+        ("additions", 1, "additions"),
+        ("withdrawals", -1, "withdrawals"),
+    ):
+        printed = _money(summary.get(key))
+        if printed is None:
+            continue
+        printed = abs(printed)
+        found = sum(
+            (abs(_money(line.get("amount")) or ZERO) for line in flows
+             if (_money(line.get("amount")) or ZERO) * want_sign > 0),
+            start=ZERO,
+        )
+        if found < printed - _TOTAL_TOLERANCE:
+            findings.append(
+                "the summary prints %s of %s and only %s was extracted"
+                % (label, printed, found)
+            )
+    return findings
+
+
 def _conflict(code: str, blocking: bool, detail: str) -> dict[str, Any]:
     return {"code": code, "blocking": blocking, "detail": detail}
 
@@ -1067,6 +1268,7 @@ class StatementService:
             period_end = _parse_date(period.get("end_date"))
             collected: list[dict[str, Any]] = []
             unread: list[int] = []
+            skipped = 0
             for start in range(first, last + 1, _PAGES_PER_CHUNK):
                 stop = min(start + _PAGES_PER_CHUNK - 1, last)
                 # ONE UNREADABLE PASS MUST NOT COST THE WHOLE DOCUMENT.
@@ -1084,8 +1286,10 @@ class StatementService:
                 # three independent signals that it is short. The same trade
                 # pdf_service makes with its unreadable marker: a visible
                 # partial loss beats a silent total one.
-                found, lost = self._read_pages(context, own, start, stop, own_last, passes)
+                found, lost, passed_over = self._read_pages(
+                    context, own, start, stop, own_last, passes)
                 unread.extend(lost)
+                skipped += passed_over
                 if not found:
                     continue
                 # One missing date condemns every date in this batch, not just
@@ -1117,6 +1321,11 @@ class StatementService:
             for index_, line in enumerate(collected, start=1):
                 line["line_no"] = index_
             statement["transactions"] = collected
+            # A brokerage register that comes back with four lines where the
+            # statement shows fifty rows looks exactly like a failed import.
+            # This is what says the silence was deliberate.
+            if skipped:
+                statement["securities_transactions_omitted"] = skipped
 
         return {"statements": statements, "extraction": _provenance(passes)}
 
@@ -1182,7 +1391,7 @@ class StatementService:
         stop: int,
         own_last: int,
         passes: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[int]]:
+    ) -> tuple[list[dict[str, Any]], list[int], int]:
         """
         The transactions on a page range, splitting the range if the answer
         will not fit in one.
@@ -1207,20 +1416,28 @@ class StatementService:
         whatever comes back unread, so the loss is reported page by page instead
         of chunk by chunk.
 
-        :return: ``(transactions, unread_pages)``.
-        :rtype: tuple[list[dict[str, Any]], list[int]]
+        The third return value is how many securities trades the pass was told
+        to skip. On a brokerage account the extraction deliberately omits buys
+        and sells, and a register that comes back with four lines where the
+        statement shows fifty rows looks exactly like a failed import. The count
+        is what says the silence was on purpose.
+
+        :return: ``(transactions, unread_pages, securities_omitted)``.
+        :rtype: tuple[list[dict[str, Any]], list[int], int]
         """
         body = self._slice_body(own, start, stop, own_last)
         if not body.strip():
-            return [], []
+            return [], [], 0
         try:
-            found = self._call_json(
+            answer = self._call_json(
                 _TRANSACTIONS_SYSTEM,
                 "%s\n\nPRIMARY PAGES: %d to %d.\n\n%s" % (context, start, stop, body),
                 "transactions",
                 "Could not read pages %d-%d" % (start, stop),
                 passes=passes, label="pages %d-%d" % (start, stop),
-            ).get("transactions") or []
+            )
+            found = answer.get("transactions") or []
+            omitted = _count(answer.get("securities_transactions_omitted"))
         except UnparseableResponse as e:
             if stop <= start:
                 LOGGER.warning(
@@ -1228,7 +1445,7 @@ class StatementService:
                     "smallest slice there is, so its lines are missing from this statement",
                     start, str(e),
                 )
-                return [], [start]
+                return [], [start], 0
             if not e.truncated:
                 # Malformed rather than too long, and `_call_json` already asked
                 # again. Splitting would not help; report the range.
@@ -1236,16 +1453,18 @@ class StatementService:
                     "statement_service.extract: pages %d-%d could not be read (%s)",
                     start, stop, str(e),
                 )
-                return [], list(range(start, stop + 1))
+                return [], list(range(start, stop + 1)), 0
             middle = start + (stop - start) // 2
             LOGGER.info(
                 "statement_service.extract: pages %d-%d answered past the end of the reply; "
                 "splitting into %d-%d and %d-%d",
                 start, stop, start, middle, middle + 1, stop,
             )
-            left, left_unread = self._read_pages(context, own, start, middle, own_last, passes)
-            right, right_unread = self._read_pages(context, own, middle + 1, stop, own_last, passes)
-            return left + right, left_unread + right_unread
+            left, left_unread, left_skipped = self._read_pages(
+                context, own, start, middle, own_last, passes)
+            right, right_unread, right_skipped = self._read_pages(
+                context, own, middle + 1, stop, own_last, passes)
+            return (left + right, left_unread + right_unread, left_skipped + right_skipped)
 
         # A slice can only report what it was given; anything anchored in its
         # lookahead belongs to the next one. Applied per sub-range as well as
@@ -1253,7 +1472,7 @@ class StatementService:
         return [
             line for line in found
             if (_page_number(line.get("physical_page_number")) or start) <= stop
-        ], []
+        ], [], omitted
 
     @staticmethod
     def _statement_pages(
@@ -1901,8 +2120,22 @@ class StatementService:
         # statement says only that the arithmetic fails, while this says which
         # side is short and by how much. A 27-page statement whose debits
         # stopped after 15 of 262 lines reads as one enormous delta otherwise.
+        cash_flow_only = account.account_type in _CASH_FLOW_ACCOUNTS
+        summary = raw_statement.get("portfolio_summary") or {}
+        # Read unconditionally: it is kept in the extraction record for every
+        # statement, and only the CHECK below is account-type specific.
         printed_counts = raw_statement.get("printed_counts") or {}
-        shortfalls = _completeness_findings(lines, balances.get("printed_totals") or {}, printed_counts)
+        if cash_flow_only:
+            # THE BANK-SHAPED CHECK CANNOT BE APPLIED HERE, and applying it
+            # would be worse than not checking. Its counts and totals describe
+            # every row the statement prints, including the fifty securities
+            # trades this extraction deliberately leaves out — so it would
+            # report a shortfall on every brokerage statement, and a warning
+            # that is always on is a warning nobody reads.
+            shortfalls = _portfolio_findings(lines, summary)
+        else:
+            shortfalls = _completeness_findings(
+                lines, balances.get("printed_totals") or {}, printed_counts)
         if shortfalls:
             flags.append(_flag(
                 "INCOMPLETE_EXTRACTION", "warn",
@@ -1910,6 +2143,34 @@ class StatementService:
                 "very likely stopped early — re-ingest before relying on it." % "; ".join(shortfalls),
                 "transactions",
             ))
+
+        if cash_flow_only:
+            omitted = _count(raw_statement.get("securities_transactions_omitted"))
+            flags.append(_flag(
+                "SECURITIES_NOT_EXTRACTED", "info",
+                "%s Buying, selling and redeeming move value between cash and securities "
+                "inside one account without changing what it is worth, so they are not cash "
+                "flow and are not recorded. What is recorded is money that crossed the account "
+                "boundary, plus dividends, interest, fees, and the change in market value the "
+                "statement prints."
+                % ("%d securities transaction(s) were present and deliberately not extracted."
+                   % omitted if omitted else
+                   "Securities transactions are deliberately not extracted."),
+                "transactions",
+            ))
+            # No printed figure means no line, which means the statement will
+            # not reconcile -- and it should not. Saying which of the two is
+            # missing turns an unexplained delta into an answerable question.
+            if not any(_is_market_change(line) for line in lines):
+                flags.append(_flag(
+                    "MARKET_CHANGE_NOT_PRINTED", "info",
+                    "No change-in-market-value figure was found on this statement, so any "
+                    "movement in the value of the holdings is not accounted for and the "
+                    "balances will not tie. The figure is never calculated here: one derived "
+                    "by subtraction would make every statement balance and would hide a "
+                    "withdrawal nobody extracted.",
+                    "balances",
+                ))
 
         # A warn-level flag on any line is enough to hold the statement back.
         line_warnings = sum(
@@ -2131,6 +2392,7 @@ class StatementService:
             reconciled=reconciled,
             reconciliation_delta=delta,
             printed_totals=balances.get("printed_totals") or {},
+            portfolio_summary=summary or None,
             flags=flags,
             review_status=status,
             storage_path=storage_path,

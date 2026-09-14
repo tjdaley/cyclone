@@ -65,20 +65,34 @@ Fields the matter cannot supply are printed as a blank rule and reported to you
 — see below. Set the case style and alignment on the matter detail page
 ([Chapter 3](03-matters.md)).
 
-### 2. Selection
+### 2. The table
+
+### 3. Findings
+
+Prose, where the report has any — the compliance matrix puts its gap list here.
+
+### 4. Footnotes
+
+Directly beneath the table, because a reader who meets a mark inside it looks
+straight down for what it means. This is where the dagger on an inferred bank
+name is explained, and where the accounts-referenced exhibit states that the
+kinds of account listed against a platform are what it is **capable** of
+holding, not a representation that all of them exist.
+
+### 5. Selection
 
 The criteria that produced the table — the accounts, the date range, the
 categories, the tags. **This is what makes the exhibit usable by someone who
 did not run the query.** Filters you did not apply are omitted rather than
 listed as "none", so it reads as a description and not as a form.
 
-### 3. The table
+Some reports also state **what was not searched**. The accounts-referenced
+exhibit says so outright: cash withdrawals, and money moved between two
+accounts neither of which was produced, leave no trace in these records. **A
+stated limit is a limit; a limit the other side discovers for you is a
+failure.**
 
-### 4. Findings
-
-Prose, where the report has any — the compliance matrix puts its gap list here.
-
-### 5. Documents summarized in this exhibit
+### 6. Documents summarized in this exhibit
 
 Filename and Bates range for each **upload** behind the table. Grouped by
 upload rather than by statement, because one PDF routinely holds several
@@ -89,7 +103,7 @@ If a production carried no Bates stamp, it says *"no Bates stamp detected"*
 rather than leaving a blank — a reader cannot tell a blank from nobody having
 looked.
 
-### 6. The Rule 1006 notice
+### 7. The Rule 1006 notice
 
 Every exhibit carries it:
 

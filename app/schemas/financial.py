@@ -187,6 +187,13 @@ class StatementResponse(BaseModel):
     reconciled: bool
     reconciliation_delta: Optional[Decimal]
     printed_totals: dict[str, Any]
+    portfolio_summary: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="A brokerage statement's own change-in-value block. Wanted on screen "
+                    "for the same reason the filename is: it is the first thing to read "
+                    "when a brokerage statement will not tie, because the extraction "
+                    "deliberately omits the trades and this is what it was checked against",
+    )
     flags: list[dict[str, Any]]
     review_status: StatementReviewStatus
     boundary: StatementBoundary

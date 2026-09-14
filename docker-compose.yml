@@ -1,10 +1,29 @@
 services:
   api:
-    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.3
-    build: ./app
+    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.4
+    build:
+      context: ./app
+      args:
+        # Read on the BUILD machine, not the server -- the nodes pull a tagged
+        # image and never build. deploy-version.bat sets it from the same
+        # variable that tags the push, so the label cannot disagree with the tag.
+        CYCLONE_BUILD: ${CYCLONE_BUILD:-unknown}
     expose:
       - "8000"
     env_file: .env
+    # NOTE: this deliberately does NOT layer config/fleet.env in.
+    #
+    # `env_file` is read by compose ON THE HOST, and the production servers
+    # carry only .env and this file -- no checkout. Listing config/fleet.env
+    # here makes `docker compose up` fail outright on a server that does not
+    # have it, and copying yet another file to each box would ADD a drift
+    # surface rather than remove one.
+    #
+    # For an image-deployment model the fleet layer is already solved twice
+    # over: non-secret defaults live in Settings and ship inside the image, so
+    # two nodes on the same tag cannot disagree; and anything that must vary
+    # goes in SSM, which every node reads from one place. See
+    # docs/config-hardening-notes.md.
     volumes:
       - ./.env:/app/.env:ro
     healthcheck:
@@ -17,16 +36,32 @@ services:
     # CRM email-agent poller. Same image as the API, different entrypoint.
     # Runs on every node; the shared Redis (REDIS_URL) makes polling
     # fleet-wide single-runner via the crm:poller lock.
-    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.3
-    build: ./app
+    image: ghcr.io/tjdaley/jdbot-cyclone-api:1.0.4
+    build:
+      context: ./app
+      args:
+        CYCLONE_BUILD: ${CYCLONE_BUILD:-unknown}
     command: ["python", "-u", "crm_worker.py"]   # -u = unbuffered stdout/stderr so logs flush in Docker
     env_file: .env
+    # NOTE: this deliberately does NOT layer config/fleet.env in.
+    #
+    # `env_file` is read by compose ON THE HOST, and the production servers
+    # carry only .env and this file -- no checkout. Listing config/fleet.env
+    # here makes `docker compose up` fail outright on a server that does not
+    # have it, and copying yet another file to each box would ADD a drift
+    # surface rather than remove one.
+    #
+    # For an image-deployment model the fleet layer is already solved twice
+    # over: non-secret defaults live in Settings and ship inside the image, so
+    # two nodes on the same tag cannot disagree; and anything that must vary
+    # goes in SSM, which every node reads from one place. See
+    # docs/config-hardening-notes.md.
     volumes:
       - ./.env:/app/.env:ro
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.3
+    image: ghcr.io/tjdaley/jdbot-cyclone-frontend:1.0.4
     build:
       context: ./frontend
       args:

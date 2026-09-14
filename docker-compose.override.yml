@@ -2,6 +2,13 @@ services:
   api:
     ports:
       - "8000:8000"
+    # Layered here and NOT in docker-compose.yml: a developer has the whole
+    # checkout, so config/ exists. The production servers carry only .env and
+    # the compose file, where listing these would break `up` entirely.
+    env_file:
+      - config/fleet.env
+      - config/environments/dev.env
+      - .env
     volumes:
       - ./app:/app
     environment:
@@ -12,6 +19,13 @@ services:
   worker:
     # Dev: mount source so a container restart picks up changes. The poller
     # does not hot-reload, so `docker compose restart worker` after edits.
+    # Layered here and NOT in docker-compose.yml: a developer has the whole
+    # checkout, so config/ exists. The production servers carry only .env and
+    # the compose file, where listing these would break `up` entirely.
+    env_file:
+      - config/fleet.env
+      - config/environments/dev.env
+      - .env
     volumes:
       - ./app:/app
     environment:

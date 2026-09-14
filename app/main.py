@@ -13,6 +13,7 @@ from middleware.auth_middleware import AuthMiddleware
 from routers import admin, attorney_lead_responder, auth_flow, billing, category_rules, clients, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
+from util.config_fingerprint import log_startup_summary
 from util.schema_check import check_schema
 from util.settings import settings
 
@@ -38,6 +39,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # A model field with no column is a 500 waiting for the right request, so
     # it belongs in the deploy log rather than in a stack trace during real
     # work. ERROR, not warning: these requests cannot succeed.
+    # The fingerprint in the log beside the deploy that produced it, so
+    # "which configuration was this node running on Tuesday" has an answer that
+    # does not depend on the file still being there. Also the one place the
+    # legacy-Supabase-key deadline and any dead settings get said out loud.
+    log_startup_summary(settings)
+
     for problem in check_schema():
         LOGGER.error("Database schema: %s", problem)
     yield

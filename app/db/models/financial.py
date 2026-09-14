@@ -228,6 +228,14 @@ class FinancialAccountStatement(BaseModel):
         default_factory=dict,
         description="Totals the statement prints (payments, purchases, fees, interest) — a second check",
     )
+    portfolio_summary: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="A brokerage statement's own change-in-value block as printed: opening_value, "
+                    "additions, withdrawals, income, change_in_market_value, closing_value. It is "
+                    "the independent check on an extraction that deliberately omits securities "
+                    "trades — without it the market-change line makes the balances tie by "
+                    "construction, and a missing wire would never surface",
+    )
     flags: list[dict[str, Any]] = Field(
         default_factory=list[dict[str, Any]],
         description="Statement-level findings: NO_ACCOUNT_MATCH, DUPLICATE_PERIOD, UNRECONCILED",

@@ -3,9 +3,13 @@ app/routers/health.py - Utility routes: health check and public config.
 
 These routes are excluded from authentication by AuthMiddleware.
 """
-from fastapi import APIRouter
+from typing import Any
 
+from fastapi import APIRouter, Depends
+
+from dependencies import require_role
 from schemas.common import MessageResponse
+from util.config_fingerprint import detailed_fingerprint, public_fingerprint
 from util.settings import settings
 
 router = APIRouter(tags=["utility"])
@@ -23,7 +27,7 @@ def health_check() -> MessageResponse:
 
 
 @router.get("/api/config")
-def public_config() -> dict[str, str | list[float] | list[str]]:
+def public_config() -> dict[str, Any]:
     """
     Return public configuration values safe to expose to the frontend.
 
@@ -41,4 +45,37 @@ def public_config() -> dict[str, str | list[float] | list[str]]:
         "referral_types": settings.referral_types,  # Client intake dropdown values
         "version": settings.version,
         "id": settings.id,
+        # A hash over the configuration that is supposed to be identical on
+        # every node. Two nodes disagreeing is drift, and this is what turns
+        # finding it from luck into a one-line diff:
+        #
+        #   curl app-a/api/config | jq -r .config_fingerprint.fleet_hash
+        #   curl app-b/api/config | jq -r .config_fingerprint.fleet_hash
+        #
+        # Unauthenticated on purpose — a hash reveals nothing, and needing a
+        # credential is what would stop anybody actually running the check.
+        # The breakdown naming WHICH setting differs is behind auth below.
+        "config_fingerprint": public_fingerprint(settings),
     }
+
+
+@router.get("/api/v1/config/fingerprint")
+def config_fingerprint_detail(
+    _=Depends(require_role(["admin", "attorney", "paralegal", "staff"])),
+) -> dict[str, Any]:
+    """
+    The per-setting breakdown behind the public fleet hash.
+
+    The hash says two nodes disagree; this says which setting. Values are never
+    returned — each is a digest, so a comparison proves agreement without
+    printing a credential, and the same output is safe to paste into a ticket.
+
+    Behind auth because the set of digests is an inventory: which credentials
+    this node holds and which it does not. That is not a secret, but it is a
+    map, and a map is worth a login.
+
+    ``infrastructure`` is returned in the clear and labelled, because a reader
+    comparing two nodes has to see that ``id`` differing is expected rather
+    than wonder whether it was overlooked.
+    """
+    return detailed_fingerprint(settings)

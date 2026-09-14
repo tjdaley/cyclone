@@ -201,10 +201,20 @@ Every flag you can meet, what it means, and what to do about it.
 
 | Flag | What it means | What to do |
 | ---- | ------------- | ---------- |
-| **INCOMPLETE_EXTRACTION** | The statement prints its own totals ("262 Checks/Debits 195,600.04") and the extraction falls short of them. This is the strongest signal that a read stopped early, and it usually accompanies **UNRECONCILED**. | If the source PDF is long or holds several statements, **reject, split it into one statement per file, and re-import** — retrying the same big file will lose its place the same way. On a PDF that is already a single statement, **Retry** once. Never accept. |
+| **INCOMPLETE_EXTRACTION** | The statement prints its own totals ("262 Checks/Debits 195,600.04") and the extraction falls short of them. This is the strongest signal that a read stopped early, and it usually accompanies **UNRECONCILED**. On a **brokerage or retirement** statement the comparison is against the statement's own change-in-value block instead — if it prints withdrawals of $51,000 and only $1,000 was found, that is caught even when the arithmetic ties. | If the source PDF is long or holds several statements, **reject, split it into one statement per file, and re-import** — retrying the same big file will lose its place the same way. On a PDF that is already a single statement, **Retry** once. Never accept. |
 | **PASS_UNREADABLE** | Named pages were read but the answer could not be understood, twice. Transactions printed there are missing, and the balances will be short by that amount. | **Retry.** If it fails the same way again, those pages need reading and entering by hand. |
 | **PAGE_UNREADABLE** | Named pages could not be read at all — neither the text layer nor OCR. | Look at those pages in the source. Usually a bad scan. Get a better copy if you can; otherwise re-scan, or enter those pages by hand. |
 | **NO_TRANSACTIONS** | No transactions were found at all. | Almost always a page that is not a transaction register — a cover page, a disclosure, a summary. Look at the source, then reject if that is what it is. |
+
+### Brokerage and retirement statements
+
+Both of these are grey. Neither means anything went wrong, and both exist so
+that a register which *looks* wrong can be told from one that is.
+
+| Flag | What it means | What to do |
+| ---- | ------------- | ---------- |
+| **SECURITIES_NOT_EXTRACTED** *(grey)* | Buying, selling and redeeming are deliberately not recorded — they move value between cash and securities inside one account without changing what it is worth. The flag names how many lines were skipped. | Nothing. It is here because a brokerage register showing four lines where the statement shows fifty is indistinguishable from a failed import, and this is what says the silence was a decision. See [Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently). |
+| **MARKET_CHANGE_NOT_PRINTED** *(grey)* | The statement printed no change-in-market-value figure, so there is no line for it and **the balances will not tie**. | Expect an **UNRECONCILED** flag alongside it, and treat this as the explanation rather than a second problem. The figure is never computed here: one derived by subtraction would make every statement balance and would swallow a withdrawal nobody extracted. If the statement does print such a figure, look at the source — it was missed, and a **Retry** is worth one attempt. |
 
 ### One statement may have been read as two
 

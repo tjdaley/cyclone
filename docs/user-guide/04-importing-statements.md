@@ -148,7 +148,11 @@ Understanding this makes every warning in the next chapter make sense.
    are images are read by a vision model.
 2. **The bank, account number, period, and balances are identified.**
 3. **Every transaction is extracted**, with its date, description, amount,
-   running balance, page number, and Bates number.
+   running balance, page number, and Bates number. On a **brokerage or
+   retirement** account this step is narrower on purpose — buying and selling
+   are not recorded, because they move value between cash and securities inside
+   one account without changing what it is worth. See
+   [Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently).
 4. **The account is matched.** Bank name **plus last four digits** is the key.
    A match files the statement against the existing account; no match creates a
    new one.

@@ -58,6 +58,7 @@ Everything below assumes the person has signed in successfully.
 | Create or edit a **transaction category** (the FIS chart of accounts) | ✅ | — | ✅ |
 | Create a **firm-wide** transaction tag | ✅ | — | ✅ |
 | Create a **matter** tag | ✅ | ✅ | ✅ |
+| Record, change or delete a **payee ruling** — including a firm-wide one | ✅ | ✅ | ✅ |
 | Rate overrides on a matter | — | — | ✅ |
 | Delete a matter or a client | — | — | ✅ |
 | Create staff, grant and revoke roles | — | — | ✅ |
@@ -66,6 +67,13 @@ Everything below assumes the person has signed in successfully.
 
 **The whole of Part 3 of this guide is available to paralegals.** That is
 deliberate — it is the work.
+
+> **Payee rulings are the one firm-wide setting a paralegal can change**, which
+> is deliberate and not an oversight: triaging the creditor queue *is* the work,
+> and a ruling somebody cannot fix from where they found it is worse than one
+> they can. The safeguard is a confirmation before a firm-wide ruling is changed
+> or deleted, not a locked door. See
+> [Chapter 11](11-discovery-tracking.md#reviewing-changing-and-undoing-a-ruling).
 
 ---
 

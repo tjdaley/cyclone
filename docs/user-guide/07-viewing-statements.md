@@ -85,6 +85,52 @@ it can be uploaded again.
 
 ---
 
+## Brokerage and retirement accounts read differently
+
+**A brokerage register in Cyclone is much shorter than the one the statement
+prints, and that is deliberate.** A statement showing fifty lines may produce
+five here.
+
+Buying, selling, redeeming, maturing, exchanging, reinvesting and splitting all
+move value between cash and securities **inside one account**. An $8,500 stock
+purchase leaves the account worth exactly what it was a second earlier: nothing
+entered the marital estate and nothing left it. This project traces where money
+came from and where it went, so those lines are not recorded at all.
+
+What **is** recorded is money that crossed the account boundary, plus the income
+the account threw off:
+
+| Kept | Why |
+| ---- | --- |
+| Transfers, wires and ACH in or out | Money crossing the boundary |
+| Securities transferred in or out in kind | Value crossing the boundary, even though no cash moved |
+| Dividends and capital-gain distributions | Income — **including reinvested ones**, because the dividend added value; the purchase that spent it is the half that nets to nothing |
+| Interest | Income |
+| Margin interest, advisory and account fees | Money leaving |
+| **Change in market value** | Entered as a **line**, taken from the figure the statement prints |
+
+**The statement says how many lines it skipped.** A row reading
+*"41 securities transaction(s) were present and deliberately not extracted"*
+([Chapter 5](05-import-problems.md#brokerage-and-retirement-statements)) is what
+tells you the short register was a decision rather than a failed import.
+
+### Two things that surprise people
+
+**The balances are the total account value, not the cash balance.** Cash plus
+securities, taken from the portfolio summary. The cash or sweep balance cannot
+be used here, because the purchases that turned cash into securities are
+deliberately missing from the register — so nothing would tie.
+
+**Change in market value is copied off the statement and never calculated.**
+Working it out by subtraction would make *every* brokerage statement balance
+perfectly, which sounds desirable and is the opposite: a $50,000 wire nobody
+extracted would be silently absorbed into "market change" and the statement
+would be stamped reconciled. Where the statement prints no such figure, the line
+is omitted, the statement does not tie, and it says so — **a statement that will
+not reconcile is a statement a person looks at, which is the right outcome.**
+
+---
+
 ## Correcting a line
 
 Extraction misreads things — a smudged digit, a description running off the

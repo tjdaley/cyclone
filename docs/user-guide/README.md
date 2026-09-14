@@ -33,7 +33,7 @@ work happens in.
 | [8. Categorizing, and the FIS](08-categorizing-and-fis.md) | Filing transactions so the Financial Information Statement survives cross-examination |
 | [9. Tagging transactions](09-tagging.md) | Tags, custom tags, and how they differ from categories |
 | [10. Exporting exhibits and data](10-exports.md) | CSV, Markdown, Word, PDF — and which one to use when |
-| [11. Discovery tracking](11-discovery-tracking.md) | The compliance matrix, look-back dates, and who produces what |
+| [11. Discovery tracking](11-discovery-tracking.md) | The compliance matrix, look-back dates, who produces what — and the accounts, creditors and platforms a production names but does not contain |
 
 ## Part 4 — Administration
 
@@ -57,6 +57,11 @@ on the transaction list being complete. If it does not, Cyclone says so and
 tells you the exact difference. **It never invents a transaction to make the
 numbers balance** — a made-up line is precisely what gets taken apart on
 cross-examination.
+
+On a brokerage or retirement statement the same check runs against the **total
+account value**, and the change in market value enters as a line copied off the
+statement — never calculated, because a figure derived by subtraction would make
+every statement balance and swallow a missing wire.
 
 > **The firm's rule follows directly from this: a statement that does not
 > reconcile is never accepted without attorney approval.** Either the import

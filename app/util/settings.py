@@ -6,6 +6,22 @@ Rf. https://docs.pydantic.dev/latest/concepts/pydantic_settings/
 from typing import Optional
 from pydantic_settings import BaseSettings
 
+from util import secret_source
+
+# Secrets from SSM, before anything reads configuration.
+#
+# This has to happen above `settings = Settings()` at the foot of the file,
+# because that singleton is constructed at import and every entry point -- the
+# API, the worker, the test suite -- gets configuration through it. There is no
+# later hook that all three share.
+#
+# Off unless a node sets CYCLONE_SECRETS_SOURCE=ssm, and it never overwrites a
+# value already in the environment, so this line changes nothing until somebody
+# opts in. When it IS on and SSM cannot be read it raises rather than letting a
+# process start half-credentialled: a worker with no Anthropic key does not
+# fail, it silently does nothing.
+secret_source.load()
+
 
 class Settings(BaseSettings):
     # Version for pinging the API
@@ -31,6 +47,45 @@ class Settings(BaseSettings):
     supabase_landing_pages_key: Optional[str] = None
     supabase_landing_pages_service_role_key: str = ""
     supabase_landing_pages_anon_key: str = ""
+
+    # ── Read by docker-compose, not by this app ───────────────────────────
+    # These exist as fields ONLY because `extra = "forbid"` refuses any key in
+    # .env that the model does not declare. docker-compose.yml passes both to
+    # the frontend build (`VITE_SUPABASE_ANON_KEY`, `VITE_API_BASE_URL`), so
+    # they legitimately live in .env — and without a field here, setting either
+    # one stops the API container booting. api_base_url was exactly that trap:
+    # compose already referenced it and nothing declared it.
+    api_base_url: str = ""
+
+    # ── Where secrets come from ───────────────────────────────────────────
+    # Declared so `extra = "forbid"` does not refuse them in a .env; normally
+    # they are set by compose or by the instance, and read from os.environ by
+    # util/secret_source.py before this class is constructed.
+    #
+    # CYCLONE_SECRETS_SOURCE="ssm" turns on SSM loading. CYCLONE_ENV names the
+    # environment for anything not on EC2 -- on EC2 the name comes from the
+    # instance's own tag, so nobody types it and nobody can typo it.
+    cyclone_secrets_source: str = ""
+    cyclone_env: str = ""
+    # Which image this process is running, baked in by app/Dockerfile at build
+    # time. Reported BESIDE the fleet hash and deliberately not inside it: "do
+    # these nodes agree about config" and "are these nodes running the same
+    # code" are two questions, and folding them together means a disagreement
+    # cannot say which one it is. Empty means an image built before this
+    # existed, which check-fleet reports rather than reading as agreement.
+    cyclone_build: str = ""
+
+    # boto3 needs a region and will not reliably infer one inside a container.
+    # Declared here for the same reason api_base_url is: `extra = "forbid"`
+    # refuses any key in a mounted .env that the model does not know, so a
+    # perfectly ordinary AWS_REGION line would otherwise stop the API booting.
+    #
+    # Prefer setting these in config/environments/<env>.env, which compose
+    # injects as process environment and pydantic never parses as a dotenv file
+    # -- extras are impossible there. Any OTHER AWS_* variable must go in that
+    # file and not in .env, for exactly this reason.
+    aws_region: str = ""
+    aws_default_region: str = ""
 
 
     supabase_password: Optional[str] = None

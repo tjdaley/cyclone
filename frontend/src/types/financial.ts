@@ -118,6 +118,9 @@ export interface AccountStatement {
   /** Printed close minus computed. Recorded, never corrected away. */
   reconciliation_delta: string | null
   printed_totals: Record<string, unknown>
+  /** A brokerage statement's own change-in-value block, as printed.
+   *  The second source a cash-flow-only extraction is checked against. */
+  portfolio_summary: Record<string, unknown> | null
   flags: ExtractionFlag[]
   review_status: StatementReviewStatus
   boundary: StatementBoundary

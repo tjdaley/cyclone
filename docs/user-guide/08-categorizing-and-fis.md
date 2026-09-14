@@ -208,6 +208,47 @@ and it is why interaccount transfers appear under **Excluded**.
 
 ---
 
+## Investment activity, and where it lands on the FIS
+
+Brokerage and retirement statements contribute far fewer lines than they print
+([Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently)),
+and the lines they do contribute are filed by keyword rule as they arrive:
+
+| Category | Sits under | On the FIS? |
+| -------- | ---------- | :---------: |
+| **Dividend Income** | Income | ✅ |
+| **Capital Gain Distribution** | Income | ✅ |
+| **Interest Income** | Income | ✅ |
+| **Margin Interest** | Debt Payments | ✅ |
+| **Brokerage Fees** | (the existing fees branch) | ✅ |
+| **Investment Gain/Loss** | Other | ✅ — but **not** under Income |
+| **Investment Gain/Loss (not on FIS)** | Non-Income Investment Activity | — |
+| **Securities Transferred In / Out** | Non-Income Investment Activity | — |
+
+### Why unrealized gain and loss counts, but is not income
+
+Change in market value is money nobody received. It is **not** net resources
+under Tex. Fam. Code §154.062(b), and child-support exhibits are built from the
+**Income** branch — so filing it anywhere under Income would let a month's
+market swing reach a support figure, which it must never do.
+
+But leaving it off the form entirely hides something real. A party moving $5,000
+a month into a brokerage account while accumulating $4,000 a month of unrealized
+losses is depleting the marital estate, and a statement that cannot see that has
+a money sink off its radar.
+
+So it sits on the form, under **Other**, where it is visible and counted and
+structurally unable to reach a support calculation. **Where that is the wrong
+call for a matter**, re-file those lines under **Investment Gain/Loss (not on
+FIS)** — same figure, off the form — the way Credit Card Payments and
+Reimbursement are already paired.
+
+> **Interest Income and Brokerage Fees were already in the chart and are
+> reused**, not duplicated. A second category with a similar name splits the
+> same money across two lines of a sworn document.
+
+---
+
 ## The detail schedule
 
 Two tabs sit at the top of the FIS panel: **Statement** and **Transactions by

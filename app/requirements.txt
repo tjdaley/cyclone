@@ -21,3 +21,11 @@ tjd-db-handler>=0.1.2,<1.0
 imapclient>=3.0,<4.0
 redis>=5.0,<6.0
 
+# Secrets from AWS SSM Parameter Store under an IAM instance role, so the
+# instance identity IS the credential and nothing is stored on disk -- see
+# util/secret_source.py. Imported only when CYCLONE_SECRETS_SOURCE=ssm, but
+# pinned here rather than left to a manual install: a feature that needs
+# somebody to remember a pip command is a feature that silently does not work.
+# `requests` is for IMDS (the instance tag) and is already an indirect dep.
+boto3>=1.34,<2.0
+requests>=2.31,<3.0
