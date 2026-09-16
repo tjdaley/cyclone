@@ -1,17 +1,25 @@
 # Cyclone — Entity Relationship Diagrams
 
-Nine subject-area diagrams. Split deliberately: one ERD covering every table is
+Ten subject-area diagrams. Split deliberately: one ERD covering every table is
 unreadable, and crossings grow much faster than node count. `MATTERS` and
 `STAFF` repeat across frames so each frame can stay small.
 
-Vetted line by line against the deployed schema after migration 032. Every
+Vetted line by line against the deployed schema after migration 037. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
 
-Migrations 029 and 030 added columns only. **031 and 032 add tables**, and with
-them the ninth frame: `fis_category_settings` records how often a category is
-paid, and `transaction_category_rules` files a transaction by keyword. 032 also
-puts categorization provenance on the transaction itself.
+**033 adds the tenth frame.** `transaction_payee_classifications` records what
+the firm has decided a payee *is*, and 036 widened it from two verdicts to
+three. 034–037 are otherwise columns only: statement boundary markers, the
+production-scope dates, an account type, and a brokerage statement's portfolio
+summary — each noted under the frame that draws its table.
+
+Four foreign keys that had never been drawn are now in: `clients` referred to a
+staff member, `billing_cycles` closed by one, `matter_events` created by one,
+and `matter_pleadings` ingested by one. They were omissions rather than
+decisions — an undrawn foreign key is the kind of thing a reader assumes does
+not exist, and two of these four are `NOT NULL`, so every row in those tables
+carries one.
 
 ## Notation
 
@@ -45,6 +53,7 @@ erDiagram
     STAFF    |o--o| AUTH_USERS : "authenticates as"
     STAFF    ||--o{ USER_ROLES : holds
     CLIENTS  ||--o{ USER_ROLES : holds
+    STAFF    |o--o{ CLIENTS : "referred in"
     STAFF    ||--o{ MATTER_STAFF : "staffed on"
     MATTERS  ||--o{ MATTER_STAFF : "staffed by"
     STAFF    |o--o{ MATTERS : "billing reviewer for"
@@ -59,6 +68,11 @@ erDiagram
   roles too**, which migration 021 unblocked.
 - `matters.billing_review_staff_id` is nullable: zero or one reviewer per
   matter, many matters per reviewer.
+- `clients.referred_to_staff_id` (migration 019) is who brought the client in.
+  Nullable — a client can arrive without one — and **not** the same question as
+  `clients.referral_source`, which is free text about *how* they found the firm.
+  This column names a person in the building, which is why it has a foreign key
+  and the other does not.
 
 ## 2. Split billing
 
@@ -119,6 +133,8 @@ erDiagram
     STAFF          ||--o{ TRUST_LEDGER : posts
     MATTERS        ||--o{ FEE_AGREEMENTS : "governed by"
     MATTERS        ||--o{ MATTER_EVENTS : calendars
+    STAFF          |o--o{ BILLING_CYCLES : closed
+    STAFF          ||--o{ MATTER_EVENTS : created
 ```
 
 - A client can exist with no matter — that is what a prospect is, and what
@@ -127,6 +143,11 @@ erDiagram
   yet, which is the point of the `v_unbilled_entries` view.
 - Nothing constrains a matter to one fee agreement, and the status enum includes
   `voided` — which only makes sense if a replacement can follow.
+- `billing_cycles.closed_by_staff_id` is nullable and `matter_events.created_by_staff_id`
+  is not, and the difference is the whole lifecycle: a cycle exists while it is
+  open and nobody has closed it, where an event cannot exist without whoever put
+  it on the calendar. Closing a cycle is an audited action (§13), so the column
+  is the record of who did it rather than a convenience.
 
 > `fee_agreements.template_id` is not drawn: it references a `templates` table
 > that does not exist anywhere in the schema. Dead column or missing table.
@@ -147,6 +168,7 @@ erDiagram
     OPPOSING_PARTIES |o--o{ MATTER_CLAIMS : "asserted by"
     OPPOSING_PARTIES |o--o{ MATTER_OPPOSING_COUNSEL : "represented by"
     OPPOSING_COUNSEL ||--o{ MATTER_OPPOSING_COUNSEL : "appears through"
+    STAFF            ||--o{ MATTER_PLEADINGS : ingested
 ```
 
 - The three `OPPOSING_PARTIES` edges carry the case's meaning: which party filed
@@ -157,6 +179,10 @@ erDiagram
 - `opposing_counsel` is the shared attorney record, deduplicated on
   `(bar_state, bar_number)`; a junction row points at exactly one.
 - A matter opened from a phone call has no pleading at all.
+- `matter_pleadings.ingested_by_staff_id` is `NOT NULL`, so `STAFF` appears in
+  this frame for one edge. Worth the extra node: a pleading carries `raw_text`
+  and a `storage_path`, and every document in this schema records who put it
+  there — the same rule as discovery in frame 6 and statements in frame 7.
 
 ## 6. Discovery
 
@@ -233,6 +259,36 @@ reimbursement exhibits. Added by migration 023.
   unique index keeps a chain single-file — two accounts cannot claim the same
   predecessor, or "what came next" stops having one answer.
 
+Four columns arrived after 032 and none of them changes an edge. They are here
+because each records a judgment or a second reading that no foreign key can
+express:
+
+- **`financial_account_statements.boundary`** (034) — `opening`, `closing`, or
+  the default `intermediate`. It is what tells a gap in a production from the
+  edge of an account's life, and **nobody can extract it**: a statement does not
+  say it is the first, and an opening balance of zero is not proof, because
+  accounts are swept to zero routinely. So it sits with `ownership` and
+  `property_character` as something a person marks, defaulted to the cautious
+  answer.
+- **`financial_accounts.production_responsibility`** (035) — `client`,
+  `opposing`, `both`, `unknown`. Deliberately **not derived from `ownership`**,
+  which is the neighbouring column and usually agrees: one decides how an asset
+  divides, the other whose motion to compel it is, and deriving either from the
+  other would be a legal conclusion drawn by a schema. Its partners are
+  `matters.client_produces_since` and `matters.opposing_produces_since`, the
+  look-back dates that bound each side's obligation — **named for who produces,
+  not who asked**, because the date opposing counsel propounded is the one that
+  binds our client.
+- **`financial_account_statements.portfolio_summary`** (037) — a brokerage
+  statement's own change-in-value block, stored beside the extraction as an
+  independent source. Null on every other account type. It exists because
+  change in market value enters as an ordinary transaction line, so the usual
+  `beginning + sum == ending` check closes against whatever that line says; the
+  summary is the second reading that catches a withdrawal nobody extracted.
+- **`financial_accounts.account_type` gained `crypto`** (036), alongside the
+  custodian rulings in frame 10. An exchange balance is an account somebody has
+  to produce, and it was previously filed under `other` with everything else.
+
 ---
 
 ## 8. Classifying transactions
@@ -248,7 +304,7 @@ erDiagram
     TRANSACTION_CATEGORIES              ||--o{ TRANSACTION_CATEGORY_RULES : "files into"
     MATTERS                             |o--o{ TRANSACTION_CATEGORY_RULES : "scopes"
     TRANSACTION_CATEGORY_RULES          |o..o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "filed (no FK)"
-    STAFF                               |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "filed or reviewed"
+    STAFF                               |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "filed, reviewed, or removed"
 ```
 
 Two axes over the same rows, deliberately built from different mechanisms
@@ -300,9 +356,16 @@ answerable.
 - `category_reviewed_at` exists so reviewed-and-correct is distinguishable from
   never-looked-at. Without it the work queue never empties, because confirming
   an automatic assignment would leave no trace.
-- Both staff references are nullable and point at the same table, which is why
-  `STAFF |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS` appears once for two columns:
-  who filed it, and who later confirmed it.
+- **Three** staff references are nullable and point at the same table, which is
+  why `STAFF |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS` appears once for three
+  columns: who filed it (`category_set_by_staff_id`), who later confirmed it
+  (`category_reviewed_by_staff_id`), and who dropped it
+  (`deleted_by_staff_id`). All three are the same argument — an assertion about
+  evidence is attributable — and drawing three parallel edges would say nothing
+  the label does not.
+- Whether a payee is a creditor is the other question asked of these rows, and
+  it is answered by `transaction_categories.is_liability` (033) or by a ruling.
+  See frame 10.
 
 ---
 
@@ -344,6 +407,76 @@ figure every time the report is re-run. Added by migration 031.
   there is no sign to borrow.
 - No table records the statement itself. It is computed on demand from the
   transactions as they stand, which is what lets re-filing one line change it.
+
+---
+
+## 10. What a production does not contain
+
+```mermaid
+erDiagram
+    MATTERS                           |o--o{ TRANSACTION_PAYEE_CLASSIFICATIONS : scopes
+    STAFF                             |o--o{ TRANSACTION_PAYEE_CLASSIFICATIONS : decided
+    TRANSACTION_PAYEE_CLASSIFICATIONS |o..o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "rules on (no FK, no column)"
+    TRANSACTION_CATEGORIES            |o--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "files, and is_liability answers the same question"
+    MATTERS                           ||--o{ FINANCIAL_ACCOUNTS : inventories
+    FINANCIAL_ACCOUNTS                ||--o{ FINANCIAL_ACCOUNT_TRANSACTIONS : "scanned for references to accounts NOT in this list"
+```
+
+A production names the accounts it does not contain: the statement you *do*
+have prints the number, the payee, or the platform of the one you do not.
+Matching those against the accounts on the matter leaves the ones nobody
+produced. Added by migration 033 and widened by 036.
+
+**This is a third classification axis and it does not belong in frame 8**, for a
+structural reason rather than a tidiness one: category and tags classify a
+**row**, and both leave something on the row — a `category_id`, a join-table
+entry. A payee ruling classifies a **string**. Nothing on the transaction points
+at it, there is no `payee_classification_id`, and the report is recomputed from
+the transactions on every read.
+
+- **The dashed edge is weaker than frame 8's dashed edge.** There,
+  `category_rule_id` at least stamps which rule filed a line, so the trail
+  survives the rule's deletion. Here there is no column at all: matching happens
+  at query time against the description *and* the scraped payee. Deleting a
+  ruling is therefore safe in a way most deletes in this schema are not — a
+  ruling is an opinion about a payee, not evidence, and the next read simply
+  reflects the new answer.
+- **Two layers in one table, the same shape as tags and category rules.**
+  `matter_id` NULL is the firm's answer; a value overrides it for one case. Two
+  **partial** unique indexes on `lower(btrim(pattern))` — one `where matter_id
+  is null`, one `where matter_id is not null` — because a plain unique index
+  cannot express this: NULL is not distinct from NULL. The same argument as the
+  three partial indexes in frame 9.
+- **`classification` carries three verdicts, and 036 added the third.**
+  `creditor` (a debt is owed), `not_creditor` (a vendor — suppresses the payee),
+  and `custodian` (the counterparty *holds* value: a wallet, an exchange, a
+  brokerage). A payee can be a custodian **and** `not_creditor` at once — Venmo
+  is exactly that — so the two are matched against separate lists. One table,
+  two independent questions.
+- **`holds text[]` is required for a custodian and forbidden for anything else**,
+  enforced by a `CHECK` on both sides. That set is what a request for production
+  asks for, and a custodian row without it says a platform holds *something*
+  while naming nothing to demand. Its values are the account types the report
+  can discharge: `deposit`, `brokerage`, `crypto`, `retirement`, `credit_card`,
+  `line_of_credit`, `loan`, `other`.
+- **`decided_by_staff_id` is nullable, and that nullability is the seeds.** A
+  ruling made in the app is attributed, because `not_creditor` suppresses
+  evidence from a report that backs a motion to compel and that must always be
+  somebody's recorded decision. The rows migrations 033 and 036 seed — national
+  card issuers, mortgage servicers, the buy-now-pay-later lenders, and around
+  three dozen custodians — have no author. **Suppressions are never seeded**;
+  only findings are.
+- **The other source of the same answer is a column in frame 8**:
+  `transaction_categories.is_liability` (033). A paralegal filing a line under
+  "Credit Card Payments" *is* asserting a debt is owed, made as ordinary work,
+  so the report reads it as a source and says which one it used for every row.
+  Nothing in a payment description can settle it — "Online Payment To Mr.
+  Cooper" (a mortgage servicer) and "Online Payment To Frontier" (an ISP) are
+  the same sentence.
+- The scan runs over **deposit-side accounts only**, which is why
+  `FINANCIAL_ACCOUNTS` is in the frame: it is both the thing being scanned and
+  the list a reference is checked against. An account already on the matter is
+  never reported, including the statement's own number.
 
 ---
 

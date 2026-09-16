@@ -1,0 +1,116 @@
+{
+  "index": "README.md",
+  "parts": [
+    {
+      "title": "Part 1 \u2014 Getting in",
+      "chapters": [
+        {
+          "slug": "01-getting-started",
+          "file": "01-getting-started.md",
+          "number": "1",
+          "title": "Getting started",
+          "summary": "Being given an account, first sign-in, what to do when it does not work"
+        }
+      ]
+    },
+    {
+      "title": "Part 2 \u2014 Setting up work",
+      "chapters": [
+        {
+          "slug": "02-clients",
+          "file": "02-clients.md",
+          "number": "2",
+          "title": "Creating a client",
+          "summary": "The client record, the conflict check, and the three other ways a client gets created"
+        },
+        {
+          "slug": "03-matters",
+          "file": "03-matters.md",
+          "number": "3",
+          "title": "Creating a matter",
+          "summary": "The matter, its caption, and the fields that other screens depend on"
+        }
+      ]
+    },
+    {
+      "title": "Part 3 \u2014 Financial statement discovery",
+      "chapters": [
+        {
+          "slug": "04-importing-statements",
+          "file": "04-importing-statements.md",
+          "number": "4",
+          "title": "Importing statements",
+          "summary": "Dropping PDFs, what happens to them, and how to read the result"
+        },
+        {
+          "slug": "05-import-problems",
+          "file": "05-import-problems.md",
+          "number": "5",
+          "title": "When an import has a problem",
+          "summary": "The exceptions queue, every flag you can see, and what to do about each one"
+        },
+        {
+          "slug": "06-merging-accounts",
+          "file": "06-merging-accounts.md",
+          "number": "6",
+          "title": "Merging accounts",
+          "summary": "When one real account has been filed twice"
+        },
+        {
+          "slug": "07-viewing-statements",
+          "file": "07-viewing-statements.md",
+          "number": "7",
+          "title": "Viewing statements and transactions",
+          "summary": "Reaching the source page, correcting a line, removing one"
+        },
+        {
+          "slug": "08-categorizing-and-fis",
+          "file": "08-categorizing-and-fis.md",
+          "number": "8",
+          "title": "Categorizing, and the FIS",
+          "summary": "Filing transactions so the Financial Information Statement survives cross-examination"
+        },
+        {
+          "slug": "09-tagging",
+          "file": "09-tagging.md",
+          "number": "9",
+          "title": "Tagging transactions",
+          "summary": "Tags, custom tags, and how they differ from categories"
+        },
+        {
+          "slug": "10-exports",
+          "file": "10-exports.md",
+          "number": "10",
+          "title": "Exporting exhibits and data",
+          "summary": "CSV, Markdown, Word, PDF \u2014 and which one to use when"
+        },
+        {
+          "slug": "11-discovery-tracking",
+          "file": "11-discovery-tracking.md",
+          "number": "11",
+          "title": "Discovery tracking",
+          "summary": "The compliance matrix, look-back dates, who produces what \u2014 and the accounts, creditors and platforms a production names but does not contain"
+        }
+      ]
+    },
+    {
+      "title": "Part 4 \u2014 Administration",
+      "chapters": [
+        {
+          "slug": "12-user-roles",
+          "file": "12-user-roles.md",
+          "number": "12",
+          "title": "User roles",
+          "summary": "The four roles, what each can do, and how to change them"
+        },
+        {
+          "slug": "13-matter-staff",
+          "file": "13-matter-staff.md",
+          "number": "13",
+          "title": "Assigning staff to a matter",
+          "summary": "What assignment does \u2014 and what it does not"
+        }
+      ]
+    }
+  ]
+}

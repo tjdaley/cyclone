@@ -243,7 +243,11 @@ export default function LandingPage() {
           <p className="text-xs text-white/40">
             &copy; {new Date().getFullYear()} &mdash; Legal Practice Management Platform
           </p>
-          <div className="flex gap-6 text-xs text-white/40">
+          <div className="flex flex-wrap justify-center gap-6 text-xs text-white/40">
+            <Link to="/guide"
+              className="text-gold/80 hover:text-gold transition-colors font-medium">
+              User Guide
+            </Link>
             <Link to="/privacy" className="hover:text-white/70 transition-colors">Privacy Policy</Link>
             <Link to="/terms" className="hover:text-white/70 transition-colors">Terms of Use</Link>
             <a href="/api/health" className="hover:text-white/70 transition-colors">API Status</a>

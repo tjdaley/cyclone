@@ -10,6 +10,7 @@ import OnboardingPage   from './pages/OnboardingPage'
 import AccessDeniedPage    from './pages/AccessDeniedPage'
 import PrivacyPolicyPage  from './pages/PrivacyPolicyPage'
 import TermsOfUsePage     from './pages/TermsOfUsePage'
+import UserGuidePage      from './pages/UserGuidePage'
 
 import DashboardPage  from './pages/app/DashboardPage'
 import BillingPage    from './pages/app/BillingPage'
@@ -37,6 +38,11 @@ export default function App() {
           <Route path="/access-denied"   element={<AccessDeniedPage />} />
           <Route path="/privacy"         element={<PrivacyPolicyPage />} />
           <Route path="/terms"           element={<TermsOfUsePage />} />
+          {/* The user guide, rendered from docs/user-guide. Public, like the
+              two pages above: the markdown ships as static assets, so gating
+              the route would not gate the content. */}
+          <Route path="/guide"           element={<UserGuidePage />} />
+          <Route path="/guide/:slug"     element={<UserGuidePage />} />
 
           {/* Protected — staff portal */}
           <Route element={<ProtectedRoute />}>

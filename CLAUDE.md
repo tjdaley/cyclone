@@ -45,6 +45,7 @@ cyclone/
 ├── scripts/
 │   └── check-fleet.sh             # Do these nodes agree? curl + diff, no SSH
 │   └── seed_ssm.py                # Push .env secrets to SSM; dry-run by default
+│   └── sync_user_guide.py         # Publish docs/user-guide into the bundle — see §14
 ├── db/
 │   │   ├── models/                # Pydantic domain + InDB models — see §8
 │   │   │                          # One file per domain: staff, client, matter, billing_*,
@@ -1746,13 +1747,35 @@ TypeScript types mirror backend Pydantic schemas and live in `frontend/src/types
 
 API functions in `api.ts` return typed promises (`Promise<Matter[]>`, not `Promise<unknown[]>`). Call sites don't need `as Type[]` casts.
 
+### The user guide is published, not duplicated
+
+`docs/user-guide/` is the only place the guide is written. `scripts/sync_user_guide.py`
+copies it to `frontend/public/user-guide/` with a `manifest.json` built from the
+guide's **own index** (`README.md`), and `/guide` renders it.
+
+- **The copy exists because the frontend image is built with `context: ./frontend`**,
+  so nothing above that directory is reachable when the bundle is built. It is
+  generated, committed, and **never edited** — `tests/test_user_guide_sync.py`
+  fails the moment it drifts, and also checks that every cross-reference lands
+  on a heading that exists.
+- **Rewrite links, do not rewrite the guide.** Chapters link each other by
+  filename (`05-import-problems.md#flag-reference`) because they are read on
+  GitHub too; `lib/userGuide.guideHref` turns those into routes and
+  `headingId` reproduces GitHub's slug rule so the fragments still land.
+- **No `remark-breaks` on the guide**, unlike discovery responses: the prose is
+  hard-wrapped at ~78 characters, so a break per line would ragged-edge every
+  paragraph. No `rehype-raw` either — the page is public.
+- **`/guide` is public and cannot usefully be gated.** The markdown ships as
+  static assets beside the bundle, so nginx serves it to anyone with the URL
+  whatever the route does. Nothing client- or matter-specific may go in it.
+
 ### Supabase JS Client
 
 Used **only** for auth session management (`src/lib/supabaseClient.ts`). Do not use `supabase.from(...)` for data queries from the frontend.
 
 ### Routing
 
-- Public routes: `/`, `/login`, `/auth/callback`, `/onboarding`, `/access-denied`, `/privacy`, `/terms`
+- Public routes: `/`, `/login`, `/auth/callback`, `/onboarding`, `/access-denied`, `/privacy`, `/terms`, `/guide`, `/guide/:slug`
 - Protected routes: `/app/*` wrapped in `ProtectedRoute` → `AppShell`
 - `ProtectedRoute` redirects to `/login` (no session), `/onboarding` (no role), or `/access-denied` (client role — client portal not yet built)
 - Admin-only nav items filtered by role in `AppShell`
@@ -1921,6 +1944,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Per-firm settings in a `firms` table | ❌ Not started — `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT` are classified `PER_FIRM` and still served per process from `/api/config`. The multi-tenant blocker |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
+| User guide in the app | ✅ Built — `/guide`, linked from the landing-page footer and from the AppShell sidebar (new tab, so an unsaved form survives the question). Rendered from `docs/user-guide` via `scripts/sync_user_guide.py`; the copy is generated and guarded by a test |
+| Ask-the-guide help chat | ❌ Not started — see §16a. The corpus exists, is versioned, and its anchors are test-guaranteed |
 | Conflict checking | ⏳ Done manually **outside** Cyclone today. Planned home: at the `leads` table, so every promoted client has passed it. `conflict_check_run` already exists in the lead action enum |
 | Phase 2 conflict checking (pg_trgm) | ⏳ SQL ready, Python wiring uses substring match only |
 | Re-extract / delete a pleading | ❌ Not started — `raw_text` is stored, so re-extraction needs no re-upload |
@@ -1986,6 +2011,31 @@ Three things to get right when it is built:
 | **Reads execute; writes confirm first.** | "Show me the FIS" can just happen. "Add Quic Trip to Fuel" is a **firm-wide** rule change touching every matter and every FIS built afterwards, and it should be shown before it is done. The `preview_merge` / `merge` split is the pattern already in the codebase. |
 | **The transcript is a record.** | If an agent re-files transactions or writes a rule, the existing provenance has to name it as the actor — not the staff member who spoke — or the audit trail says a person did something a machine did. `category_source` would need a fourth value. |
 
+### Ask the guide, instead of reading it
+
+The user guide is now a corpus: 14 chapters, task-organized, cross-referenced,
+and published at `/guide`. A help chat over it answers *"how do I mark a
+statement as the first one?"* without anybody learning which chapter that is in.
+
+It shares the chat surface with the tool dispatcher above and is the **easier
+half** — it only ever reads. Worth building first for that reason.
+
+What the corpus already gives it, and what has to be got right:
+
+| | |
+| - | - |
+| **No retrieval infrastructure is needed to start**, and reaching for it first would be the mistake. | Measured: the whole guide is **105 KB, ~27k tokens** — it fits in one prompt with room to spare, and the largest single chapter is 18 KB. Chunking, embeddings and a vector store are what you add when that stops being true, not before. |
+| **Every answer cites a section, and the citation is a working link.** | `/guide/<slug>#<anchor>` — the anchors exist already, `headingId` reproduces GitHub's slug rule, and `tests/test_user_guide_sync.py` fails if a cross-reference stops landing. An answer nobody can check is worth less than the paragraph it paraphrased. |
+| **It must refuse outside the guide, out loud.** | Asked something the guide does not cover, a model will answer from how legal practice software generally works — fluent, plausible, and about some other product. That is the confident-wrong failure this codebase spends its whole effort preventing. *"The guide does not cover that"* is a good answer. |
+| **The unanswered questions are the real output.** | A question the guide cannot answer is a documentation gap that nobody would otherwise report. Log the **question**, not the answer, and work the list. |
+| **Keep the corpora apart.** | The guide is public and contains no client data, so a bot over it leaks nothing. Point the same chat at matter records and every rule in §13 and §6 applies — that is a different feature with a different review. |
+| **Answer from the deployed copy, never a snapshot.** | Paste the guide in at request time from the published files. A corpus baked into a prompt file is a third copy, and it would drift the way the second one would have without the sync test. |
+| **Name the task, not the model.** | `answer_user_guide_question` in `app/config/llm_profiles.json`, like everything else (§11). |
+
+When the bot and the guide disagree, **the guide is what gets fixed** — it is the
+document staff are told to trust, and a chat answer that quietly contradicts it
+makes both useless.
+
 ### Larger, already noted elsewhere
 
 - Client portal, and the client re-categorization workflow that depends on
@@ -1996,6 +2046,8 @@ Three things to get right when it is built:
   and review have produced one to curate from (§11).
 - OCR fallback for an account number on a single-page statement (§16).
 - Compliance matrix, and the `matter_preferences` table it needs (§16).
+- The ask-the-guide help chat above shares its surface with the tool
+  dispatcher; build the read-only one first.
 - Large-transaction query with a dollar threshold (§16).
 
 ---
@@ -2048,6 +2100,8 @@ Three things to get right when it is built:
 | Write business logic in route handlers | Write it in a service class |
 | Query Supabase tables from React components | Go through `src/lib/api.ts` → FastAPI |
 | Redefine types in page components | Import from `frontend/src/types/` |
+| Edit `frontend/public/user-guide/*.md` | Edit `docs/user-guide/` and run `scripts/sync_user_guide.py`. The published copy is generated, and the test fails when it drifts |
+| Put anything client- or matter-specific in the user guide | `/guide` is public and its markdown is a static asset. Route-level gating would be theatre |
 | Cast `as Matter[]` on api.ts call results | Use the typed return signatures in `api.ts` |
 | Use `orm_mode = True` | Use `ConfigDict(from_attributes=True)` |
 | Log PII (names, amounts, case facts) | Log entity IDs only |
