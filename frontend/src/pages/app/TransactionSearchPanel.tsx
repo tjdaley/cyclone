@@ -8,6 +8,7 @@ import { money, isNegative, formatDate } from '../../lib/money'
 import { categoryLabel } from '../../lib/categories'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import ExportButtons from '../../components/ExportButtons'
+import StatementPdfButton from '../../components/StatementPdfButton'
 import TagManager, { tagClass } from './TagManager'
 import type {
   FinancialAccount, TransactionCategory, TransactionTag,
@@ -27,6 +28,7 @@ function emptyFilter(): TransactionSearchFilter {
     category_ids: null, include_subcategories: true, uncategorized: false,
     tag_ids: null, tag_match_all: false, untagged: false,
     text: null, check_number: null, checks_only: false,
+    amount_min: null, amount_max: null,
     include_deleted: false, limit: PAGE_SIZE, offset: 0,
   }
 }
@@ -35,8 +37,30 @@ function isFiltered(f: TransactionSearchFilter): boolean {
   return Boolean(
     f.account_ids?.length || f.date_from || f.date_to || f.category_ids?.length ||
     f.uncategorized || f.tag_ids?.length || f.untagged || f.text ||
-    f.check_number || f.checks_only,
+    f.check_number || f.checks_only || f.amount_min || f.amount_max,
   )
+}
+
+/**
+ * Is this draft a figure yet?
+ *
+ * Amounts are debounced into the filter like the description, and a half-typed
+ * "-" or "$" would otherwise be sent and come back 422 while somebody is still
+ * typing. Blank means "no bound", which is always ready.
+ *
+ * A regex rather than `Number()`: money is a string end to end here, and the
+ * only question being asked is whether the characters form a figure.
+ */
+function amountReady(draft: string): boolean {
+  const text = draft.trim()
+  if (!text) return true
+  return /^[+-]?\s*\$?\s*\d[\d,]*(\.\d{0,2})?$/.test(text)
+}
+
+/** Which side a draft asks for, or '' for either. Used to catch -500 to +900. */
+function amountSide(draft: string): string {
+  const text = draft.trim()
+  return text.startsWith('-') ? '-' : text.startsWith('+') ? '+' : ''
 }
 
 export default function TransactionSearchPanel({ matterId, accounts }: {
@@ -58,6 +82,11 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
   // Draft text, debounced into the filter. Typing straight into the filter
   // fires a search per keystroke against a table of statement lines.
   const [textDraft, setTextDraft] = useState('')
+
+  // Same reason, plus one of its own: a draft is sent only once it is a whole
+  // figure, so "-" on its way to "-5000" never reaches the API as an error.
+  const [minDraft, setMinDraft] = useState('')
+  const [maxDraft, setMaxDraft] = useState('')
 
   const categoryById = useMemo(
     () => new Map(categories.map(c => [c.id, c])), [categories],
@@ -102,6 +131,27 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
     }, 300)
     return () => clearTimeout(handle)
   }, [textDraft])
+
+  // The two amount boxes commit together, and only when both are whole figures
+  // asking for the same direction. The server validates all of this again and
+  // is the authority; this is what keeps a 422 off the screen mid-keystroke.
+  const amountProblem = !amountReady(minDraft) || !amountReady(maxDraft)
+    ? 'Type a figure: 5000, -5000 for money out, or +5000 for money in.'
+    : (amountSide(minDraft) && amountSide(maxDraft) && amountSide(minDraft) !== amountSide(maxDraft))
+      ? 'One direction at a time — use the same sign in both boxes, or no sign at all.'
+      : null
+
+  useEffect(() => {
+    if (amountProblem) return
+    const handle = setTimeout(() => {
+      const min = minDraft.trim() || null
+      const max = maxDraft.trim() || null
+      setFilter(f => (f.amount_min ?? null) === min && (f.amount_max ?? null) === max
+        ? f
+        : { ...f, amount_min: min, amount_max: max, offset: 0 })
+    }, 350)
+    return () => clearTimeout(handle)
+  }, [minDraft, maxDraft, amountProblem])
 
   function patch(changes: Partial<TransactionSearchFilter>) {
     // Any change to the criteria invalidates the page you were on.
@@ -207,6 +257,34 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
           <label className="label" htmlFor="tx-to">To</label>
           <input id="tx-to" type="date" className="input mt-1" value={filter.date_to ?? ''}
             onChange={e => patch({ date_to: e.target.value || null })} />
+        </div>
+
+        {/* AMOUNT IS A MAGNITUDE RANGE, AND THE SIGN PICKS THE SIDE. Unsigned
+            matches both directions, which is what pairs a transfer out of one
+            produced account with the same figure arriving in another. The hint
+            is permanent because that behaviour is not guessable from the
+            labels, and a filter somebody misreads returns a confident answer
+            to a question they did not ask. */}
+        <div>
+          <label className="label" htmlFor="tx-amount-min">Amount at least</label>
+          <input id="tx-amount-min" className="input mt-1 font-mono" inputMode="text"
+            placeholder="5000" value={minDraft}
+            onChange={e => setMinDraft(e.target.value)} />
+        </div>
+        <div>
+          <label className="label" htmlFor="tx-amount-max">Amount at most</label>
+          <input id="tx-amount-max" className="input mt-1 font-mono" inputMode="text"
+            placeholder="-25000" value={maxDraft}
+            onChange={e => setMaxDraft(e.target.value)} />
+        </div>
+        <div className="md:col-span-2 flex items-end">
+          <p className={`text-xs ${amountProblem ? 'text-warning' : 'text-text-secondary'}`}>
+            {amountProblem ?? (
+              <>No sign matches <strong>either direction</strong>, so $5,000 finds both sides
+              of an offsetting pair. Use <span className="font-mono">-5000</span> for money
+              out, <span className="font-mono">+5000</span> for money in.</>
+            )}
+          </p>
         </div>
 
         <div className="md:col-span-2">
@@ -326,7 +404,12 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
         </span>
         {isFiltered(filter) && (
           <button type="button" className="text-xs text-navy underline"
-            onClick={() => { setTextDraft(''); setFilter(emptyFilter()) }}>Clear filters</button>
+            onClick={() => {
+              // Every draft, or a cleared filter leaves figures sitting in the
+              // boxes that are no longer being applied.
+              setTextDraft(''); setMinDraft(''); setMaxDraft('')
+              setFilter(emptyFilter())
+            }}>Clear filters</button>
         )}
         <span className="ml-auto flex items-center gap-2">
           <button type="button" className="text-xs text-navy underline disabled:text-text-secondary disabled:no-underline"
@@ -465,8 +548,22 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                         <span className="text-amber-700">—</span>
                       )}
                     </td>
+                    {/* THE CITATION AND THE WAY TO CHECK IT BELONG TOGETHER.
+                        A Bates number is what a reader looks up, so the button
+                        that opens the page sits in the same cell rather than in
+                        a column of its own — a fourteenth column costs width on
+                        every row to serve one click. */}
                     <td className="py-2 pr-3 text-xs text-text-secondary whitespace-nowrap tabular-nums">
-                      {row.bates_number ?? (row.physical_page_number ? `p. ${row.physical_page_number}` : '—')}
+                      <span className="inline-flex items-center gap-1.5">
+                        <span>
+                          {row.bates_number ?? (row.physical_page_number ? `p. ${row.physical_page_number}` : '—')}
+                        </span>
+                        <StatementPdfButton statementId={row.statement_id}
+                          page={row.physical_page_number}
+                          label={row.physical_page_number
+                            ? `Show this line's statement at page ${row.physical_page_number}`
+                            : "Show this line's statement"} />
+                      </span>
                       {row.bates_number && row.physical_page_number && (
                         <span className="block text-text-secondary/70">p. {row.physical_page_number}</span>
                       )}

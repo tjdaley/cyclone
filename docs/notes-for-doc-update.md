@@ -1,451 +1,596 @@
-# Notes for the config/secrets documentation update
+# Notes for the documentation update — cost tracking, insurance statements, deploy hardening
 
-Handoff notes for whoever writes the operator, deployer and admin docs for this
-release. **Everything here is something the diff does not tell you** — the
-reasoning behind a choice, a procedure that spans AWS and the repo, or a trap
-that has already cost us a production outage. The code is authoritative for
-*what*; this is the *why* and the *how*, plus the things that will be got wrong.
+Handoff notes for the thread that maintains `docs/operator-guide/` and
+`docs/user-guide/`. They cover the change set **not yet committed** as of
+2026-09-17. The earlier version of this file (config, secrets, fleet checks) has
+already been worked into `docs/operator-guide/` chapters 1–6, and it is replaced
+here. Where this change set makes one of those chapters wrong, §1 says so.
 
-Authoritative sources, in case a statement here has drifted:
+**Everything here is something the diff will not tell you:** why a choice was
+made, a procedure that spans the database, AWS and the app, a recovery step, or
+a trap that has already bitten. For *what* the code does, the code wins. For
+*why* and *how to operate it*, use this.
 
-| | |
+| Authoritative source | For |
 | - | - |
-| `app/util/config_spec.py` | What every setting IS. Six buckets, total and disjoint. |
-| `app/util/secret_source.py` | The SSM loader, and every rule it enforces. |
-| `app/util/config_fingerprint.py` | The fleet hash and the startup warnings. |
-| `scripts/check-fleet.sh` | The drift check. Its header comment is long and worth reading. |
-| `scripts/seed_ssm.py` | Pushes `.env` secrets into SSM. Dry-run by default. |
-| `docs/aws-ssm-setup.md` | The full AWS runbook — IAM, metadata, cutover, rollback, Terraform. |
-| `CLAUDE.md` §5a | The design rationale in condensed form. |
+| `docs/cost-tracking-design.md` | Full cost-tracking design, deploy steps, SQL queries, and the partner-facing wording (§7). **Read it before writing about Costs.** |
+| `db/migrations/038`–`042` | Each header explains what that migration is for and what it is safe to do. |
+| `app/services/llm_usage.py` (docstring) | How each vendor's token counts are mapped. |
+| `app/services/statement_service.py` | Flag conditions and wording. |
+| `CLAUDE.md` §11 (LLM Service, Statement Service), §15 (RLS, constraint handler) | Condensed rationale. |
 
 ---
 
-## 1. ⚠ THE NAME COLLISION — READ THIS FIRST
+## 0. This release, as an operator will run it
 
-**`PER_FIRM` means two unrelated things, and they share no members.** If the
-docs conflate them, somebody provisioning a new firm will change the wrong set
-of values.
+### Migrations, in order
 
-| | `config_spec.PER_FIRM` | The AWS tag `PER_FIRM=Y` |
+| File | What it does | Known status | Safe to run before the deploy? |
+| - | - | - | - |
+| `038_insurance_accounts.sql` | Adds `life_insurance` and `annuity` to the account-type CHECK | **Tom ran it** on the database he was testing against | Yes. Run it first. |
+| `039_cost_tracking.sql` | `firms` table (one row) plus the `llm_calls` ledger | **Tom ran it** and saw a row | Yes. Run it **before** the deploy: calls made earlier are never recorded. |
+| `040_enable_rls.sql` | RLS on every table lacking it; views closed to the public key | **Not confirmed run on production** | Yes |
+| `041_service_rates.sql` | Price table, pricing views, report function | Not confirmed | Yes |
+| `042_served_model.sql` | Records which model actually answered, and prices on that | Not confirmed | Yes. It can also run after the deploy (see §2.7). |
+| `043_cost_report_by_firm.sql` | Adds **Firm** to the Costs page's groupings | Not confirmed | Yes |
+
+`docs/operator-guide/04-deploying.md` still says *"This release: 036 and 037"*.
+Update it.
+
+### Deploy
+
+- Rebuild and redeploy **api, worker and frontend**. The Costs page is new
+  frontend code, and the usage ledger is written by both the api and the worker.
+  Shipping only the api leaves every job's spend unrecorded.
+- `deploy-version.bat` now **refuses to build** when `SUPABASE_URL` or
+  `SUPABASE_ANON_KEY` is missing from the build machine's `.env` (§1.1).
+- After deploy, **open the app in a browser**. The script now says so, and §1.1
+  explains why nothing else will tell you.
+- **Rename the firm:** `update firms set name = '<firm name>' where id = 1;`.
+  039 seeds `'Default firm'` because a migration cannot read `FIRM_NAME`.
+
+---
+
+## 1. Corrections to the existing operator guide
+
+### 1.1 The build args belong on the BUILD machine, not on every node — `01-configuration.md`, `04-deploying.md`
+
+`01-configuration.md` § *"Must stay in `.env` — SSM cannot supply it"* lists
+`SUPABASE_URL`, `SUPABASE_ANON_KEY` and `API_BASE_URL` without saying *where*.
+That reads as "on every server", which is wrong, and the mistake it invites has
+already happened.
+
+**The distinction is build time vs runtime, not one node vs another.**
+
+| Name | Must be in `.env` on | Why |
 | - | - | - |
-| Applies to | `Settings` **fields** | **SSM parameters** |
-| Lives in | the node's `.env` | AWS Parameter Store |
-| Members | `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT`, `STRIPE_PUBLISHABLE_KEY` | a subset of the 12 `SECRET` names |
-| Fingerprinted | yes | yes (as secrets) |
-| Means | "becomes a `firms` table row when there is a second firm" | "this credential MUST be swapped for a new firm" |
+| `ID`, `CYCLONE_SECRETS_SOURCE` | every node | Identity, and the switch that turns the SSM loader on |
+| `AWS_REGION` | every node (optional where IMDS answers) | Bootstrap |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | **the machine that runs `docker compose build`** | Compiled into the JavaScript bundle |
+| `API_BASE_URL` | nowhere | Compose gives it a `:-` default |
 
-The overlap is **empty**: only `SECRET` names are ever written to SSM
-(`seed_ssm.py` enforces this), and no `config_spec.PER_FIRM` field is a secret.
+A production node's `.env` legitimately holds only `ID`,
+`CYCLONE_SECRETS_SOURCE` and `AWS_REGION`, plus optionally `CYCLONE_ENV`.
+`SUPABASE_URL`, `REDIS_URL` and `HOST_URL` can all come from SSM, because the
+API reads them at runtime inside the container. Keeping the two build args in a
+node's `.env` anyway is cheap insurance in case anybody ever builds on a server.
 
-Suggested wording for the docs: call the tag **"per-firm credential"** and the
-bucket **"per-firm setting"**, and never write bare `PER_FIRM` without saying
-which. A new-firm checklist needs *both* lists and should say so explicitly.
+**Fix the symptom description, too.** The chapter says a missing anon key
+"first appears in a browser at login". What actually shipped was worse:
 
-**The tag's absence is meaningful and should be documented as such.** Tom tagged
-only the parameters that *must* change for a new firm. An untagged parameter
-(say a shared LLM key) is one the firm may reasonably inherit — it is not "we
-forgot to tag it". Worth stating, because the natural reading of an untagged row
-is that nobody got to it.
+- `SUPABASE_URL` was removed from the build machine's `.env` during the SSM
+  migration.
+- The next build compiled an empty string into the bundle.
+- **Every route served a blank white page.** `createClient("")` throws
+  `supabaseUrl is required.` before React mounts, so there is no login screen to
+  fail at.
+- The build exited 0, the container was healthy, nginx answered `GET / → 304`,
+  and the fleet hash was clean.
+- **No server log anywhere had a line about it**, because the app died before
+  making its first request.
+- The only evidence was four words in the **browser console**.
+
+Worth a troubleshooting entry: *blank white page after a deploy → open the
+browser console → `supabaseUrl is required` → the build machine's `.env` is
+missing the build args → fix it, rebuild, redeploy the frontend.* A restart does
+nothing.
+
+**Three guards now exist. Document the rule, and name the guards as backstops:**
+
+1. `deploy-version.bat` refuses to build without the two names. This is the only
+   point where the problem can be caught, because it is created at build time.
+2. The runtime guard used to be keyed on the `COMPOSE_ONLY` bucket.
+   `SUPABASE_URL` is in the `INFRASTRUCTURE` bucket, so the guard never saw it,
+   and that is how the gap happened. It now keys on a separate list of *names
+   compose interpolates*.
+3. A test fails if that list stops matching `docker-compose.yml`.
+
+### 1.2 New startup lines — `05-startup-log.md`
+
+Add these to the "Lines from the rest of the boot sequence" table:
+
+| Line (abridged) | Level | Means | Do |
+| - | - | - | - |
+| `REDIS_URL is not set on this node and fell back to redis://localhost:6379/0, which names THIS machine…` (also `HOST_URL`, `ID`) | WARNING | A setting that differs per node was never set, and its default points at the node itself. **Suppressed in development**, where those defaults are correct. | Set it in `.env` or SSM. On Redis this is serious: **every node thinks it holds the fleet-wide mail-poller lock**, so all of them poll the mailbox. |
+| `llm_usage: the llm_calls table does not exist. Run db/migrations/039_cost_tracking.sql…` | ERROR | Usage recording is **off for the life of that process**. | Run 039, then **restart api and worker**. Running the migration alone does not bring recording back. |
+| `llm_usage: llm_calls has no served_model column. Run db/migrations/042_served_model.sql, then restart api and worker…` | ERROR, once | Usage **is** still recorded, without the served model. | Run 042, then **restart api and worker**. That process keeps writing without the new columns until it restarts. |
+| `Database schema: … llm_calls … served_model / vendor_response_id` | ERROR | The same missing 042, reported by the schema check | As above |
+| `llm_usage: could not write a cost record (…); N consecutive failure(s)` | WARNING at failures 1, 10, 100, then every 1000 | The writer could not insert. **Each failing row is lost** once the database client's own three retries are used up; that spend is not recorded. | Check database connectivity |
+| `llm_usage: ledger queue full; N cost record(s) dropped` | WARNING | The database has been unreachable long enough that 10,000 rows are waiting. Spend is now being **lost**. | Urgent if it persists |
+| `Database rejected a write: check constraint, sqlstate=23514, path=… The offending row is deliberately not logged` | ERROR, at request time rather than startup | A user picked a value the database does not allow yet. **Almost always a migration that has not been run.** | Run the missing migration. The user saw a sentence saying so (§3.2). |
+
+### 1.3 `REDIS_TIMEOUT_SECONDS` — `01-configuration.md` / `.env.example`
+
+- New, **FLEET** bucket (fingerprinted), default `3.0`. It covers connecting and
+  reading alike.
+- **It bounds a hang, not a refusal.** A refused connection already fails in
+  about two seconds and never reaches the cap. What it fixes is a host that
+  accepts a connection and then goes silent. Before, that stalled the mail-poller
+  tick indefinitely while it held the fleet-wide lock, so **one wedged node
+  stopped every node from polling**.
+- **Q&A worth including:** *"The test suite (or the dev worker) is suddenly very
+  slow."* `REDIS_URL` moved into SSM. A developer machine has no SSM, so it falls
+  back to `redis://localhost:6379/0`, and every Redis call waits before failing.
+  Measured: 74.7 s for one suite, 8.9 s once bounded. The fix is to put
+  `REDIS_URL` back in the **dev** `.env`.
+- `localhost` resolves to both `::1` and `127.0.0.1`, which are tried in turn, so
+  an unreachable `localhost` URL costs exactly twice what `127.0.0.1` costs.
+  Measured 4.07 s vs 2.04 s.
 
 ---
 
-## 2. The precedence chain — highest wins
+## 2. Admin › Costs — new feature
 
-This is the single most important thing for an operator to hold in their head,
-and it is not visible from any one file:
+Menu item **Costs**, **admin only**. `docs/user-guide/12-user-roles.md`'s menu
+table needs a row for it. It probably also needs a short chapter, in the
+operator guide or an admin section; it is not paralegal work.
 
-```
-1. process environment   ← .env via compose env_file, and /app/.env mounted
-2. SSM parameters        ← only fill names NOT already set
-3. Settings defaults     ← compiled into the image
-```
+The page has three sections: **Spend** (by month, grouped by **firm**,
+vendor/model, task, matter, staff member, or where it started), **Missing
+prices**, and **Prices**.
 
-**SSM never overwrites something already set.** `secret_source.load()` skips any
-name already in `os.environ` and reports the count (`… (8 already set, left
-alone)`). Three consequences the docs should state plainly:
+**Grouping by firm reads as a single row today**, and that is expected: there is
+one firm. It exists because `llm_calls` has carried a firm on every row since
+039 -- attribution cannot be added to past rows -- and because it is the
+grouping that says what the others mean once there is a second firm: *spend by
+matter* across two firms is a list nobody can act on without knowing whose
+matters they are. Renaming the firm changes the label on past months too; the
+report keys on the firm's id, not its name.
 
-- **The cutover is reversible in both directions.** Turn the loader on and
-  nothing changes until a line is deleted from `.env`. Turn it off and `.env`
-  takes over again.
-- **Rollback is uncommenting a line in `.env` and recreating the containers.**
-  No AWS change, no deploy. This is the emergency procedure.
-- **A stale `.env` line silently wins over a rotated SSM value.** If somebody
-  rotates a key in Parameter Store and the old value is still in `.env`, the
-  node keeps using the old one and says so only as a count. This is the most
-  likely operator mistake with this design and deserves a callout.
+### 2.1 What the numbers are, and are not
+
+- **Model-API spend only.** Supabase, AWS, storage and hosting are *designed,
+  not built* (design doc §5). Budgets are not built. **Do not let the docs imply
+  a total cost of running Cyclone.**
+- Figures are **vendor-counted tokens × the price entered for that day**.
+  Nothing is estimated from text length.
+- **Every attempt counts, including failures.** A call that failed over to the
+  next model, or whose reply was rejected as unparseable, was still billed by the
+  vendor. So a statement import can show several calls to different vendors for
+  one piece of work. That is correct, not duplication.
+- **"Priced so far" instead of "Total"** means some calls have no price entered.
+  The figure is then a **floor**. Unpriced calls count as *unknown*, never as
+  $0.
+- **`<$0.01`** means more than zero and less than a cent. It is shown because
+  rounding to cents would print `$0.00`, which reads as free.
+- **Months and dates are UTC**, because vendor invoices are. A call made at 8 pm
+  Texas time on 30 September counts in **October**.
+- **`unattributed`** under *Where it started* is spend from a path that set no
+  owner. It is recorded so the gap shows up; it is not an error.
+- **Intake preview has no matter, by design.** Its purpose is to *create* the
+  matter. Its spend is attributed to the user and the request.
+
+### 2.2 Entering a price — the procedure
+
+**Where to start:** use **Missing prices** → **Set price**. It fills in the
+vendor, the exact model name, the meter, and a start date equal to the first day
+that model was used, so every affected call is covered. Typing the model name by
+hand is how a price ends up never matching (a trailing space, `flash-lite` vs
+`flash_lite`). The form trims spaces, but it cannot fix a wrong name.
+
+**Prices are per 1,000,000 tokens**, which is how every vendor quotes them.
+Enter the **Standard** (paid, on-demand) tier. Cyclone does not use Batch, Flex
+or Priority.
+
+**Which line on a vendor's pricing page goes into which meter.** This is the
+question that needs documenting, because the vendors word it differently:
+
+| Meter in Cyclone | Anthropic page | OpenAI page | Gemini page |
+| - | - | - | - |
+| **Input** | Base input | Input | Input price |
+| **Cached input** | Cache hits & refreshes | Cached input | Context caching price |
+| **Cache write** | 5-minute cache writes | — (not billed) | — (not billed per token) |
+| **Output** | Output | Output | Output price ("including thinking tokens") |
+
+- **Thinking and reasoning tokens are Output** on every vendor, and the ledger
+  already counts them there.
+- **A meter no call has used needs no price.** Missing prices lists only meters
+  that actually carried tokens.
+- **Not modelled, and why the report can differ from an invoice:** Gemini's
+  cache *storage* charge (per million tokens **per hour**), grounding with
+  Search or Maps, and any price tier that applies only above a prompt length
+  (some models charge more past 200k tokens; the ledger holds one price per
+  meter). Cyclone does not currently use grounding or explicit caching.
+
+**Worked example** (from 2026-09-16, Gemini 3.5 Flash-Lite, Standard):
+Input $0.30 → **Input**. Output $2.50 → **Output**. Context caching $0.03 →
+**Cached input**. The $1.00/1M-per-hour storage line is skipped.
+
+**Always fill in the source URL**, plus a note on the tier. The price table is
+the evidence behind every cost figure. A price with no source is an assertion.
+
+### 2.3 Changing a price vs correcting one — two different buttons
+
+| | **New price** (or Set price) | **Correct** |
+| - | - | - |
+| Use when | The vendor changed its price from a date | You typed it wrong |
+| Dates | Ends the price in force the moment the new one starts, in a single step | **Cannot move dates** |
+| Effect on past calls | None before the new start date | Re-prices every call the row covered |
+| Audit log | `service_rate.set` | `service_rate.corrected`, with before and after |
+
+- **A start date earlier than a price that already starts later is refused**
+  (HTTP 409, with a sentence explaining it). This stops somebody rewriting a
+  schedule without meaning to. The remedy is to correct the later row, or choose
+  a date after it.
+- **There is no delete.** A wrong price is corrected, not removed.
+- **Past spend changes when a price is corrected.** Prices are applied when the
+  report runs, never stored on the call. That is deliberate: prices get entered
+  late and get fixed. Say this plainly, or a total that moved after an edit will
+  look like a bug.
+
+### 2.4 ⚠ Price the model that ANSWERED, not the one requested (042)
+
+This is the least obvious rule on the page, and Tom asked for it for **billing
+disputes on large document jobs.**
+
+- Cyclone asks a vendor for a model by the name in its configuration. The vendor
+  may **serve that name from a specific version** and says which in its
+  response. OpenAI answers `gpt-5` with a dated snapshot. A "preview" or alias
+  name can be repointed to a newer version with a different price.
+- Every call now records both names, and **prices match the served model**.
+  Calls from before 042 have no served name and are priced on the requested one;
+  that fallback is recorded per call.
+- **So a Missing prices row can name a model that appears nowhere in Cyclone's
+  configuration.** That is the vendor's served version, and it is the name the
+  price must be entered under. The row shows **"requested as …"** underneath, so
+  you know which line on the pricing page to look for.
+- **When a vendor repoints an alias, the new version shows up in Missing
+  prices** instead of being charged at the old price. That is the feature
+  working, not a regression.
+- **Q&A — "the vendor no longer lists the model we used."** It happens with
+  retired preview models (e.g. `gemini-3.1-flash-lite-preview`). Enter the price
+  from the invoice or your own records, and say so in the note. The vendor's
+  usage export generally does not say which version served a call. Cyclone's
+  ledger now does.
+
+### 2.5 Procedure: a billing dispute or an invoice that does not match
+
+1. Compare the **same UTC month** and the **same vendor**.
+2. Check whether the Spend total says **Priced so far**. If it does, clear
+   Missing prices first.
+3. Know why the figures can legitimately differ:
+   - taxes and credits
+   - a key on a free tier (the invoice is $0 while Cyclone shows a cost)
+   - the unmodelled charges in §2.2
+   - another application sharing the same API key
+   - rows lost when a process stopped (§2.6)
+4. For a specific call, the vendor's own reference is stored as
+   `vendor_response_id`, which is what vendor billing support can look up.
+   SQL (run in the Supabase SQL editor):
+
+   ```sql
+   select occurred_at, vendor, model as requested, served_model, vendor_response_id,
+          outcome, input_uncached_tokens, input_cache_read_tokens, output_tokens
+     from llm_calls
+    where source_type = 'job' and source_id = '<job id>'
+    order by occurred_at;
+   ```
+
+5. **The first thing to do after this ships** (design doc §6): compare one day's
+   per-vendor token totals against each vendor's own usage console. The
+   field-by-field mappings were written against the SDK documentation, and SDKs
+   drift. If a mapping is wrong, the raw vendor object is stored on every row
+   (`usage_raw`), so history can be recomputed.
+
+### 2.6 Known limits (say them; do not let a reader find them)
+
+- **Rows can be lost** when a process stops. Queued rows get five seconds to
+  flush. This is accepted so that a shutdown cannot hang on a database that is
+  down.
+- **Each node records independently.** A node whose recorder switched itself off
+  says so only in its own log. Nothing yet checks that both nodes are writing.
+- The ledger is **append-only**. Rows cannot be edited; corrections go in the
+  price table.
+- Spend is not yet limited by any budget.
+
+### 2.7 Recovery
+
+| Situation | What happens | Do |
+| - | - | - |
+| Code deployed before **039** | Recording turns itself off per process, with one ERROR | Run 039, **restart api and worker**. Spend in between is gone. |
+| Code deployed before **042** | Recording continues without the served model, with one ERROR | Run 042, **restart api and worker**. Rows written in between are priced on the requested model, permanently. |
+| **041 re-run after 042** | **Fails, on purpose.** Nothing changes, because it runs in one transaction. | Nothing. If 041 must be re-applied, run 042 again right after. The failure prevents 041 from quietly switching pricing back to the requested model. |
+| Price entered under the wrong model name | Calls stay under Missing prices | Enter it again under the name Missing prices shows. The wrong row is harmless; correct its note to say so. |
 
 ---
 
-## 3. Where each value belongs
+## 3. Security and error-handling changes
 
-**`.env` holds what identifies the node and what compose must read. SSM holds
-the credentials.** That sentence is the whole rule; everything below is why.
+### 3.1 RLS — 040 (`operator-guide`, new section)
 
-### Must stay in `.env` — cannot come from SSM
+- **What was checked on production (2026-09-17):** every *table* already had
+  RLS, switched on in the Supabase dashboard and never recorded in a migration.
+  **The real exposure was two views, `v_matter_summary` and
+  `v_unbilled_entries`.** A view runs with its owner's privileges, so the public
+  key could read through it even though the tables were protected.
+- **The public (anon) key is compiled into the frontend**, so anything it can
+  read is readable by anyone who opens the app.
+- 040 finds tables and views **from the database catalog**, so it also covers
+  anything created by hand in the dashboard. It adds **no policies**, and that is
+  safe: the backend uses the service role, which bypasses RLS, and the frontend
+  never queries tables directly.
+- **Rule for anyone adding a migration**, enforced by a test for everything after
+  040: enable RLS on every new table, make every new view `security_invoker`,
+  and revoke EXECUTE from `anon` on every new function.
+- **What could break:** any external tool reading tables with the *anon* key.
+  None is known. The dashboard and the backend are unaffected.
+- **Verification query** (a view always reports `relrowsecurity = false`, so for
+  views the anon-privilege column is the one to read):
 
-| | Why |
+  ```sql
+  select c.relname, c.relkind, c.relrowsecurity,
+         has_table_privilege('anon', c.oid, 'SELECT') as anon_can_select
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relkind in ('r', 'v')
+   order by anon_can_select desc, c.relname;
+  ```
+
+  After 040, `anon_can_select` should be false for every view.
+
+### 3.2 A refused value now gets a sentence, not a 500 (user guide troubleshooting)
+
+- Before this change, picking a value the database did not yet allow gave
+  *"Internal Server Error"*. The first time was choosing **Life insurance**
+  before 038 was run.
+- **That error also printed the whole offending row into the server log:** a
+  client name and a full account number. Worth one sentence in the operator
+  guide, because it is why this change is a privacy fix and not tidying.
+- **What a user now sees**, roughly: the constraint name, then *"the database
+  refused this value. If the application was just updated to offer a new option
+  here, the matching migration has not been run on this database yet."*
+- **User-guide wording:** *if you see this, tell your administrator. Nothing you
+  entered was saved, and nothing is wrong with the matter.* Duplicate and
+  conflicting entries now answer with a 409 sentence in the same way.
+
+---
+
+## 4. Statement import — user guide changes
+
+### 4.1 New account types: Life insurance and Annuity (and Crypto in the picker)
+
+`04-importing-statements.md`, `07-viewing-statements.md`, `11-discovery-tracking.md`
+(compliance), and wherever account types are listed.
+
+- **Why they are separate types rather than "Other" or "Brokerage".** This is
+  the explanation readers will want:
+  - A cash-value policy divides by **where the premiums came from**, not by whose
+    name it is in.
+  - It has a **beneficiary designation**, which no brokerage account has.
+  - It prints **two figures that must never be added together**: a cash value,
+    which is divisible property, and a death benefit, which is not.
+  - An **annuity in payout** behaves like an income stream, not an asset, which
+    is why it is not lumped in with life insurance.
+- **Crypto** existed since migration 036 but was missing from the account-type
+  dropdown. It is now there.
+- **They are read like brokerage accounts:** cash in and out plus investment
+  results, never internal moves between sub-accounts. The balance is the
+  **total policy value**, not the cash value alone.
+- **A policy statement has no transaction register.** Its "value of your policy"
+  block *is* the activity: premiums, deductions, investment results. Those are
+  the lines imported, and they are **period totals with no dates** (see §4.2).
+- **On the compliance grid and its exhibits** they print as **Life insurance**
+  and **Annuities**. **Crypto accounts printed as "Other" on every compliance
+  exhibit until this release.** Anyone holding one of those exhibits should
+  re-export it.
+- **Changing an existing account to one of these types fails until 038 is
+  run**, with the sentence in §3.2.
+
+### 4.2 Flag changes — `05-import-problems.md` flag reference
+
+The rule behind all three: **a flag must be true of the statement it sits on.**
+A policy statement that reconciled to the cent was showing two false flags and
+one instruction nobody could follow.
+
+| Flag | Before | Now | Doc change |
+| - | - | - | - |
+| **SECURITIES_NOT_EXTRACTED** | On every brokerage-type statement | **Only when at least one trade was actually skipped** | Add "only appears when something was skipped" |
+| **MARKET_CHANGE_NOT_PRINTED** | Whenever no market-change line was found | **Only when the statement also did not reconcile** | The existing text ("the balances will not tie") is now always true where it appears. Also say that insurers call this line other things: *"Fixed and variable account results"*, *"Investment results"*, *"Change in value"*. |
+| **UNDATED_TRANSACTIONS** | Always a warning, "date them from the source page" | **Two shapes.** *Some* lines undated: still a warning, same advice, because those dates are printed on the page. **Every** line undated on a brokerage, retirement, life-insurance or annuity account: **information only.** That is a policy-style statement whose figures are period totals and never had dates. | Split the row. Keep the consequence for both: **a date-range search or exhibit will not include undated lines.** For the info case, the instruction is *nothing to do*, not "date them". |
+| **INCOMPLETE_EXTRACTION** | Fired falsely on policy statements: "premium payments" was read as money *out* | No longer fires on those | No wording change. If a reader asks why an old policy import shows it, see §4.3. |
+
+### 4.3 Statements imported before this release keep their old flags
+
+Flags are written at import and **not recomputed**. A policy or annuity
+statement imported earlier may still show the false flags, or zero transactions,
+or be typed as *Other*. The fix:
+
+1. On the Accounts tab, set the account type to **Life insurance** or
+   **Annuity**. This needs 038.
+2. **Retry** the statement, so it is re-read with the new rules.
+3. Check that the account type came back correct after the re-read.
+
+Remember that Retry discards **every** statement from that upload, which the
+guide already says.
+
+### 4.4 An amount range on the Transactions tab — `08-categorizing-and-fis.md`
+
+Two new boxes beside the date range, **Amount at least** and **Amount at most**,
+in the filter table at the top of *"From the Transactions tab — for bulk work"*.
+The behaviour that needs explaining, because it is not guessable from the
+labels:
+
+| Typed | Finds |
 | - | - |
-| `ID` | Genuinely per-node. It is how a report traces back to a machine. |
-| `CYCLONE_SECRETS_SOURCE` | Chicken-and-egg: it is what turns the loader on. |
-| `SUPABASE_URL` | **compose build arg** |
-| `SUPABASE_ANON_KEY` | **compose build arg** |
-| `API_BASE_URL` | **compose build arg** |
+| `5000` | **Either direction** — a $5,000 debit *and* a $5,000 credit |
+| `-5000` | Money out, $5,000 or more |
+| `+5000` | Money in, $5,000 or more |
+| `500` to `1000` | Either direction, between $500 and $1,000 |
+| `-500` to `-1000` | Money out, between $500 and $1,000 |
 
-The last three are the trap. `docker-compose.yml` interpolates them **on the
-host**, before any container exists:
+- **Unsigned matching both directions is the feature, not a convenience.** It is
+  how an offsetting pair is found: money leaving one produced account and the
+  same figure arriving in another is one movement, and the exhibit needs both
+  lines. Worth saying in the guide, with that example.
+- **Both boxes are amounts, not positions.** The smaller figure goes first even
+  when searching money out, so `-500` to `-1000` is right and `-1000` to `-500`
+  is refused with a sentence saying so.
+- **Mixing `-` and `+` is refused.** A range that crosses zero is what you get
+  by leaving the signs off.
+- **The direction is the printed sign**, so on a credit card "money out" is a
+  card *payment* and a purchase is money in. Chapter 7 already explains the sign
+  convention; this is a place to cross-reference it rather than re-explain.
+- **It reaches the exhibit.** The Selection block states the range *and* the
+  direction — "Money out, $5,000.00 or more", or "between $500.00 and $1,000.00,
+  in either direction" — so two exhibits drawn from the same matter cannot look
+  contradictory. Mention it in `10-exports.md` where the Selection block is
+  described.
+- A figure that is not readable is refused with advice rather than ignored; the
+  page waits until a box holds a whole figure before searching, so typing a
+  minus sign does not flash an error.
 
-```yaml
-VITE_SUPABASE_URL: ${SUPABASE_URL}
-VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
-VITE_API_BASE_URL: ${API_BASE_URL:-}
-```
+### 4.5 Adding a line the import missed — `05-import-problems.md`, `07-viewing-statements.md`
 
-`secret_source` runs *inside* the container and cannot possibly supply them.
-Move `SUPABASE_ANON_KEY` to SSM only and compose substitutes an **empty
-string**: one "variable is not set" warning into a build log, exit code 0, an
-image built with no anon key, and a failure that first appears **in a browser at
-login**. Nothing in the API log, nothing on the fleet hash, container healthy.
+New: **Add a line**, in the Transactions header of a statement's drill-down
+(Accounts tab → account → statement). It is the fix for a statement that will
+not reconcile because a line was never extracted at all — and it is what
+replaces editing the database by hand, which is how it was being done.
 
-There is now a guard — `_refuse_if_compose_reads_it()` raises at startup if a
-`COMPOSE_ONLY` value arrives from SSM — but it fires only if the parameter was
-created by hand, since the seeder cannot create one. Document the rule, not just
-the guard.
+What the guide should say:
 
-**`SUPABASE_SERVICE_ROLE_KEY` is fine in SSM.** Only its `ANON` sibling is a
-build arg. Easy to get backwards.
+- **It is for a line that is printed on the statement and the import missed.**
+  Not for an adjustment, not for a figure from somewhere else.
+- **It carries your name.** The line is recorded as added by hand, with the
+  reason typed into the dialog, and that travels onto the exhibit's flag trail
+  the same way a correction does. Worth stating plainly: the Rule 1006 notice
+  promises the underlying records are available, so a line nobody can find on
+  the production has to say where it came from.
+- **The statement is re-checked on save**, which is the point. If the added line
+  was the missing one, UNRECONCILED clears.
+- **Sign it the way the statement moves the balance** — money out negative. The
+  dialog says so; Chapter 7's sign convention is the cross-reference.
+- **The date defaults to the period start** and is bounded by the period. Blank
+  is allowed, for a policy-style statement whose figures never had dates, and
+  the consequence is the one in §4.2: an undated line is excluded from every
+  date-filtered search and exhibit.
+- **Page and Bates are optional and belong to the page it is printed on.** Never
+  a Bates number worked out from a neighbouring page.
+- The panel now appears for a statement with **no** lines at all, which is
+  exactly the statement somebody needs to add one to.
 
-### Should stay in `.env`, though not strictly required
+### 4.6 Reaching the source PDF from a transaction row — `05-import-problems.md`, `10-exports.md`
 
-- `CYCLONE_ENV` — see §4. A fallback; costs nothing, prevents an outage.
-- `AWS_REGION` — see §5. Optional wherever IMDS is reachable.
+The document icon that was already on statement rows is now on every row of the
+**Transactions** tab, inside the Bates/page cell rather than in a column of its
+own. It opens that line's statement **at the page the line is printed on**,
+where the statement-row button opens at the statement's first transaction page.
+On a production of sixty pages that is the difference between checking a figure
+and hunting for it. Mention it wherever the guide tells somebody to verify a
+line against the source.
 
-### Belongs in SSM
+### 4.7 Why a multi-month PDF used to import eight months and then go wrong
 
-All 12 `config_spec.SECRET` names. `seed_ssm.py` writes only these, and reports
-"orphans" — parameters in the path that are not in `SECRET` — so a hand-created
-parameter is visible.
+Worth writing up plainly, because users have been working around it by hand and
+the workaround is no longer necessary for this cause.
 
-### Deliberately NOT in SSM
+A long document was **indexed** in one pass before being read statement by
+statement, and that index pass only ever saw the first 60,000 characters —
+about eight monthly statements on a scanned production. Past that point the
+import did not fail: it reported success for the statements it found, and the
+pages belonging to later months were read as part of the last statement it knew
+about. That is the "it ingests eight months and the rest has numerous errors"
+experience.
 
-`FLEET` and `PER_FIRM` settings. Non-secret defaults already ship inside the
-image as `Settings` defaults, so two nodes on the same image tag structurally
-cannot disagree about `LLM_TEMPERATURE`. Putting them in SSM would add a place
-to look without removing one, and turn a value readable in a `diff` into one
-needing AWS access. Worth documenting as a deliberate boundary, because
-"centralise everything" is the obvious instinct.
+The index now runs in windows across the whole document. What the guide should
+say:
 
----
+- **A multi-month PDF should now import whole.** If one still does not, the
+  reason will be OCR quality or page count, not this.
+- **New flag, `PAGES_NOT_INDEXED` (warn).** It names pages that begin a
+  statement nothing read, or belong to none. Add it to the flag reference in
+  `05-import-problems.md` under *"The extraction may be incomplete — the serious
+  ones"*: the import is **short**, lines on those pages are missing, and where
+  such a page falls inside another statement's range its lines may have been
+  filed against that statement. The action is to check those pages and split the
+  PDF into one statement per file if they hold months of their own.
+- **Splitting is still faster**, and that advice stays: a stack of monthly files
+  is read several at a time by the worker pool, where one combined PDF is read
+  in sequence. The upload survey already says so.
 
-## 4. Which environment a node is in
+### 4.8 A false INCOMPLETE_EXTRACTION on every credit-card statement
 
-The SSM path is `/cyclone/<environment>/<VARIABLE_NAME>` — a plain path, e.g.
-`/cyclone/production/ANTHROPIC_API_KEY`. No `key=value` segments.
+Fixed, and worth a line in `05-import-problems.md` if the flag reference says
+anything about card statements.
 
-The `<environment>` segment is resolved at startup:
+A card statement's summary prints "Purchases $244.11". Cyclone signs an amount
+by its effect on the printed balance, so a card purchase is **positive** — it
+raises what is owed — while the word "purchase" means money *leaving* on a bank
+statement. The completeness check read the printed purchases total as the
+statement's **debit** total, compared it against lines that are all positive,
+and reported the statement short by its own purchases. It reconciled to the
+cent at the same time, which is the tell: **a statement that ties and claims to
+be short is claiming something impossible.**
 
-1. **EC2 instance tag `cyclone:environment`**, read over IMDS. *Wins.*
-2. `CYCLONE_ENV` from `.env`. **Fallback only** — consulted when the tag yields
-   nothing.
-3. Neither → the process raises and does not start.
+Nothing for a user to do differently. Older card imports still carry the flag —
+flags are written at import and not recomputed — so a card statement showing
+INCOMPLETE_EXTRACTION *and* reconciling can be accepted, or re-imported with
+Retry to clear it.
 
-**`CYCLONE_ENV` is a FALLBACK, not an override**, and the docs must not call it
-an override. An override would win, and a typo in one box's `.env` would then
-point that node silently at another environment's secrets — which is exactly the
-drift surface the tag removes. (This wording was wrong in our own source until
-this release; expect it to be wrong in anyone's head.)
+**One thing that does matter to the user:** the fix keys on the account's
+**type**. A card filed as "Checking" or "Other" still gets the bank reading and
+will keep showing the false flag. Worth saying in Chapter 7 where account types
+are set — the type also drives how the FIS treats the account's spending.
 
-**The tag needs two things, and both are easy to miss:**
+### 4.9 What Retry looks like now — `05-import-problems.md` § Retry (was §4.4, then §4.5, §4.8, now §4.9)
 
-- the tag must exist on the instance (`cyclone:environment` = `production`)
-- **`instance-metadata-tags` must be enabled** on the instance — it is **off by
-  default**, and without it IMDS returns 404 for every tag even when the tag
-  exists
-- the **metadata hop limit must be 2**, or containers cannot reach IMDS at all
-  (1 hop is consumed getting out of the container network)
+Screenshots or wording to update:
 
-A 404 on the tag has two indistinguishable causes — tag missing, or
-metadata-tags disabled. The triage table in `docs/aws-ssm-setup.md` covers it,
-including a probe that asks *from inside the container*, which is the only
-version of the question that matters: the host can reach IMDS on hop limit 1
-where the container cannot.
-
-**Success is silence.** When the tag works there is no warning and no
-"using CYCLONE_ENV" line — just the `loaded N parameter(s)` summary. Tell
-operators that, or they will look for a confirmation that does not come.
-
----
-
-## 5. The AWS region
-
-`secret_source.region()` resolves it and passes `region_name` to boto3
-explicitly: `AWS_REGION`, then `AWS_DEFAULT_REGION`, then IMDS
-`placement/region`. Nothing resolvable raises rather than defaulting.
-
-**Do not document this as "boto3 picks it up from the environment".** It does
-not reliably: `AWS_REGION` was set in `.env`, reached the process, and
-`boto3.client("ssm")` still raised `NoRegionError`. Which variables botocore
-consults is a property of the pinned version.
-
-Why it raises instead of defaulting to something: a guessed region reads a
-parameter path that does not exist there and reports an **empty environment** —
-which is indistinguishable from a correct load of a path where everything is
-already set.
-
----
-
-## 6. Parameter types: SecureString for everything we write
-
-`seed_ssm.py` writes **`Type="SecureString"`**, `Tier="Standard"`, KMS key from
-`--key-id` (default `alias/aws/ssm`). Everything it writes is in the `SECRET`
-bucket, so there is no "clear vs encrypted" decision to make — **the decision was
-made by not putting non-secrets in SSM at all**.
-
-If the docs describe adding a parameter by hand, they should say: use
-`SecureString`, and if the value is not a credential it probably does not belong
-in Parameter Store (see §3, "Deliberately NOT in SSM").
-
-**Cost:** Parameter Store **Standard tier is free** — no per-parameter charge.
-This matters because Secrets Manager, the obvious alternative, is $0.40 per
-secret per month, and its headline feature (rotation) cannot rotate an Anthropic,
-Stripe or IMAP credential anyway. Worth a sentence in the docs; it is the first
-question anyone asks.
-
-**`WithDecryption=True`** is used on read, which is why the instance role needs
-`kms:Decrypt` as well as the `ssm:` actions.
-
----
-
-## 7. IAM — the part that confuses people
-
-Four words other systems treat as one. Worth a short glossary in the admin doc:
-
-- **User** — a person or a long-lived key. *Not what an EC2 instance uses.*
-- **Role** — a set of permissions something can assume.
-- **Instance profile** — the container that attaches a role to an EC2 instance.
-  One instance, one instance profile, one role.
-- **Policy** — the permission document, attached to a role.
-
-**A policy attached to an IAM user is invisible to an EC2 instance.** This cost
-us a debugging cycle. The instance acts as `assumed-role/...`, never as
-`user/...` — `aws sts get-caller-identity` run *on the instance* is the check,
-and a `user/` ARN in that output means you are not measuring what the app does.
-
-Two separate policies, deliberately:
-
-- **read** — `ssm:GetParametersByPath` + `kms:Decrypt`, attached to each node's
-  instance role, permanently
-- **seed** — `ssm:PutParameter`, attached only while seeding and then removed
-
-Document the removal as a step, not a suggestion. Nodes should not be able to
-write their own secrets.
-
-Also: an inline policy does **not** appear in `list-attached-role-policies`
-(that only shows managed policies) — use `list-role-policies` for inline. A
-customer-managed policy attached to the role is the cleaner choice and is what
-Tom ended up with (`ReadCycloneProductionParameters`).
+- The row being re-read shows a spinner and **"Re-reading this document · 12s"**
+  in place of its Accept / Retry / Reject links.
+- **Every other row's links fade and lose their underline**, and hovering one
+  explains why: a re-read discards and recreates every statement from that
+  upload, so acting on a neighbouring row would act on a row about to be
+  replaced. Before this change the links *looked* live and did nothing, and
+  people clicked Retry down the list.
+- The upload area shows **"Re-reading the document…"** with the timer, rather
+  than "Reading the statements…", and **refuses new files until the re-read
+  finishes.**
+- **You can leave the page.** The re-read runs in the background.
 
 ---
 
-## 8. Checking that the nodes agree — `check-fleet.sh`
+## 5. Model configuration (for accuracy, not a user-facing change)
 
-The whole reason this project exists: two servers' `.env` files drifted and it
-was found **by luck**.
+`app/config/llm_profiles.json` changed in this set. Tom moved Gemini to
+`gemini-3.5-flash-lite` in the `fast` chain and `gemini-3.8-flash` as the
+**last** entry in `default` and `vision`. For the docs:
 
-```sh
-scripts/check-fleet.sh https://cyclone.jdbot.us              # sampling, one URL
-scripts/check-fleet.sh https://a.example.com https://b...    # direct, per node
-```
-
-**Two modes, because there are two topologies.** Behind a load balancer with no
-per-node address — the correct architecture and the awkward one to verify —
-sampling asks the same URL repeatedly and groups answers by the `id` each node
-reports. Hit and miss by nature, but testable. `CHECK_FLEET_SAMPLES=40` raises
-the count.
-
-**On this deployment, direct mode does not work across the network.**
-`docker-compose.yml` publishes `8094:80`, which binds every interface, but the
-nodes were not reachable on that port from another host when we tried it —
-security groups and/or host firewall. Do not write "the nodes listen on
-localhost only" as though it were configuration; it is not what the compose file
-says. Write it as what an operator will experience:
-
-- sampling the load-balancer URL is the practical check here
-- direct mode works from a node against **itself** (`http://127.0.0.1:8094`)
-- the obvious first attempt — the public IPs from the AWS console — fails, and
-  looks like the script is broken rather than like a closed port
-
-If the docs recommend direct mode for any environment, they should say it
-depends on each node being addressable on 8094 from wherever the check runs, and
-that this needs a security-group rule that does not exist today.
-
-### Exit codes
-
-| | |
-| - | - |
-| **0** | every node seen reported the same hash **and** the same build |
-| **1** | config drift — they disagree about configuration |
-| **2** | inconclusive — nothing readable, or only one node ever answered |
-| **3** | build skew — config agrees, different images |
-
-**2 is deliberately not 0.** A node that is down and a sample that only ever
-reached one server are both "we did not learn the answer", and letting either
-read as "all clear" is the failure the script exists to prevent.
-
-**3 is deliberately not 1.** Different code and different config are different
-problems with different fixes, and one hash covering both could not say which
-you had. It is also transiently normal mid-deploy.
-
-Needs **no credential and no SSH** — `/api/config` is unauthenticated precisely
-so nothing stands between somebody and running the check. A hash reveals
-nothing. The breakdown naming *which* setting differs is
-`GET /api/v1/config/fingerprint`, behind auth, because the set of digests is an
-inventory of what a node holds.
-
-### What the hash covers, and what it does not
-
-- **Covers:** `FLEET` + `SECRET` + `PER_FIRM`. Secrets contribute
-  `sha256(value)[:12]`, never the value. `<unset>` is a distinct marker from any
-  digest — "both nodes have no Stripe key" and "both hold the same Stripe key"
-  are different states and the first is the dangerous one.
-- **Excludes:** `id`, `host_url`, the Supabase/Redis URLs, the loader switches.
-  A hash over `id` would differ between any two machines forever, and a drift
-  report that always fires is one nobody reads.
-- **Excludes the build**, reported separately — see §9.
-
-### The control-group technique (worth documenting; it is not obvious)
-
-When migrating a secret into SSM, leave the **other node untouched** with the
-value still in `.env`. A matching hash then proves the SSM value is
-byte-for-byte identical to the `.env` value — a live comparison against
-known-good, better than a before/after on one node. A trailing newline from a
-copy-paste is enough to move the hash, which is precisely what you want to learn
-on the Telegram token rather than on the Anthropic key.
-
-Move secrets **one at a time**. If the hash moves after four, you know something
-is wrong but not which.
+- **Gemini stays last** in the chains that read evidence, for two independent
+  reasons already in `docs/operator-guide/README.md`: measured accuracy, and its
+  content filters refusing routine family-law material.
+- **Every model change creates new Missing prices rows.** A release note that
+  changes a model should say "enter prices for X". Otherwise the Costs page reads
+  "Priced so far" from that day on.
 
 ---
 
-## 9. Build identity — new in this release
+## 6. Stale text elsewhere that the doc thread should fix or flag
 
-`CYCLONE_BUILD` is baked into the image by `app/Dockerfile` (`ARG` → `ENV`) and
-reported at `/api/config` as `config_fingerprint.build`. `deploy-version.bat`
-drives both the image tag and the stamp from one variable so they cannot
-disagree.
-
-It comes from the **build**, never from `.env`: a value in configuration could
-be set wrong, and a node claiming a build it is not running is worse than one
-saying nothing. An image built without it reports `unstamped`.
-
-**It is reported beside the fleet hash and never inside it.** Folding it in
-would make every release read as drift, and would destroy the control-group
-technique in §8 — which only works while the hash stays comparable across
-builds.
-
-Why this matters enough to build: see §11.
-
----
-
-## 10. Procedures the docs should spell out
-
-**Rotating a secret**
-
-1. `aws ssm put-parameter --overwrite` (or re-run `seed_ssm.py --apply`)
-2. Confirm no stale copy is still in `.env` on any node — **it would win**
-3. `docker compose up -d --force-recreate api worker`
-4. `check-fleet.sh` — hash *should* change, and identically on both nodes
-
-**Exception — `SUPABASE_ANON_KEY` needs a rebuild, not a restart.** It is a
-docker build arg compiled into the JS bundle. Changing it requires rebuilding
-and redeploying the frontend image.
-
-**Deploying**
-
-- **The `worker` service runs the same image as the API.** Backend changes need
-  *both* rebuilt; shipping only the API leaves jobs queued with nothing running
-  them. This is the most repeated deployment mistake in this project.
-- **Migrations are run by hand, in numeric order.** `run_all.sql` only covers
-  001–005. Name the migration file explicitly in release notes.
-
-**Onboarding a new firm** — needs both lists from §1: the per-firm *credentials*
-(SSM, tagged `PER_FIRM=Y`) and the per-firm *settings* (`.env`:
-`FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`,
-`DEFAULT_REFRESH_TRIGGER_PCT`, `STRIPE_PUBLISHABLE_KEY`). There is no `firms`
-table yet — tenancy is currently compiled into the deployment, and these
-settings are the clearest evidence of it.
-
-**Startup warnings an operator will see and should understand**
-
-- legacy Supabase JWT keys, with days remaining — see §12
-- deprecated settings still in `.env` — reported from `model_fields_set`, i.e.
-  "somebody set it", not "it holds a value"
-- misplaced secrets — e.g. an `sb_secret_` value in `SUPABASE_ANON_KEY`, or an
-  `sk_live_` in `STRIPE_PUBLISHABLE_KEY`. This one caught a real mistake.
-
----
-
-## 11. Why any of this exists — the story worth telling in the docs
-
-Abstract arguments about configuration management do not motivate anybody. This
-one does, and it is real.
-
-Model chains used to be named in `.env`. The two EC2 nodes drifted, so a pleading
-was read by Anthropic on one server and Gemini on the other, depending on where
-the load balancer sent the request. **Gemini's content filters decline material
-describing crimes against minors** — which in family law is not an edge case but
-ordinary evidence: a petition alleging abuse, a protective-order affidavit, a CPS
-record. So the same document processed, then did not, then did.
-
-Three things make this the perfect illustration:
-
-- **It presented as intermittent.** Nobody diagnoses intermittency as a
-  configuration difference; they look for a race, a timeout, a bad PDF.
-- **The refusal was invisible.** `llm_service` fails a candidate over to the next
-  model and keeps answering, so a refusal, a timeout and a quota error all look
-  identical — the work just quietly moves to another vendor.
-- **It is now structurally impossible.** Model chains live in
-  `app/config/llm_profiles.json` *inside the image*, so two nodes on the same tag
-  cannot disagree — and `check-fleet.sh` exit 3 catches the case where they are
-  not on the same tag.
-
-This is the house theme and it is worth naming in the docs: **the failures that
-matter here look like successes.** A worker with no Anthropic key does not
-crash — it silently produces nothing. That is why an unreadable SSM raises and
-stops the process rather than starting half-configured.
-
----
-
-## 12. The Supabase key deadline — has a real date
-
-Supabase retires the legacy `anon` / `service_role` JWT keys at the **end of
-2026**. Startup logs a warning with days remaining for any key still in that
-format, detected by the format itself rather than a flag somebody sets — so a
-node that was missed reports itself. It becomes an ERROR once overdue.
-
-Points the docs should carry:
-
-- The migration is a change of **value in the same variable**, not a rename.
-- Keys live under **Settings → API Keys** in the Supabase dashboard (there is no
-  longer a *Settings → API* page). This is genuinely hard to find.
-- **There are two projects** to do — Cyclone's own and the landing-pages one.
-- The **frontend must be rebuilt**, because the anon key is a build arg.
-- New-format keys are `sb_publishable_...` and `sb_secret_...`. Both systems run
-  in parallel, so the swap is reversible.
-- Secret keys are revocable individually, where rotating `service_role` today
-  means rotating the project JWT secret and logging every user out.
-
-Full procedure: `docs/supabase-key-migration.md`.
-
----
-
-## 13. ⚠ Security note for whatever the docs say about secrets
-
-**Never suggest EC2 instance tags as a place to put credentials.** Instance tags
-are readable from IMDS by any process on the box with **no credentials at all**.
-This happened here: a verification script that read config values from tags made
-tags look like the intended location, API keys went in, and the keys had to be
-rotated. The instance tag carries the environment *name* — one non-secret string
-— and nothing else, ever.
-
-If the docs show any script that reads instance tags, it should say in the same
-breath what tags are not for.
+- `docs/cost-tracking-design.md` § *"Querying spend before step 2 exists"*.
+  Step 2 now exists. The queries still work, but they ignore prices and the
+  served model. Point readers to the Costs page, or to `llm_call_costs` for SQL.
+- `CLAUDE.md` §16a *"Cost tracking"* still says *"Step 1 of 4 (capture) is
+  built; steps 2–4 … are designed"*. Steps 1 and 2 are built. §16's status table
+  is already correct.
+- `docs/operator-guide/04-deploying.md` names 036/037 as "this release" (§0).
+- `docs/operator-guide/01-configuration.md` says the build args must be in `.env`
+  without saying *on the build machine* (§1.1).

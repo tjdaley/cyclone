@@ -51,6 +51,26 @@ LOGGER = LoggerFactory.create_logger(__name__)
 # extractor is told to report truncation rather than silently stop.
 _MAX_STATEMENT_CHARS = 60_000
 
+# Pages to re-show at the start of the next index window. A statement whose
+# header sits on a window boundary would otherwise be described by neither side
+# as a whole: the window before it sees the header with no body, the one after
+# sees the body with no header. Two pages covers both halves of a seam on every
+# document shape seen so far, and costs two pages of prompt per window.
+_INDEX_WINDOW_OVERLAP = 2
+
+# A page that restarts its own pagination is a statement's FIRST page, and the
+# word boundary is the whole pattern: without it "PAGE 1" matches inside
+# "PAGE 10" and every long statement reads as a dozen first pages. The same
+# expression pdf_service surveys an upload with, applied here to the extracted
+# text rather than to the PDF.
+_PAGE_ONE = re.compile(r"\bpage\s+1\b(?!\d)", re.I)
+
+# Below this, a page carries no statement content worth claiming -- a separator
+# sheet, a mail insert, a page whose OCR produced nothing. They are excluded
+# from the unindexed-page warning, which is about CONTENT no statement
+# accounted for; an unreadable page is a different fact with its own flag.
+_MIN_INDEXABLE_CHARS = 200
+
 ZERO = Decimal("0.00")
 
 # Placeholders extraction falls back to when it cannot read a name. Matched
@@ -97,6 +117,45 @@ _INSTITUTION_WORDS = (
     "bank", "banc", "credit union", "savings", "trust", "financial", "federal",
     "brokerage", "securities", "investment", "fcu", "n a", "national association",
 )
+
+
+# NOT "brokerages" -- accounts whose value moves by FLOWS PLUS MARKET RESULTS,
+# which is what the five behaviours behind this set are actually about: skip
+# trades, balance is total account value, change in value is a printed line, the
+# check is the statement's own summary block, and the omission is counted.
+#
+# A cash-value life policy or an annuity satisfies every one of them. 038 added
+# the types; before that such a statement landed on `other`, got the BANK-shaped
+# completeness check, and a RiverSource VUL that reconciled to the cent was
+# flagged INCOMPLETE_EXTRACTION because `premium_payments` matched as the
+# printed DEBIT total. A premium payment is money IN on a policy and money OUT
+# on a bank statement -- see `_printed_side`.
+#
+# Declared ABOVE the prompts because the prompts are built from it. See
+# _ACCOUNT_TYPES / _CASH_FLOW_NAMES.
+_CASH_FLOW_ACCOUNTS = frozenset({
+    AccountType.brokerage, AccountType.retirement,
+    AccountType.life_insurance, AccountType.annuity,
+})
+
+# THE PROMPTS ARE BUILT FROM THE ENUM, NOT TYPED BESIDE IT.
+#
+# They used to spell both lists out in English, and both drifted. The metadata
+# prompts offered the 036-era set, so `crypto` was never an answer the model
+# could give -- for two migrations -- and `life_insurance` and `annuity` were
+# not either. Worse, the transactions prompt gated its cash-flow rule on the
+# literal words "brokerage" or "retirement", so adding a type to
+# `_CASH_FLOW_ACCOUNTS` switched the PYTHON checks to the cash-flow path while
+# leaving the MODEL on the bank rule. The result was a policy statement read
+# with bank rules, checked with brokerage rules, and extracted as zero
+# transactions.
+#
+# Substituted with `str.replace` on sentinels rather than %-formatting or
+# `.format`: these prompts contain literal braces (JSON examples) and percent
+# signs, and both would have to be escaped throughout.
+_ACCOUNT_TYPES = " | ".join('"%s"' % t.value for t in AccountType)
+_CASH_FLOW_NAMES = " or ".join(
+    '"%s"' % t.value for t in sorted(_CASH_FLOW_ACCOUNTS, key=lambda t: t.value))
 
 
 _STATEMENT_SYSTEM = """\
@@ -183,8 +242,7 @@ statement object has:
     in that footer, or the letterhead is a graphic you cannot read, return null.
     A null institution is corrected in seconds; a wrong one silently splits one
     account into two.
-  - account_type: one of "checking" | "savings" | "brokerage" | "credit_card" | \
-"retirement" | "hsa" | "loan" | "other"
+  - account_type: one of <<ACCOUNT_TYPES>>
   - account_number_last4: string of the last four digits, or null if redacted
   - account_number_masked: the masked form exactly as printed, e.g. "ending in 4357"
   - name_on_account: string or null
@@ -305,8 +363,7 @@ Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each has:
     a revision date or form number ("CSI REV 3/12/18", "3380-STMT", "Fiserv").
     That is a software vendor; never report it. If the only name you can find is
     in that footer, or the letterhead is a graphic you cannot read, return null.
-  - account_type: one of "checking" | "savings" | "brokerage" | "credit_card" | \
-"retirement" | "hsa" | "loan" | "other"
+  - account_type: one of <<ACCOUNT_TYPES>>
   - account_number_last4: string of the last four digits, or null if redacted
   - account_number_masked: the masked form exactly as printed
   - name_on_account: string or null
@@ -419,10 +476,10 @@ Two things about that table:
     them would double-count. An asterisk beside a number means the numbers
     before it are missing from the sequence, not that the row is special.
 
-BROKERAGE AND INVESTMENT ACCOUNTS — A DIFFERENT RULE ABOUT WHAT COUNTS.
-This applies ONLY when the account type stated above is "brokerage" or
-"retirement". On those, extract money that CROSSED THE ACCOUNT BOUNDARY and
-nothing else.
+BROKERAGE, RETIREMENT, INSURANCE AND ANNUITY ACCOUNTS — A DIFFERENT RULE ABOUT
+WHAT COUNTS. This applies ONLY when the account type stated above is one of
+<<CASH_FLOW_TYPES>>. On those, extract money that CROSSED THE ACCOUNT BOUNDARY
+and nothing else.
 
 A purchase of stock is not money moving. It exchanges cash for shares inside
 one account, and the account is worth what it was a second earlier. So is a
@@ -471,6 +528,38 @@ from the portfolio or account-value summary. The cash balance alone cannot
 reconcile against this extraction, because the purchases that moved cash into
 securities are deliberately not in it.
 
+A POLICY OR ANNUITY STATEMENT HAS NO REGISTER, AND ITS SUMMARY IS THE ACTIVITY.
+Cash-value life insurance and annuities print no transaction list at all. The
+"Value of your policy" / "Value of your account" block IS the activity, and is
+the only place the statement says what moved:
+
+    Beginning value                           $63,991.33
+    Additions
+      Premium payments                         $1,500.00
+    Withdrawals
+      Monthly deductions                        -$523.17
+    Change in value
+      Premium expense charges                    -$75.00
+      Fixed and variable account results         $478.44
+    Total change in value                        $403.44
+    Ending value                              $65,371.60
+
+  * Extract the LEAF lines and only those. Above, that is FOUR entries: premium
+    payments, monthly deductions, premium expense charges, and the investment
+    results.
+  * NEVER extract a SUBTOTAL or a total. "Total change in value", "Net deposits
+    & withdrawals", "Change in value" given as one figure — each restates lines
+    you have already taken, and taking it as well double-counts.
+  * Beginning value and ending value are BALANCES, not transactions.
+  * The investment-results line IS the change in market value. Describe it
+    "Change in Market Value" whatever the statement called it — "Fixed and
+    variable account results", "Investment results", "Net investment gain".
+  * Deductions, expense charges and cost of insurance are FEES: real money out.
+    Extract them.
+  * The "these blocks are NOT transactions" rule immediately below is about a
+    summary that RESTATES a register printed elsewhere. On these statements
+    there is no register, so it does not apply to this block.
+
 These blocks are NOT transactions. Never turn one into an entry:
   - DAILY ENDING BALANCE, or any table of dates against running balances
   - ACCOUNT SUMMARY / SUMMARY OF ACCOUNTS, INTEREST RATE SUMMARY, OVERDRAFT SUMMARY
@@ -496,6 +585,20 @@ Respond ONLY with the JSON object. No markdown fences, no explanation.\
 # Past this, a PDF is more likely to be a production than a single statement.
 # Only a warning: a combined statement legitimately runs long, and one holding
 # five accounts is ordinary input.
+# ── Fill the prompt sentinels from the enums ────────────────────────────────
+#
+# Done once, here, rather than per call: the values cannot change at runtime and
+# a prompt rebuilt per request is a prompt that can differ between two requests.
+# `tests/test_statement_prompts.py` asserts no sentinel survives and that every
+# AccountType reaches the model.
+_STATEMENT_SYSTEM = _STATEMENT_SYSTEM.replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
+_METADATA_SYSTEM = _METADATA_SYSTEM.replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
+_TRANSACTIONS_SYSTEM = (
+    _TRANSACTIONS_SYSTEM
+    .replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
+    .replace("<<CASH_FLOW_TYPES>>", _CASH_FLOW_NAMES)
+)
+
 _MANY_PAGES = 30
 
 _PAGE_MARKER_PREFIX = "<<<PAGE "
@@ -917,6 +1020,21 @@ def _page_number(value: Any) -> Optional[int]:
     return page if page > 0 else None
 
 
+def _page_ranges(numbers: list[int]) -> str:
+    """``[3, 4, 5, 9]`` as ``"3-5, 9"`` — how a person reads a page list."""
+    if not numbers:
+        return ""
+    spans: list[tuple[int, int]] = []
+    for number in sorted(numbers):
+        if spans and number == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], number)
+        else:
+            spans.append((number, number))
+    return ", ".join(
+        str(first) if first == last else "%d-%d" % (first, last) for first, last in spans
+    )
+
+
 def _flag(code: str, severity: str, note: str, field_path: Optional[str] = None) -> dict[str, Any]:
     return {"code": code, "severity": severity, "field_path": field_path, "note": note}
 
@@ -984,13 +1102,42 @@ def _serialize(value: Any) -> Any:
 _CREDIT_WORDS = ("credit", "deposit")
 _DEBIT_WORDS = ("debit", "check", "withdrawal", "payment", "purchase")
 
+# ── A LIABILITY ACCOUNT'S SUMMARY WORDS MEAN THE OPPOSITE SIDE ───────────────
+#
+# Amounts are signed by their effect on the printed balance, so on a credit card
+# a PURCHASE is positive (it raises what is owed) and a PAYMENT is negative.
+# The word lists above are a bank's vocabulary, where both are the other way
+# round -- and `_DEBIT_WORDS` carries "purchase" and "payment" for exactly that
+# reason.
+#
+# Applied to a card, that read Chase's printed "Purchases $244.11" as the DEBIT
+# total, compared it against the extracted negative lines (a card with no
+# payments has none), and reported INCOMPLETE_EXTRACTION "short by 244.11" on a
+# statement whose three purchases sum to 244.11 and which reconciled to the
+# cent. It fired on essentially every card statement carrying purchases, which
+# is the shape of warning that teaches people to ignore the next real one.
+#
+# Same failure as the RiverSource `premium_payments` case in `_printed_side`,
+# one layer up: there the sign settles it where the document signs its figures,
+# but a card prints its summary as magnitudes, so the words are all there is.
+# What decides is the ACCOUNT TYPE, which the caller knows. The FIS makes the
+# same inversion for the same reason and nowhere else (`household_amount()`).
+_LIABILITY_ACCOUNTS = frozenset({AccountType.credit_card, AccountType.loan})
+
+#: Words marking what raises a liability balance. "charge" catches both
+#: "fees_charged" and "interest_charged"; "advance" catches a cash advance.
+_LIABILITY_UP_WORDS = ("purchase", "charge", "advance", "fee", "interest", "debit")
+#: Words marking what reduces it. A payment and a credit are the same side here.
+_LIABILITY_DOWN_WORDS = ("payment", "credit", "refund")
+
 # A total is only worth comparing when it is more than rounding apart. Statements
 # print to the cent, so anything above this is a real difference.
 _TOTAL_TOLERANCE = Decimal("0.01")
 
 
 def _printed_side(printed: dict[str, Any], words: tuple[str, ...],
-                  against: tuple[str, ...]) -> Optional[Decimal]:
+                  against: tuple[str, ...],
+                  want_sign: int = 0) -> Optional[Decimal]:
     """
     Pull one side's printed figure out of whatever the statement called it.
 
@@ -999,15 +1146,48 @@ def _printed_side(printed: dict[str, Any], words: tuple[str, ...],
         like "checks_debits" contains both "check" and "debit", and
         "deposits_credits" contains "deposit"; whichever list matches more
         specifically wins, so the other side is excluded explicitly.
+    :param want_sign: ``-1`` for the debit side, ``1`` for the credit side, or
+        ``0`` to match on the words alone.
+
+    **THE WORDS ALONE GET THE SIDE WRONG, BECAUSE "PAYMENT" CHANGES DIRECTION
+    BETWEEN DOCUMENTS.** On a bank statement a payment is money leaving — a card
+    payment, a bill payment — which is why it sits in ``_DEBIT_WORDS``. On an
+    insurance or annuity statement a *premium payment* is money arriving, and it
+    is usually the largest credit on the page. An Ameriprise/RiverSource policy
+    printing ``premium_payments: 1500`` therefore matched as the printed DEBIT
+    total, was compared against $598.17 of real deductions, and reported a
+    $901.83 shortfall on a statement that reconciled to the cent. A warning that
+    fires on every correct import is the kind nobody reads, so the next real
+    ``INCOMPLETE_EXTRACTION`` would have been dismissed with it.
+
+    **The statement's own sign settles it where the statement bothered to give
+    one.** A bank prints its summary buckets as magnitudes — "262 Checks/Debits
+    195,600.04" — so nothing there is negative and the words are all there is.
+    A policy prints ``monthly_deductions: -523.17``: signed, and the sign is the
+    document saying which side it means. So signedness is detected per dict
+    rather than assumed, and only a dict that actually carries a negative
+    switches to reading signs. That keeps every bank statement on exactly the
+    behaviour it has today.
     """
-    for key, value in (printed or {}).items():
-        name = str(key).lower()
+    entries = [(str(key).lower(), _money(value))
+               for key, value in (printed or {}).items()]
+    # Does this document sign its own totals? One negative is proof; a bank's
+    # all-positive magnitudes are not evidence either way, so they fall through
+    # to the word matching unchanged.
+    signed = any(amount is not None and amount < ZERO for _name, amount in entries)
+
+    for name, amount in entries:
+        if amount is None:
+            continue
+        if signed and want_sign and (amount * want_sign) < ZERO:
+            # Its own sign says it belongs to the other side, whatever it is
+            # called. This is what stops `premium_payments` being read as a
+            # debit total.
+            continue
         if any(w in name for w in against):
             continue
         if any(w in name for w in words):
-            amount = _money(value)
-            if amount is not None:
-                return abs(amount)
+            return abs(amount)
     return None
 
 
@@ -1015,6 +1195,7 @@ def _completeness_findings(
     lines: list[dict[str, Any]],
     printed_totals: dict[str, Any],
     printed_counts: dict[str, Any],
+    account_type: Any = None,
 ) -> list[str]:
     """
     Compare what was extracted against what the statement says about itself.
@@ -1032,21 +1213,43 @@ def _completeness_findings(
     lines or a larger total than a single bucket is ordinary. Having fewer is
     not.
 
+    **THE WORDS THAT NAME A SIDE DEPEND ON THE ACCOUNT TYPE.** On a deposit
+    account a deposit is positive and a purchase negative; on a credit card or a
+    loan both are reversed, because an amount is signed by its effect on the
+    balance the institution prints. Matching a card's printed "Purchases" with
+    the bank vocabulary reported a shortfall equal to the whole statement, on
+    every card import. See ``_LIABILITY_UP_WORDS``.
+
+    :param account_type: The account's type. ``None`` reads as a deposit
+        account, which is what every caller before liability accounts were
+        handled meant.
     :return: One sentence per side that comes up short. Empty when the
         extraction covers what is printed, and empty when the statement printed
         nothing to check against.
     :rtype: list[str]
     """
     amounts = [_money(line.get("amount")) or ZERO for line in lines]
-    got_credits = [a for a in amounts if a > 0]
-    got_debits = [a for a in amounts if a < 0]
+    got_positive = [a for a in amounts if a > 0]
+    got_negative = [a for a in amounts if a < 0]
+
+    if account_type in _LIABILITY_ACCOUNTS:
+        # "Charge" and "payment" rather than "credit" and "debit": the sentence
+        # has to read true of the document somebody is holding.
+        sides = (
+            ("charge", got_positive, _LIABILITY_UP_WORDS, _LIABILITY_DOWN_WORDS, 1),
+            ("payment", got_negative, _LIABILITY_DOWN_WORDS, _LIABILITY_UP_WORDS, -1),
+        )
+    else:
+        sides = (
+            ("credit", got_positive, _CREDIT_WORDS, _DEBIT_WORDS, 1),
+            ("debit", got_negative, _DEBIT_WORDS, _CREDIT_WORDS, -1),
+        )
 
     findings: list[str] = []
-    for label, got, total_words, count_words, against in (
-        ("credit", got_credits, _CREDIT_WORDS, _CREDIT_WORDS, _DEBIT_WORDS),
-        ("debit", got_debits, _DEBIT_WORDS, _DEBIT_WORDS, _CREDIT_WORDS),
-    ):
-        printed_total = _printed_side(printed_totals, total_words, against)
+    for label, got, total_words, against, want_sign in sides:
+        count_words = total_words
+        printed_total = _printed_side(printed_totals, total_words, against, want_sign)
+        # Counts are populations, never signed, so they match on words alone.
         printed_count = _printed_side(printed_counts, count_words, against)
         got_total = abs(sum(got, ZERO))
 
@@ -1074,7 +1277,6 @@ def _completeness_findings(
             )
     return findings
 
-_CASH_FLOW_ACCOUNTS = frozenset({AccountType.brokerage, AccountType.retirement})
 
 # The prompt asks for the description "Change in Market Value", but a model
 # sensibly sometimes copies the heading the statement actually printed, and
@@ -1085,6 +1287,17 @@ _MARKET_CHANGE = (
     "unrealized loss",
     "market appreciation",
     "market depreciation",
+    # Insurance and annuity wording. RiverSource prints "Fixed and variable
+    # account results"; others print "Investment results" or "Change in value".
+    #
+    # UNDER-matching is the safe direction and over-matching is not. A line
+    # classified as market change is EXCLUDED from the flow totals compared
+    # against the statement's own summary, so a wrong match weakens the check
+    # that finds a missing withdrawal. A missed match only inflates the
+    # extracted flows, and that comparison reports shortfalls only.
+    "account results",
+    "investment results",
+    "change in value",
 )
 
 
@@ -1216,11 +1429,7 @@ class StatementService:
         :raises ValueError: If the index pass returns nothing usable.
         """
         passes: list[dict[str, Any]] = []
-        index = self._call_json(
-            _METADATA_SYSTEM, raw_text[:_MAX_STATEMENT_CHARS], "statements",
-            "Could not index the document", passes=passes, label="index",
-        )
-        statements = index.get("statements") or []
+        statements = self._index_document(pages, passes)
         LOGGER.info(
             "statement_service.extract: %d page(s), %d statement(s) indexed; reading in passes",
             len(pages), len(statements),
@@ -1261,6 +1470,9 @@ class StatementService:
                     )
                     statement["header_not_found"] = True
             statement.pop("header_text", None)
+            # What this statement actually accounts for, which is what makes a
+            # page nobody claimed detectable at the end of the walk.
+            statement["_pages_read"] = sorted(own)
 
             context = self._statement_context(statement)
             period = statement.get("period") or {}
@@ -1327,7 +1539,272 @@ class StatementService:
             if skipped:
                 statement["securities_transactions_omitted"] = skipped
 
-        return {"statements": statements, "extraction": _provenance(passes)}
+        result: dict[str, Any] = {
+            "statements": statements,
+            "extraction": _provenance(passes),
+        }
+        # PAGES NOBODY CLAIMED ARE THE FAILURE THIS FILE MOST NEEDED TO REPORT.
+        #
+        # The index used to be handed the first 60,000 characters of the
+        # document and nothing else, with no truncation notice: on a scanned
+        # multi-month production that is roughly eight statements, and
+        # everything past it was invisible. The import then reported success for
+        # the statements it had found while months 9 onward were either absent
+        # or swallowed by whichever statement's page range ran to the end of the
+        # document. Windowing the index (`_index_document`) is the fix; this is
+        # the check that says so when it still happens, for any reason.
+        #
+        # `SUSPECT_SPLIT` already catches statements that OVERLAP. This is the
+        # opposite direction and needs its own answer: a gap.
+        unclaimed = sorted(set(
+            self._unclaimed_pages(pages, statements)
+            + self._unindexed_statement_starts(pages, statements)
+        ))
+        for statement in statements:
+            statement.pop("_pages_read", None)
+        if unclaimed:
+            result["unindexed_pages"] = unclaimed
+            LOGGER.warning(
+                "statement_service.extract: %d page(s) begin a statement that was not read, "
+                "or belong to none that was: %s. Transactions printed there are NOT imported.",
+                len(unclaimed), _page_ranges(unclaimed),
+            )
+        return result
+
+    @staticmethod
+    def _unindexed_statement_starts(
+        pages: dict[int, str], statements: list[dict[str, Any]],
+    ) -> list[int]:
+        """
+        Pages that begin a statement nobody indexed.
+
+        **The unclaimed-page check cannot see the failure that actually
+        happened.** When the index stopped early, the pages past it were not
+        left unclaimed — the last indexed statement's slice ran to the next
+        indexed header, which was nowhere, so it **absorbed** them. Every page
+        had an owner and the gap check would have reported nothing, while months
+        nine onward were being filed as part of month eight.
+
+        What survives that is the document's own pagination. Almost every
+        statement prints "Page 1 of N" and restarts it, so a page that restarts
+        pagination and is not the first page of any indexed statement is a
+        statement nobody read. Deterministic, free, and computed from the text
+        rather than asked of a model — the same argument as Bates detection and
+        account numbers.
+
+        Page 1 of the document is excluded: it restarts by definition.
+        """
+        starts = {min(s.get("_pages_read") or [0]) for s in statements}
+        return [
+            number for number, text in sorted(pages.items())
+            if number > 1 and number not in starts and _PAGE_ONE.search(text or "")
+        ]
+
+    @staticmethod
+    def _unclaimed_pages(
+        pages: dict[int, str], statements: list[dict[str, Any]],
+    ) -> list[int]:
+        """
+        Pages of the document no indexed statement accounts for.
+
+        A page carrying no readable text is **not** reported: a blank separator
+        sheet or an unreadable scan is a different fact, already flagged by
+        ``pdf_service``'s marker and by ``PAGE_UNREADABLE``, and reporting it
+        here would make the warning fire on documents where nothing is missing.
+        The marker is matched by its text, the way ``_unreadable_pages`` does,
+        rather than importing it — ``pdf_service`` owns the string.
+        """
+        claimed: set[int] = set()
+        for statement in statements:
+            span = statement.get("_pages_read") or ()
+            claimed.update(span)
+        return [
+            number for number, text in sorted(pages.items())
+            if number not in claimed
+            and len((text or "").strip()) >= _MIN_INDEXABLE_CHARS
+            and "[[PAGE COULD NOT BE READ" not in (text or "")
+        ]
+
+    def _index_document(
+        self, pages: dict[int, str], passes: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Index a document in windows, so its length cannot hide the back of it.
+
+        **One call used to index any document, clipped to
+        ``_MAX_STATEMENT_CHARS``.** A scanned statement page yields two to four
+        thousand characters, so 60,000 is fifteen to thirty pages — about eight
+        monthly statements — and a two-year production was indexed as far as
+        month eight and then stopped. Nothing said so: unlike the single-pass
+        path, this one did not even tell the model it had been truncated, so
+        there was no "[DOCUMENT TRUNCATED]" line in the prompt and no flag on
+        the result. The import reported success for what it found. Reported from
+        the field as *"eight months ingest, the rest has numerous errors"*, and
+        the errors are the tail being absorbed by the last indexed statement.
+
+        So the document is indexed in page windows that each fit the budget,
+        and the statement lists are stitched. The windows **overlap** by
+        ``_INDEX_WINDOW_OVERLAP`` pages, because a statement whose header sits
+        at a boundary would otherwise be described by neither side as a whole.
+
+        A single-window document takes exactly the call it always took, under
+        the same ``index`` label, so nothing changes for the short documents
+        this path already handled.
+
+        :param pages: ``{page_number: text}`` for the whole document.
+        :param passes: Provenance accumulator; one entry per call.
+        :return: Stitched statement descriptions, ordered by first page.
+        :rtype: list[dict[str, Any]]
+        """
+        windows = self._index_windows(pages)
+        stitched: list[dict[str, Any]] = []
+        for first, last in windows:
+            body = "\n\n".join(
+                "<<<PAGE %d>>>\n%s" % (number, pages[number])
+                for number in range(first, last + 1) if number in pages
+            )
+            # A single page longer than the whole budget is the only way this
+            # still clips. Say so in the prompt, which the old code did not.
+            if len(body) > _MAX_STATEMENT_CHARS:
+                body = body[:_MAX_STATEMENT_CHARS] + (
+                    "\n\n[DOCUMENT TRUNCATED — report only the statements above]"
+                )
+            label = "index" if len(windows) == 1 else "index pages %d-%d" % (first, last)
+            found = self._call_json(
+                _METADATA_SYSTEM, body, "statements",
+                "Could not index the document", passes=passes, label=label,
+            ).get("statements") or []
+            for statement in found:
+                self._stitch_statement(stitched, statement, window=(first, last))
+
+        stitched.sort(key=lambda s: _page_number(s.get("first_page")) or 0)
+        if len(windows) > 1:
+            LOGGER.info(
+                "statement_service.extract: indexed %d page(s) in %d window(s), "
+                "%d statement(s) after stitching",
+                len(pages), len(windows), len(stitched),
+            )
+        return stitched
+
+    @staticmethod
+    def _index_windows(pages: dict[int, str]) -> list[tuple[int, int]]:
+        """
+        Page ranges to index, each inside the character budget.
+
+        Built by accumulating pages until the next one would not fit, which
+        keeps a window as large as it can be — fewer windows means fewer seams
+        to stitch, and a statement described whole is described better than one
+        described in halves.
+        """
+        numbers = sorted(pages)
+        if not numbers:
+            return []
+        # Measured the way the prompt will see it, markers included.
+        def cost(number: int) -> int:
+            return len(pages[number]) + len("<<<PAGE %d>>>\n\n\n" % number)
+
+        windows: list[tuple[int, int]] = []
+        start = numbers[0]
+        used = 0
+        for number in numbers:
+            size = cost(number)
+            if used and used + size > _MAX_STATEMENT_CHARS:
+                windows.append((start, number - 1))
+                # Step back a little so a statement straddling the seam is seen
+                # whole by this window, not split across two descriptions.
+                start = max(start, number - _INDEX_WINDOW_OVERLAP)
+                used = sum(cost(n) for n in range(start, number) if n in pages)
+            used += size
+        windows.append((start, numbers[-1]))
+        return windows
+
+    @staticmethod
+    def _statement_identity(statement: dict[str, Any]) -> tuple[tuple[str, str], tuple[Any, Any]]:
+        """A statement's account identity and its period, as the stitch compares them."""
+        account = statement.get("account") or {}
+        period = statement.get("period") or {}
+        return (
+            (
+                _squash_institution(account.get("institution")) or "",
+                (account.get("account_number_last4") or "").strip(),
+            ),
+            (period.get("start_date"), period.get("end_date")),
+        )
+
+    @classmethod
+    def _stitch_statement(
+        cls,
+        stitched: list[dict[str, Any]],
+        statement: dict[str, Any],
+        window: tuple[int, int],
+    ) -> None:
+        """
+        Add a window's statement to the list, merging it with its other half.
+
+        Overlapping windows mean the same statement is often described twice,
+        and the two descriptions are not equally good: the window that saw the
+        header knows the institution and the opening balance, the one that saw
+        the end knows the closing balance and the last page. **Merging keeps the
+        first non-null answer for every field and the widest page range**, which
+        is better than either description alone and better than picking one and
+        throwing the other away.
+
+        Three ways two descriptions are judged to be the same statement, in
+        decreasing order of how much they prove:
+
+        1. **Same account and same period.** A statement seen twice.
+        2. **Same period, and the page ranges touch.** One window could not read
+           the account number; the period plus a shared page is as far as the
+           evidence goes.
+        3. **A FRAGMENT that touches.** A description carrying neither an
+           account nor a whole period is not a statement in its own right — it
+           is the middle of one, seen by a window that started after its header.
+           A statement longer than the overlap produces exactly this, and
+           leaving it alone would commit it as a second account with no
+           institution, which is worse than attaching it to the statement whose
+           pages it continues.
+
+        Nothing else is merged. Two real statements fused into one would lose a
+        month, and that is the failure this whole path exists to prevent.
+        """
+        first = _page_number(statement.get("first_page"))
+        last = _page_number(statement.get("last_page"))
+        identity, span = cls._statement_identity(statement)
+        is_fragment = not any(identity) and not all(span)
+
+        for existing in stitched:
+            other_identity, other_span = cls._statement_identity(existing)
+            other_first = _page_number(existing.get("first_page"))
+            other_last = _page_number(existing.get("last_page"))
+            touching = (
+                None not in (first, last, other_first, other_last)
+                and first <= other_last and other_first <= last  # type: ignore[operator]
+            )
+            same_account = any(identity) and identity == other_identity
+            same_period = all(span) and span == other_span
+            other_is_fragment = not any(other_identity) and not all(other_span)
+
+            if not (
+                (same_account and same_period)
+                or (same_period and touching)
+                or (is_fragment and touching)
+                or (other_is_fragment and touching and any(identity))
+            ):
+                continue
+
+            for key, value in statement.items():
+                if value in (None, "", [], {}):
+                    continue
+                if existing.get(key) in (None, "", [], {}):
+                    existing[key] = value
+            if first is not None:
+                existing["first_page"] = min(first, other_first if other_first is not None else first)
+            if last is not None:
+                existing["last_page"] = max(last, other_last if other_last is not None else last)
+            return
+
+        statement.setdefault("first_page", window[0])
+        stitched.append(statement)
 
     def _audit_dates(
         self,
@@ -1908,6 +2385,10 @@ class StatementService:
                     claimed_pages=claimed_pages,
                     only_statement=only_statement,
                     rules=rules,
+                    # A document-level fact, carried onto every statement it
+                    # came with: the import is short, and which statement you
+                    # happen to open should not decide whether you are told.
+                    unindexed_pages=extracted.get("unindexed_pages") or None,
                 ))
             except Exception as e:  # noqa: BLE001 — one bad statement must not lose the rest
                 LOGGER.error("statement_service.commit: statement failed: %s", str(e))
@@ -1944,6 +2425,7 @@ class StatementService:
         claimed_pages: Optional[list[dict[str, Any]]] = None,
         only_statement: bool = True,
         rules: Optional[list[Any]] = None,
+        unindexed_pages: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """Write one statement, its account, and its lines."""
         account_block = raw_statement.get("account") or {}
@@ -2076,6 +2558,16 @@ class StatementService:
                 "status": "duplicate",
                 "statement_id": duplicate.id,
                 "account_id": account.id,
+                # THE ACCOUNT'S NAME, NOT THE EXTRACTION'S. This row said
+                # "Unidentified institution" in the import log, which is the one
+                # thing it certainly is not: the statement was identified well
+                # enough to match an existing account, and that account is where
+                # the authoritative name lives — read off the page, repaired by
+                # `resolve_missing_institutions`, or corrected by a person. The
+                # name this particular read produced may be null or a misread,
+                # and reporting that instead told the reader nothing about which
+                # of their accounts the upload duplicated.
+                "institution": account.institution,
                 "period": [period_start.isoformat(), period_end.isoformat()],
             }
 
@@ -2135,7 +2627,11 @@ class StatementService:
             shortfalls = _portfolio_findings(lines, summary)
         else:
             shortfalls = _completeness_findings(
-                lines, balances.get("printed_totals") or {}, printed_counts)
+                lines, balances.get("printed_totals") or {}, printed_counts,
+                # A card's summary words mean the opposite side. Without this,
+                # "Purchases $244.11" read as the debit total and every card
+                # import reported a shortfall equal to its own purchases.
+                account_type=account.account_type)
         if shortfalls:
             flags.append(_flag(
                 "INCOMPLETE_EXTRACTION", "warn",
@@ -2144,33 +2640,52 @@ class StatementService:
                 "transactions",
             ))
 
-        if cash_flow_only:
-            omitted = _count(raw_statement.get("securities_transactions_omitted"))
+        omitted = _count(raw_statement.get("securities_transactions_omitted"))
+        # ONLY WHEN SOMETHING WAS ACTUALLY OMITTED. The flag exists to explain
+        # rows that are missing from the register -- "four lines here where the
+        # statement shows fifty" looks exactly like a failed import, and the
+        # count is what says the silence was deliberate. With nothing omitted
+        # there is no silence to explain, and raising it anyway asserts an
+        # omission that did not happen.
+        #
+        # It fired on every cash-value policy, which is where this showed:
+        # a variable policy CAN hold sub-account investments -- that is what
+        # "variable" means -- but one sitting 100% in its fixed account trades
+        # nothing, so the count is zero and the register is complete.
+        if cash_flow_only and omitted:
             flags.append(_flag(
                 "SECURITIES_NOT_EXTRACTED", "info",
-                "%s Buying, selling and redeeming move value between cash and securities "
+                "%d securities transaction(s) were present and deliberately not extracted. "
+                "Buying, selling and redeeming move value between cash and securities "
                 "inside one account without changing what it is worth, so they are not cash "
                 "flow and are not recorded. What is recorded is money that crossed the account "
                 "boundary, plus dividends, interest, fees, and the change in market value the "
-                "statement prints."
-                % ("%d securities transaction(s) were present and deliberately not extracted."
-                   % omitted if omitted else
-                   "Securities transactions are deliberately not extracted."),
+                "statement prints." % omitted,
                 "transactions",
             ))
-            # No printed figure means no line, which means the statement will
-            # not reconcile -- and it should not. Saying which of the two is
-            # missing turns an unexplained delta into an answerable question.
-            if not any(_is_market_change(line) for line in lines):
-                flags.append(_flag(
-                    "MARKET_CHANGE_NOT_PRINTED", "info",
-                    "No change-in-market-value figure was found on this statement, so any "
-                    "movement in the value of the holdings is not accounted for and the "
-                    "balances will not tie. The figure is never calculated here: one derived "
-                    "by subtraction would make every statement balance and would hide a "
-                    "withdrawal nobody extracted.",
-                    "balances",
-                ))
+        # ONLY WHEN THE STATEMENT ACTUALLY FAILS TO TIE. This flag's whole
+        # claim is that a movement in value is unaccounted for, and it says
+        # so in as many words -- "the balances will not tie". On a statement
+        # that reconciles that sentence is simply FALSE, and a flag that
+        # contradicts the row it sits on is worse than no flag: it teaches
+        # the reader that the flags do not mean anything.
+        #
+        # A reconciled statement with no line we RECOGNISE as market change
+        # is one of two harmless things: the figure was extracted under a
+        # name `_MARKET_CHANGE` does not list, or the holdings did not move.
+        # Either way nothing is missing, which is what reconciliation just
+        # proved.
+        if (cash_flow_only and not reconciled
+                and not any(_is_market_change(line) for line in lines)):
+            flags.append(_flag(
+                "MARKET_CHANGE_NOT_PRINTED", "info",
+                "No change-in-market-value figure was found on this statement, so any "
+                "movement in the value of the holdings is not accounted for and the "
+                "balances will not tie. The figure is never calculated here: one derived "
+                "by subtraction would make every statement balance and would hide a "
+                "withdrawal nobody extracted.",
+                "balances",
+            ))
 
         # A warn-level flag on any line is enough to hold the statement back.
         line_warnings = sum(
@@ -2194,7 +2709,33 @@ class StatementService:
         # date range quietly omitted the line, and nothing would explain the
         # difference between the two figures.
         undated = sum(1 for line in lines if not _parse_date(line.get("transaction_date")))
-        if undated:
+        # A DEGRADED READ AND A PERIOD SUMMARY ARE NOT THE SAME FACT, and the
+        # remedy separates them: "date them from the source page" is impossible
+        # when the source page prints no dates.
+        #
+        # A register whose date column went wrong yields SOME dated lines and
+        # some not -- that mixture is the degraded call this flag was built for.
+        # EVERY line undated on a cash-flow account is the other shape: a policy
+        # or annuity statement has no register at all, and its value-of-policy
+        # block states period totals. Those figures never had dates; the
+        # statement period is what bounds them.
+        #
+        # So the consequence is still reported -- an exhibit built by date range
+        # will not contain them, which is worth knowing either way -- but it is
+        # `info` rather than a `warn` that holds the statement in the exceptions
+        # queue awaiting a correction nobody can make.
+        summary_derived = cash_flow_only and lines and undated == len(lines)
+        if undated and summary_derived:
+            flags.append(_flag(
+                "UNDATED_TRANSACTIONS", "info",
+                "All %d figure(s) are period totals from the statement's own value summary, "
+                "which prints no dates \u2014 this kind of statement has no transaction register. "
+                "They count toward the balance and are bounded by the statement period, but a "
+                "NULL date is excluded from every date-filtered search, so an exhibit built by "
+                "date range will not contain them." % undated,
+                "transaction_date",
+            ))
+        elif undated:
             flags.append(_flag(
                 "UNDATED_TRANSACTIONS", "warn",
                 "%d transaction(s) have no date, after the date column was re-read. They count "
@@ -2238,6 +2779,24 @@ class StatementService:
                 "separated from the others by page number alone. Where a bank prints several "
                 "accounts on one page, lines belonging to the account before or after this one "
                 "may have been filed here. Check the first and last few lines against the page.",
+                "transactions",
+            ))
+
+        if unindexed_pages:
+            # NOT this statement's defect -- the DOCUMENT's. Raised on every
+            # statement from it because the alternative is an import that looks
+            # complete: eight months accepted, sixteen never read, and nothing
+            # on screen saying which. Warn-level, so the whole document is held
+            # for review rather than auto-accepted.
+            flags.append(_flag(
+                "PAGES_NOT_INDEXED", "warn",
+                "Page(s) %s of the source document begin a statement that was not read, or "
+                "belong to none that was. Anything printed there is NOT in this record, and "
+                "where such a page falls inside another statement's range its lines may have "
+                "been filed against that statement instead. This usually means the document "
+                "holds more statements than were found: check those pages, and split the PDF "
+                "into one statement per file if they hold months of their own."
+                % _page_ranges(unindexed_pages),
                 "transactions",
             ))
 
@@ -2757,6 +3316,112 @@ class StatementService:
         if "amount" in applied:
             statement = self._rereconcile(statement_repo, transaction_repo, record.statement_id)
         return updated, statement
+
+    def add_transaction(
+        self,
+        manager: DatabaseManager,
+        statement_id: int,
+        values: dict[str, Any],
+        staff_id: int,
+        staff_name: str,
+        reason: Optional[str] = None,
+    ) -> tuple[Any, Any]:
+        """
+        Add a line extraction did not produce, and say on the line that a person
+        added it.
+
+        **The reason this exists is that the alternative was an INSERT by hand.**
+        A line the extraction missed entirely — a page the model stopped
+        reading, a figure printed somewhere no pass looked — left the statement
+        permanently out of balance, and the way it was being fixed was a row
+        typed straight into the database at zero and then corrected through the
+        app so the arithmetic closed. That works, and it leaves no record of
+        itself anywhere a person reading the exhibit can see.
+
+        **So the flag is the feature, not the insert.** Every added line carries
+        ``MANUAL_ENTRY`` naming the person, the time, and their reason, which is
+        the same promise ``correct_transaction`` makes: the figure that reaches
+        an exhibit can say where it came from. An exhibit carries the Rule 1006
+        notice asserting the underlying records are available for examination,
+        and a line nobody can find on the production is precisely what that
+        notice must not cover silently.
+
+        **It is for a line that IS on the document and was missed.** Nothing
+        here checks that — it cannot — which is why the flag reads as an
+        assertion by a named person rather than as a note. The sign rule is
+        unchanged (CLAUDE.md §11): an amount is signed by how it moves the
+        balance the institution printed.
+
+        ``line_no`` goes after the statement's last line rather than being
+        inserted by date. ``line_no`` records the printed sequence, and a line
+        that was not read off the page has no place in it; appending says so,
+        where renumbering would quietly assert a position on the document.
+
+        :param values: ``description`` and ``amount`` are required; every other
+            key in ``_CORRECTABLE`` is accepted.
+        :param reason: Why the line is being added — "printed on page 7, missed
+            by the import". Recorded on the line with the person's name.
+        :return: ``(transaction, statement)``, the statement re-reconciled. A
+            manual line always moves the arithmetic, so it is never None.
+        :raises ValueError: If the statement does not exist, or the required
+            fields are missing.
+        """
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        statement_repo = FinancialAccountStatementRepository(manager)
+
+        statement = statement_repo.select_one(condition={"id": statement_id})
+        if statement is None:
+            raise ValueError("Statement not found")
+
+        record: dict[str, Any] = {}
+        for field in _CORRECTABLE:
+            if field in values:
+                record[field] = _coerce_field(field, values[field])
+
+        description = (record.get("description") or "").strip()
+        if not description:
+            raise ValueError("A description is required: say what the line is.")
+        if record.get("amount") is None:
+            raise ValueError(
+                "An amount is required. Sign it the way the statement moves the "
+                "balance: money out is negative, money in is positive."
+            )
+        record["description"] = description
+
+        # Existing lines include dropped ones: line numbers are positions, and
+        # reusing one a soft-deleted line still holds would collide if it were
+        # ever restored.
+        existing = transaction_repo.get_by_statement(statement_id, include_deleted=True)
+        record.update({
+            "statement_id": statement_id,
+            "financial_account_id": statement.financial_account_id,
+            "line_no": max((t.line_no or 0 for t in existing), default=0) + 1,
+            "flags": [{
+                "code": "MANUAL_ENTRY",
+                "severity": "info",
+                "field_path": None,
+                "note": "%s added this line by hand; it was not produced by the import.%s" % (
+                    staff_name, (" Reason: %s" % reason) if reason else "",
+                ),
+                "by_staff_id": staff_id,
+                "by": staff_name,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "reason": reason or None,
+            }],
+        })
+        # date_provenance is left at its default: it distinguishes a year read
+        # off the line from one inferred from the period, and neither describes
+        # a figure somebody typed. MANUAL_ENTRY is what says where this came
+        # from.
+        created = transaction_repo.insert(record)
+        LOGGER.info(
+            "statement_service.add_transaction: statement=%s transaction=%s staff=%s",
+            statement_id, created.id, staff_id,
+        )
+        # Always, not only when it closes the gap: a new line changes the sum,
+        # so a stale delta on the statement would now be wrong in both
+        # directions.
+        return created, self._rereconcile(statement_repo, transaction_repo, statement_id)
 
     @staticmethod
     def _rereconcile(

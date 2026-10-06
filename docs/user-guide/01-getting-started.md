@@ -31,7 +31,7 @@ only visible to someone holding the `admin` role.
    | **Work email** | Their firm address, for display and correspondence. May be the same as the sign-in email. |
    | **Telephone** | |
    | **Role** | Governs billing and display. It is *not* what controls access — see Step 2. |
-   | **Slug** | A short handle, e.g. `jdoe`. |
+   | **Slug** | A short handle, e.g. `jdoe`. **For an attorney who takes leads from the marketing site, this must match the slug that site sends, exactly** — it is what routes their leads to them. See [Chapter 14](14-lead-routing.md). |
    | **Office ID** | |
    | **Default rate ($/hr)** | Optional. The fallback billing rate when a matter has no override. |
    | **Bar admissions** | State and bar number, for attorneys. |
@@ -58,6 +58,19 @@ A person with no roles shows **no auth roles** in amber. They can sign in to
 Google, but Cyclone will turn them away.
 
 See [Chapter 12](12-user-roles.md) for what each role can actually do.
+
+### Step 3: If this person is involved with leads
+
+Two more pieces of setup live outside this form, and neither happens on its own:
+
+- **An attorney who receives leads** needs responders configured, or nobody is
+  told when one of their leads needs attention. Admin → **Lead responders**.
+- **Anyone who works leads** needs access to the relevant slugs. A new staff
+  member is granted the firm's general inbox (`www`) and nothing else — not even
+  an attorney's own slug.
+
+[Chapter 14](14-lead-routing.md) is the whole of it, including what to check
+when a lead arrives and nobody hears about it.
 
 ---
 

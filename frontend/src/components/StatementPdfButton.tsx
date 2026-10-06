@@ -14,9 +14,17 @@ import { openStatementPdf } from '../lib/api'
  */
 export default function StatementPdfButton({
   statementId,
+  page,
   label = 'Show statement',
 }: {
   statementId: number
+  /**
+   * Land on this page instead of the statement's first transaction page. A
+   * transaction row knows which page its own line is printed on, and that is a
+   * better answer than the statement's opening page inside a production of
+   * sixty.
+   */
+  page?: number | null
   label?: string
 }) {
   const [busy, setBusy] = useState(false)
@@ -26,7 +34,7 @@ export default function StatementPdfButton({
     setBusy(true)
     setProblem(null)
     try {
-      await openStatementPdf(statementId)
+      await openStatementPdf(statementId, page)
     } catch (e) {
       // A dead link is the failure this button exists to replace, so the reason
       // has to be readable rather than a console entry. The server distinguishes

@@ -22,10 +22,41 @@ _client: Optional[redis.Redis] = None
 
 
 def get_redis() -> redis.Redis:
-    """Return a process-wide Redis client built from settings.redis_url."""
+    """
+    Return a process-wide Redis client built from settings.redis_url.
+
+    **BOTH TIMEOUTS ARE LOAD-BEARING, and neither was here.** Without them the
+    socket default is *never* -- the same defect the mail connections had, with
+    the same fleet-wide lock at stake: the CRM tick holds `crm:poller` while it
+    works, so one node waiting forever on Redis stops **every** node from
+    polling until the lock TTL expires.
+
+    ``socket_connect_timeout`` bounds the loud failure (nothing listening, no
+    route). ``socket_timeout`` bounds the quiet one -- a host that accepts the
+    connection and then stops talking -- and the quiet one is worse, because
+    nothing anywhere reports it.
+
+    **What these do NOT fix, measured rather than assumed:** a *refused*
+    connection already returns quickly, so the cap never engages. On one Windows
+    box a refused connect to 127.0.0.1 took 2.04s and to ::1 another 2.04s --
+    and ``localhost`` resolves to BOTH, tried in order, so a URL spelled
+    ``redis://localhost`` cost 4.07s where ``redis://127.0.0.1`` cost 2.04s.
+    Setting the cap to 0.2s did bound it (0.43s total), which is how we know the
+    timeouts are wired correctly; 3.0s simply sits above the refusal.
+
+    What they DO fix is the case with no bound at all: a host that accepts the
+    connection and never answers, or one whose packets are dropped by a changed
+    security group. That is the failure worth having a number for, and it is the
+    quiet one.
+    """
     global _client
     if _client is None:
-        _client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        _client = redis.Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=settings.redis_timeout_seconds,
+            socket_timeout=settings.redis_timeout_seconds,
+        )
     return _client
 
 

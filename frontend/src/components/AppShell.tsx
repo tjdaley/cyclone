@@ -102,6 +102,15 @@ function IconAdmin() {
   )
 }
 
+function IconCosts() {
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M3 13.5l5.25-5.25 4.5 4.5L21 4.5M21 4.5h-6m6 0v6M3 19.5h18" />
+    </svg>
+  )
+}
+
 const NAV_ITEMS: NavItem[] = [
   { to: '/app/dashboard', label: 'Dashboard',  icon: <IconDashboard /> },
   { to: '/app/billing',   label: 'Billing',    icon: <IconBilling /> },
@@ -112,6 +121,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/app/leads',     label: 'Leads',      icon: <IconLeads />, roles: ['attorney', 'paralegal', 'admin'] },
   { to: '/app/profile',   label: 'Profile',    icon: <IconProfile /> },
   { to: '/app/admin',     label: 'Admin',      icon: <IconAdmin />, roles: ['admin'] },
+  { to: '/app/costs',     label: 'Costs',      icon: <IconCosts />, roles: ['admin'] },
 ]
 
 export default function AppShell() {

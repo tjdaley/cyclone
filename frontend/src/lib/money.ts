@@ -29,3 +29,33 @@ export function formatDate(iso: string | null | undefined): string {
     month: 'short', day: 'numeric', year: 'numeric',
   })
 }
+
+/**
+ * A spend figure, from the report's rounded and precise strings.
+ *
+ * `money()` keeps two places, so a month of fractions of a cent reads $0.00 --
+ * which says FREE, and is wrong. When the rounded figure is zero and the
+ * precise one is not, this says "<$0.01" instead. Decided on the strings; no
+ * parsing.
+ */
+export function cost(rounded: string, precise: string): string {
+  const nonZero = /[1-9]/.test(precise.replace(/^[-+]/, ''))
+  const roundedZero = !/[1-9]/.test(rounded.replace(/^[-+]/, ''))
+  if (nonZero && roundedZero) return '<$0.01'
+  return money(rounded)
+}
+
+/**
+ * A unit price, with every significant decimal kept and at least two.
+ *
+ * Model prices run below a cent per million tokens. Truncated to cents like
+ * `money()`, "$0.075" would display as "$0.07" -- a wrong price on the page
+ * where prices are entered and checked.
+ */
+export function unitPrice(value: string | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '\u2014'
+  const [whole, fraction = ''] = value.replace(/^[-+]/, '').split('.')
+  const trimmed = fraction.replace(/0+$/, '').padEnd(2, '0')
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `${value.startsWith('-') ? '-' : ''}$${grouped}.${trimmed}`
+}

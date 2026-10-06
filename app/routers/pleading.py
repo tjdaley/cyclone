@@ -40,6 +40,7 @@ from services.pdf_service import pdf_service
 from services.pleading_service import pleading_service
 from services.storage_service import StorageService
 from util.loggerfactory import LoggerFactory
+from util.usage_scope import usage_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -65,19 +66,22 @@ def preview_pleading(
     if file.content_type not in ("application/pdf", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-    pdf_bytes = file.file.read()
-    try:
-        raw_text = pdf_service.extract_text(pdf_bytes)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+    # LLM cost attribution: OCR here and extraction in the service both spend
+    # tokens, so the matter is set around BOTH rather than inside the service.
+    with usage_scope(matter_id=matter_id):
+        pdf_bytes = file.file.read()
+        try:
+            raw_text = pdf_service.extract_text(pdf_bytes)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
-    if not raw_text.strip():
-        raise HTTPException(status_code=422, detail="No text could be extracted from the PDF")
+        if not raw_text.strip():
+            raise HTTPException(status_code=422, detail="No text could be extracted from the PDF")
 
-    try:
-        preview = pleading_service.preview_ingest(manager=manager, matter_id=matter_id, raw_text=raw_text)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+        try:
+            preview = pleading_service.preview_ingest(manager=manager, matter_id=matter_id, raw_text=raw_text)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
     return preview
 

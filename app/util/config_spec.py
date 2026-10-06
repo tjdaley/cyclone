@@ -78,6 +78,7 @@ FLEET = frozenset({
     "imap_mailbox",
     "imap_spam_folder",
     "mail_timeout_seconds",
+    "redis_timeout_seconds",
     "job_poll_interval_seconds",
     "job_concurrency",
     "lead_poll_interval_seconds",
@@ -197,6 +198,48 @@ FINGERPRINTED = FLEET | SECRET | PER_FIRM
 # possible while the hash is comparable across builds.
 BUILD = frozenset({
     "cyclone_build",
+})
+
+# WHICH NAMES docker-compose.yml INTERPOLATES ON THE HOST.
+#
+# **NOT a bucket, and it must never become one.** The buckets are disjoint and
+# answer "what is this setting FOR?"; this answers a different question -- "does
+# compose read it before any container exists?" -- and the answers overlap.
+# `SUPABASE_ANON_KEY` is COMPOSE_ONLY, `SUPABASE_URL` is INFRASTRUCTURE because
+# the API genuinely needs it too, and BOTH are interpolated.
+#
+# That overlap is the bug this exists to prevent, and it reached production.
+# `_refuse_if_compose_reads_it` was keyed on COMPOSE_ONLY, so it never saw
+# SUPABASE_URL; the name was removed from `.env` during the SSM migration, the
+# next `docker compose build` substituted an EMPTY STRING into the frontend's
+# VITE_SUPABASE_URL build arg, and the bundle shipped with no Supabase URL.
+#
+# The failure is as quiet as it gets: compose prints one "variable is not set"
+# line and exits 0, the image builds, the container is healthy, nginx serves
+# index.html with a 304, nothing appears in any server log -- and every browser
+# gets a BLANK WHITE PAGE, because `createClient("")` throws
+# `supabaseUrl is required.` at module scope before React mounts.
+#
+# `tests/test_config_fingerprint.py` asserts this set equals what
+# docker-compose.yml actually interpolates, so it cannot drift from the file it
+# describes. Adding a `${VARIABLE}` to compose without adding it here fails.
+COMPOSE_INTERPOLATED = frozenset({
+    "supabase_url",
+    "supabase_anon_key",
+    # Has an explicit `:-` default in compose, so an absent value is intended
+    # rather than an accident. Still listed: it is still read on the host.
+    "api_base_url",
+    # Stamped into the image by the build; absent means "unknown", which
+    # check-fleet reports rather than treating as agreement.
+    "cyclone_build",
+})
+
+#: Of those, the ones whose absence silently breaks the build rather than
+#: falling back to something sensible. These MUST be set in `.env` on whatever
+#: machine runs `docker compose build`.
+COMPOSE_REQUIRED = frozenset({
+    "supabase_url",
+    "supabase_anon_key",
 })
 
 ALL_BUCKETS = {

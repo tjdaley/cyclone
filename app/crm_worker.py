@@ -27,6 +27,7 @@ from db.repositories.lead_agent_run import LeadAgentRunRepository
 from util.loggerfactory import LoggerFactory
 from util.redis_client import lock
 from util.settings import settings
+from util.usage_scope import usage_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -47,7 +48,8 @@ def _poll_welcomes() -> None:
         if lead.created_at < cutoff:
             continue
         try:
-            crm_agent_service.process_new_lead(cyclone_db, lead)
+            with usage_scope(source_type="crm_lead", source_id=lead.session_uuid):
+                crm_agent_service.process_new_lead(cyclone_db, lead)
         except Exception as e:  # noqa: BLE001 — one bad lead must not stop the batch
             LOGGER.error("crm_worker: process_new_lead failed session=%s err=%s", lead.session_uuid, str(e))
 
@@ -165,7 +167,12 @@ def _step(name: str, run: Callable[[], None]) -> None:
     share only a lock, and a lock is not a reason to share a fate.
     """
     try:
-        run()
+        # Every CRM model call is spend with no staff member and no matter --
+        # the work is about a lead, before anyone is a client. The step name
+        # says which part of the tick spent it; the welcome loop narrows it to
+        # one lead.
+        with usage_scope(source_type="crm", source_id=name):
+            run()
     except _NETWORK_FAULTS as e:
         LOGGER.warning("crm_worker: %s could not reach its service (%s: %s)",
                        name, type(e).__name__, str(e) or "no detail")

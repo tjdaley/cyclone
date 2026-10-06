@@ -16,6 +16,7 @@ import FisPanel from './FisPanel'
 import CompliancePanel from './CompliancePanel'
 import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
+import TransactionAddDialog from './TransactionAddDialog'
 import type {
   Matter, OpposingParty,
   FinancialAccount, AccountType, PropertyCharacter, AccountOwnership,
@@ -25,18 +26,46 @@ import type {
   ProductionResponsibility,
 } from '../../types'
 
+// Dropdown order: what the money sits in, then what is owed, then what is
+// locked away -- the reading order of a property inventory, matching
+// compliance_service._TYPE_ORDER rather than alphabetical.
 const ACCOUNT_TYPES: AccountType[] = [
-  'checking', 'savings', 'brokerage', 'credit_card', 'retirement', 'hsa', 'loan', 'other',
+  'checking', 'savings', 'brokerage', 'crypto', 'credit_card', 'loan',
+  'retirement', 'life_insurance', 'annuity', 'hsa', 'other',
 ]
+
+/**
+ * Disabled has to LOOK disabled.
+ *
+ * These are text links (`text-xs text-navy underline`), and the browser renders
+ * a disabled one identically to a live one — same colour, same underline, same
+ * cursor. So a page-wide `busy` silently made every Accept/Retry/Reject inert
+ * with no signal whatsoever, and the natural response was to click Retry again,
+ * and again, on row after row. That is the same failure the payee queue had:
+ * **a disabled button looks exactly like one nobody pressed.**
+ *
+ * `no-underline` is what carries it. Opacity alone still reads as a link.
+ */
+const linkBusy = 'disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed'
+
+/** Why a row went inert. Shown on hover of anything `busy` disabled. */
+const RETRY_WAIT =
+  'Waiting — a re-read is running. One upload can hold several statements, so ' +
+  'the rows here are being discarded and recreated; acting on one now would act ' +
+  'on a row that is about to be replaced.'
 
 const CHARACTERS: PropertyCharacter[] = [
   'community', 'separate_petitioner', 'separate_respondent', 'mixed', 'disputed',
 ]
 
+// Typed `Record<AccountType, string>` deliberately: adding a member to the
+// union breaks this until it has a label, which is what stops another type
+// shipping unlabelled the way `crypto` did between 036 and 038.
 const ACCOUNT_TYPE_LABEL: Record<AccountType, string> = {
   checking: 'Checking', savings: 'Savings', brokerage: 'Brokerage',
-  credit_card: 'Credit card', retirement: 'Retirement', hsa: 'HSA',
-  loan: 'Loan', other: 'Other',
+  crypto: 'Crypto', credit_card: 'Credit card', loan: 'Loan',
+  retirement: 'Retirement', life_insurance: 'Life insurance',
+  annuity: 'Annuity', hsa: 'HSA', other: 'Other',
 }
 
 const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
@@ -212,9 +241,21 @@ export default function MatterFinancialsPage() {
   const [openStatementId, setOpenStatementId] = useState<number | null>(null)
   const [transactions, setTransactions] = useState<AccountTransaction[]>([])
   const [txLabel, setTxLabel] = useState<string>('')
+  /**
+   * The statement being viewed, when exactly one is. Undefined in the
+   * whole-account history, where a line has no single document to belong to.
+   */
+  const viewedStatement = statements.find(s => s.id === openStatementId)
   const [busy, setBusy] = useState(false)
+  // Which statement's Retry is running, so its own row can say so while the
+  // others explain why they went quiet. `busy` alone cannot: it is page-wide,
+  // so every row looks equally stopped and none of them says which one is the
+  // reason. See the `linkBusy` class and RETRY_WAIT below.
+  const [retrying, setRetrying] = useState<number | null>(null)
   const [editing, setEditing] = useState<number | null>(null)
   const [correcting, setCorrecting] = useState<AccountTransaction | null>(null)
+  /** The statement a line is being added to. Null unless the dialog is open. */
+  const [addingTo, setAddingTo] = useState<AccountStatement | null>(null)
 
   async function refresh() {
     const [accountRows, exceptionRows] = await Promise.all([
@@ -536,6 +577,12 @@ export default function MatterFinancialsPage() {
     )) return
 
     setBusy(true)
+    setRetrying(statement.id)
+    // On the SAME TICK as the click. Setting this later meant the upload panel
+    // stayed idle through retryStatement() and refresh() -- two round trips of
+    // a page that looks untouched, which is the window somebody fills by
+    // clicking again.
+    setPhase('reading')
     setError(null)
     try {
       const result = await retryStatement(statement.id)
@@ -581,7 +628,19 @@ export default function MatterFinancialsPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not re-read the document')
-    } finally { setBusy(false) }
+    } finally {
+      // Released in `finally`, and this is not optional: one unexpected throw
+      // would otherwise leave the whole queue inert for the life of the page,
+      // curable only by a reload nobody would think to try.
+      // `phase` is cleared HERE and nowhere else. Set on the first tick, it
+      // has to be released on every path out -- including a retryStatement()
+      // that throws before the job exists, which the inner finally never sees.
+      // A stranded phase leaves the panel spinning over nothing, and the upload
+      // drop zone refuses input while it does.
+      setPhase(null)
+      setRetrying(null)
+      setBusy(false)
+    }
   }
 
   /**
@@ -683,14 +742,24 @@ export default function MatterFinancialsPage() {
         }`}
         onDrop={e => {
           e.preventDefault(); setDragOver(false)
-          // handleFiles refuses re-entry itself, on a ref. Checking a state
-          // value here as well would be the same stale read that let a second
-          // drop through: `job` is null for the whole upload phase.
+          // A RE-READ IS THE ONE PHASE A DROP MUST NOT JOIN. handleFiles would
+          // overwrite `job` and `phase`, so the retry's progress would vanish
+          // mid-flight and the new upload would appear to be what Retry was
+          // doing. Uploads may still stack on each other; that is deliberate
+          // and unchanged.
+          //
+          // Read off `retrying`, which is set on the same tick as the click, so
+          // this is not the stale-state read that let a second drop through
+          // before -- handleFiles still refuses re-entry itself, on a ref.
+          if (retrying !== null) return
           handleFiles(Array.from(e.dataTransfer.files))
         }}
         onDragOver={e => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={e => { e.preventDefault(); setDragOver(false) }}
-        onClick={() => { if (!uploadingRef.current) fileInputRef.current?.click() }}>
+        onClick={() => {
+          if (uploadingRef.current || retrying !== null) return
+          fileInputRef.current?.click()
+        }}>
         <input ref={fileInputRef} type="file" accept=".pdf" multiple className="hidden"
           onChange={e => {
             if (e.target.files?.length) handleFiles(Array.from(e.target.files))
@@ -721,8 +790,18 @@ export default function MatterFinancialsPage() {
               </>
             ) : (
               <>
+                {/* A re-read and a fresh upload reach this branch alike, and
+                    they are not the same event to somebody watching: one is
+                    "my files are being read", the other is "the document I
+                    clicked Retry on is being discarded and read again". Saying
+                    the wrong one is worse than saying nothing, because it
+                    describes work the user did not ask for. */}
                 <p className="text-navy font-medium">
-                  {job?.status === 'queued' ? 'Queued…' : 'Reading the statements…'}
+                  {retrying !== null
+                    ? (job?.status === 'queued'
+                        ? 'Queued — re-reading the document…'
+                        : 'Re-reading the document…')
+                    : (job?.status === 'queued' ? 'Queued…' : 'Reading the statements…')}
                 </p>
                 {/* Counts finished, not "which one" — several are read at once,
                     so there is no current file to name. */}
@@ -732,7 +811,9 @@ export default function MatterFinancialsPage() {
                   </p>
                 )}
                 <p className="text-text-secondary text-sm mt-1 tabular-nums">
-                  {job?.seconds ?? 0}s · several are read at once — you can leave this page
+                  {job?.seconds ?? 0}s · {retrying !== null
+                    ? 'every statement from this upload is being recreated — you can leave this page'
+                    : 'several are read at once — you can leave this page'}
                 </p>
               </>
             )}
@@ -920,23 +1001,41 @@ export default function MatterFinancialsPage() {
                         {s.bates_last && s.bates_last !== s.bates_first ? `–${s.bates_last}` : ''}
                       </span>
                     )}
+                    {/* THE ROW BEING RE-READ SAYS SO, and the others say why
+                        they are waiting. Disabling all of them is correct — a
+                        retry discards every statement its upload produced, so
+                        the neighbouring rows are about to be destroyed and
+                        recreated — but correct and silent is what had somebody
+                        clicking Retry down the list wondering why nothing
+                        happened. */}
+                    {retrying === s.id ? (
+                      <span className="ml-auto flex items-center gap-2 text-xs text-navy">
+                        <span className="animate-spin w-3 h-3 border-2 border-navy/20 border-t-navy rounded-full" />
+                        Re-reading this document{job?.seconds ? ` · ${job.seconds}s` : '\u2026'}
+                      </span>
+                    ) : (
                     <span className="ml-auto flex gap-3">
-                      <button type="button" className="text-xs text-navy underline" disabled={busy}
+                      <button type="button" className={`text-xs text-navy underline ${linkBusy}`}
+                        disabled={busy} title={busy ? RETRY_WAIT : undefined}
                         onClick={() => decide(s, 'accepted')}>Accept</button>
                       {/* Between accepting a bad read and throwing it away
                           outright: some statements come out wrong for a reason
                           a second reading fixes. It discards the whole upload
                           first — see retry() for why it cannot be just this
                           statement. */}
-                      <button type="button" className="text-xs text-navy underline"
+                      <button type="button" className={`text-xs text-navy underline ${linkBusy}`}
                         disabled={busy || !s.storage_path}
-                        title={s.storage_path
-                          ? 'Discard this upload and read the PDF again'
-                          : 'No source PDF was stored for this statement'}
+                        title={!s.storage_path
+                          ? 'No source PDF was stored for this statement'
+                          : busy
+                            ? RETRY_WAIT
+                            : 'Discard this upload and read the PDF again'}
                         onClick={() => retry(s)}>Retry</button>
-                      <button type="button" className="text-xs text-red-700 underline" disabled={busy}
+                      <button type="button" className={`text-xs text-red-700 underline ${linkBusy}`}
+                        disabled={busy} title={busy ? RETRY_WAIT : undefined}
                         onClick={() => decide(s, 'rejected')}>Reject and delete</button>
                     </span>
+                    )}
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-3 text-xs text-text-secondary tabular-nums">
                     <span>opened {money(s.beginning_balance)}</span>
@@ -966,6 +1065,22 @@ export default function MatterFinancialsPage() {
               await refresh()
             }
             setCorrecting(null)
+          }} />
+      )}
+
+      {addingTo && (
+        <TransactionAddDialog
+          statement={addingTo}
+          onClose={() => setAddingTo(null)}
+          onAdded={async (created, statement) => {
+            setTransactions(prev => [...prev, created])
+            // A new line always moves the sum, so the statement's badge and the
+            // exceptions queue are both stale the moment it is saved.
+            if (statement) {
+              setStatements(prev => prev.map(s => (s.id === statement.id ? statement : s)))
+              await refresh()
+            }
+            setAddingTo(null)
           }} />
       )}
 
@@ -1066,7 +1181,8 @@ export default function MatterFinancialsPage() {
                               production from a month that never existed. */}
                           <select className="text-xs border border-border rounded px-1 py-0.5 bg-white"
                             value={s.boundary} disabled={busy}
-                            title="Is this the account's first statement, its last, or neither?"
+                            title={busy ? RETRY_WAIT
+                              : "Is this the account's first statement, its last, or neither?"}
                             onChange={e => markBoundary(s, e.target.value as StatementBoundary)}>
                             <option value="intermediate">neither end</option>
                             <option value="opening">first statement †</option>
@@ -1075,7 +1191,9 @@ export default function MatterFinancialsPage() {
                           <span className="text-xs text-text-secondary tabular-nums">
                             {money(s.beginning_balance)} → {money(s.ending_balance)}
                           </span>
-                          <button type="button" className="text-xs text-red-700 underline" disabled={busy}
+                          <button type="button"
+                            className={`text-xs text-red-700 underline ${linkBusy}`}
+                            title={busy ? RETRY_WAIT : undefined} disabled={busy}
                             onClick={() => discardStatement(s)}>Delete</button>
                         </span>
                       </div>
@@ -1088,15 +1206,30 @@ export default function MatterFinancialsPage() {
         )}
       </div>
 
-      {/* ── Transactions ── */}
-      {transactions.length > 0 && (
+      {/* ── Transactions ──
+          Shown whenever a statement is open, even with no lines on it. A
+          statement that extracted NOTHING is exactly the one somebody needs to
+          add a line to, and hiding the panel on an empty result made that the
+          one case the screen could not reach. */}
+      {(transactions.length > 0 || viewedStatement !== undefined) && (
         <div className="card p-5">
           <div className="flex items-baseline justify-between mb-3">
             <h2 className="font-semibold text-navy">
               Transactions
               <span className="ml-2 text-sm font-normal text-text-secondary">{txLabel}</span>
             </h2>
-            <span className="text-sm text-text-secondary tabular-nums">{transactions.length} lines</span>
+            <div className="flex items-baseline gap-3">
+              {/* Only with one statement open: a line belongs to the document
+                  it is printed on, and the whole-account view spans many. */}
+              {viewedStatement !== undefined && (
+                <button type="button" className="text-xs text-navy underline" disabled={busy}
+                  title="Add a line that is printed on this statement but the import missed"
+                  onClick={() => setAddingTo(viewedStatement)}>Add a line</button>
+              )}
+              <span className="text-sm text-text-secondary tabular-nums">
+                {transactions.length} lines
+              </span>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">

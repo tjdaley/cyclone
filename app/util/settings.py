@@ -158,6 +158,16 @@ class Settings(BaseSettings):
     #: A dropped handshake is the visible version of that problem; the silent
     #: hang is the worse one.
     mail_timeout_seconds: int = 30
+    # Seconds to wait on Redis, connecting AND reading. Same argument as
+    # mail_timeout_seconds and the same fleet-wide lock at stake: without one
+    # the socket default is *never*, and a host that accepts a connection and
+    # then stops talking wedges the CRM tick while it holds `crm:poller`.
+    #
+    # Three seconds is generous for an operation that normally takes under a
+    # millisecond. It bounds a HANG, not a refusal -- a refused connection
+    # already returns in about two seconds and never reaches the cap. See
+    # redis_client.get_redis for the measurements.
+    redis_timeout_seconds: float = 3.0
 
     # Telegram (agent escalations to lead responders)
     telegram_bot_token: str = ""

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from util import amount_filter
 from db.models.financial import (
     AccountOwnership,
     AccountType,
@@ -372,8 +373,37 @@ class TransactionSearchRequest(BaseModel):
         default=False,
         description="Every check on the account and nothing else",
     )
+    # STRINGS, because the sign the user types is an instruction and not part of
+    # the number. A plain figure searches by magnitude and matches both
+    # directions -- which is what finds an offsetting pair, a transfer out of
+    # one produced account and the same figure arriving in another. A leading
+    # "-" restricts to money out as the statement printed it, "+" to money in.
+    # Both boxes are magnitudes either way, so the smaller figure goes first
+    # whichever direction is being searched. See util/amount_filter.py.
+    amount_min: Optional[str] = Field(
+        default=None, max_length=24,
+        description="Smallest amount, as typed: 5000 matches either direction, -5000 is money "
+                    "out, +5000 is money in",
+    )
+    amount_max: Optional[str] = Field(
+        default=None, max_length=24,
+        description="Largest amount, as typed. Same rules as amount_min, and the two must not "
+                    "ask for different directions",
+    )
     limit: int = Field(default=200, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _amounts_are_readable(self) -> "TransactionSearchRequest":
+        """
+        Refuse an unreadable amount range here, at the boundary.
+
+        The service resolves it again and is the authority; this exists so a
+        typo answers 422 with the sentence that says what to type, rather than
+        reaching a query that would quietly match something else.
+        """
+        amount_filter.resolve(self.amount_min, self.amount_max)
+        return self
 
 
 class ExhibitExportRequest(BaseModel):
@@ -502,6 +532,48 @@ class TransactionCorrectionResponse(BaseModel):
         default=None,
         description="Re-reconciled when an amount changed — that is the point of allowing the edit. "
                     "None when the correction did not touch the arithmetic",
+    )
+
+
+class TransactionAddRequest(BaseModel):
+    """
+    A line to add to a statement that the import did not produce.
+
+    The alternative was an INSERT by hand: a row typed into the database at zero
+    and then corrected through the app until the statement balanced. That works
+    and leaves no trace anybody reading the exhibit can see, which is the whole
+    reason this exists — every line added here carries a ``MANUAL_ENTRY`` flag
+    naming the person and their reason.
+
+    Fields match what a correction may change, so one line can be added and then
+    corrected by the same rules.
+    """
+    description: str = Field(
+        ..., min_length=1, max_length=500,
+        description="What the line is, as printed on the statement",
+    )
+    amount: Decimal = Field(
+        ...,
+        description="Signed by its effect on the printed balance: money out negative, money in "
+                    "positive — the same convention as every extracted line",
+    )
+    transaction_date: Optional[date] = Field(default=None, description="Date printed on the line")
+    posted_date: Optional[date] = Field(default=None, description="Posting date, when printed separately")
+    counterparty: Optional[str] = Field(default=None, max_length=200, description="Payee, when known")
+    location: Optional[str] = Field(default=None, max_length=200, description="City/state on the line")
+    running_balance: Optional[Decimal] = Field(
+        default=None, description="Balance printed after this line, when the statement prints one")
+    check_number: Optional[str] = Field(default=None, max_length=20, description="Check number as printed")
+    physical_page_number: Optional[int] = Field(
+        default=None, ge=1, description="Page of the source PDF this line is printed on")
+    bates_number: Optional[str] = Field(
+        default=None, max_length=50,
+        description="Stamp on that page, copied from it — never constructed from a neighbouring page",
+    )
+    reason: Optional[str] = Field(
+        default=None, max_length=500,
+        description="Why the line is being added, e.g. 'printed on page 7, missed by the import'. "
+                    "Recorded on the line with the person's name",
     )
 
 

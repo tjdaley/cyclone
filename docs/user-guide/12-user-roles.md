@@ -34,6 +34,7 @@ Everything below assumes the person has signed in successfully.
 | Dashboard, Billing, Matters, Clients, Discovery, Pleadings, Profile | ✅ | ✅ | ✅ |
 | Leads | ✅ | ✅ | ✅ |
 | Admin | — | — | ✅ |
+| Costs | — | — | ✅ |
 
 ### Day-to-day work
 
@@ -62,6 +63,7 @@ Everything below assumes the person has signed in successfully.
 | Rate overrides on a matter | — | — | ✅ |
 | Delete a matter or a client | — | — | ✅ |
 | Create staff, grant and revoke roles | — | — | ✅ |
+| Read AI spend, and enter or correct a price ([Chapter 15](15-costs.md)) | — | — | ✅ |
 | Knowledge base articles | — | — | ✅ |
 | Read the audit log | — | — | ✅ |
 

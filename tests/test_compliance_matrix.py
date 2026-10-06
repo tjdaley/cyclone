@@ -722,6 +722,40 @@ words = fitz.open(stream=to_pdf(bare), filetype="pdf")[0].get_text("words")
 centre = lambda text: [round((w[0] + w[2]) / 2, 1) for w in words if w[4] == text]
 check("the X is centred under its month", centre("X"), centre("Feb"))
 
+# ── Every account type must be labelled, or it prints as "Other" ─────────
+#
+# `_TYPE_LABEL.get(type, "Other")` and `_TYPE_ORDER.index(...)` both degrade
+# quietly: an unlisted type sorts last, which nobody minds, and is LABELLED
+# "Other", which goes on a document handed to opposing counsel. `crypto` shipped
+# in 036 and was not added here, so for two migrations every crypto account on a
+# compliance exhibit printed under "Other" and nothing said so.
+#
+# This is the guard. It is the Python half of the same rule TypeScript enforces
+# on the frontend, where `Record<AccountType, string>` will not compile until a
+# new member has a label.
+print("every account type is grouped and labelled")
+from db.models.financial import AccountType as _AT  # noqa: E402
+
+missing_label = sorted(t.value for t in _AT if t not in mod._TYPE_LABEL)
+missing_order = sorted(t.value for t in _AT if t not in mod._TYPE_ORDER)
+check("every AccountType has a label", missing_label, [])
+check("every AccountType has a place in the order", missing_order, [])
+
+# And the label must not BE "Other" for anything except `other`, which is the
+# specific way the failure shows: a type present in the map but pointed at the
+# fallback text reads exactly like one that is absent.
+mislabelled = sorted(
+    t.value for t in _AT
+    if t is not _AT.other and mod._TYPE_LABEL.get(t) == "Other")
+check("and nothing but `other` is labelled Other", mislabelled, [])
+
+# The types 038 added, pinned by name so a rename has to be deliberate.
+check("life insurance is labelled", mod._TYPE_LABEL.get(_AT.life_insurance),
+      "Life insurance")
+check("annuities are labelled", mod._TYPE_LABEL.get(_AT.annuity), "Annuities")
+check("crypto is labelled, at last", mod._TYPE_LABEL.get(_AT.crypto), "Crypto")
+
+
 print("")
 if FAILURES:
     print("%d FAILED: %s" % (len(FAILURES), ", ".join(FAILURES)))

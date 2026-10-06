@@ -6,9 +6,20 @@
  * JS number reintroduces exactly the float error the schema avoids.
  */
 
+/**
+ * Must mirror `AccountType` in app/db/models/financial.py and the
+ * financial_accounts CHECK constraint.
+ *
+ * `crypto` shipped in 036 and never reached this file, so the UI could neither
+ * create a crypto account nor label one it was shown. Adding a member here is
+ * what makes `Record<AccountType, string>` in MatterFinancialsPage fail to
+ * compile until its label exists -- which is the only guard on this list, so
+ * keep the label maps typed as `Record<AccountType, ...>` and never widen them
+ * to `Record<string, ...>`.
+ */
 export type AccountType =
-  | 'checking' | 'savings' | 'brokerage' | 'credit_card'
-  | 'retirement' | 'hsa' | 'loan' | 'other'
+  | 'checking' | 'savings' | 'brokerage' | 'crypto' | 'credit_card'
+  | 'retirement' | 'life_insurance' | 'annuity' | 'hsa' | 'loan' | 'other'
 
 /** Characterization for the inventory. Argued, never extracted. */
 export type PropertyCharacter =
@@ -305,6 +316,15 @@ export interface TransactionSearchFilter {
   check_number?: string | null
   /** Every check on the account and nothing else. */
   checks_only?: boolean
+  /**
+   * Smallest amount, **as typed** — a string, because the sign is an
+   * instruction rather than part of the number. A plain figure searches by
+   * magnitude and matches both directions, which is what finds an offsetting
+   * pair; `-5000` is money out as the statement printed it, `+5000` money in.
+   */
+  amount_min?: string | null
+  /** Largest amount, as typed. Same rules, and both boxes are magnitudes. */
+  amount_max?: string | null
   /** Show lines somebody dropped. Off by default. */
   include_deleted?: boolean
   limit?: number
@@ -360,6 +380,31 @@ export interface AccountMergeResult {
   statements_moved: number
   transactions_moved: number
   target: FinancialAccount
+}
+
+/**
+ * A line somebody adds by hand, because the import missed it.
+ *
+ * `description` and `amount` are required; everything else matches what a
+ * correction may change, so an added line can then be corrected by the same
+ * rules. The server flags it MANUAL_ENTRY with the person's name — the figure
+ * reaches an exhibit, and a line nobody can find on the production must say
+ * where it came from.
+ */
+export interface TransactionAddPayload {
+  description: string
+  /** Signed by its effect on the printed balance: money out negative. */
+  amount: string
+  transaction_date?: string | null
+  posted_date?: string | null
+  counterparty?: string | null
+  location?: string | null
+  running_balance?: string | null
+  bates_number?: string | null
+  check_number?: string | null
+  physical_page_number?: number | null
+  /** Why the line is being added. Kept on the flag. */
+  reason?: string
 }
 
 /** A field a person may correct on an ingested line. */

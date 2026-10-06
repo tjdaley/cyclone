@@ -21,6 +21,7 @@ from schemas.billing import (
 from schemas.common import DeletedResponse
 from services.billing_service import BillingService
 from util.loggerfactory import LoggerFactory
+from util.usage_scope import usage_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -134,7 +135,10 @@ def parse_natural_language(
     """
     svc = BillingService(manager)
     try:
-        parsed = svc.parse_natural_language(body.text)
+        # Narrows the request's LLM cost attribution to the matter when the
+        # caller named one. None leaves the request scope untouched.
+        with usage_scope(matter_id=body.matter_id):
+            parsed = svc.parse_natural_language(body.text)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

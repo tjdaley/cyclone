@@ -131,7 +131,15 @@ Above the grid:
 ### The grid
 
 Accounts grouped by type, years down, months across, a Bates number in each
-filled cell.
+filled cell. The type headings are Checking, Savings, Credit cards, Loans,
+Brokerage, **Crypto**, Retirement, **Life insurance**, **Annuities**, HSA and
+Other.
+
+> ⚠ **Crypto accounts printed as "Other" on every compliance exhibit produced
+> before this release.** The account was always typed correctly; only the
+> heading on the exhibit was wrong. **Re-export any exhibit you have already
+> handed over or filed** if the matter holds a crypto account — the grid itself
+> was right, so nothing needs re-importing.
 
 | Cell | Meaning |
 | ---- | ------- |

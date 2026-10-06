@@ -35,8 +35,10 @@ cyclone/
 │   │   ├── llm_profiles.py        # Loads/resolves the profile catalog — see §11
 │   │   ├── schema_check.py        # Startup diff of live columns vs models — see §15
 │   │   ├── config_spec.py         # What each setting IS: fleet / secret / per-firm / per-node
+│   │   ├── amount_filter.py       # A typed amount range; the sign picks the side — see §11
 │   │   ├── config_fingerprint.py  # The fleet hash — see §5a
 │   │   ├── secret_source.py       # Secrets from SSM under an instance role — see §5a
+│   │   ├── usage_scope.py         # Who LLM spend is for (job/request/crm) — see §11
 │   │   ├── redis_client.py        # claim_once / lock — fleet coordination
 │   │   └── loggerfactory.py       # LoggerFactory — see §6
 │   ├── middleware/
@@ -56,6 +58,8 @@ cyclone/
 │   │                              # Each router is prefixed /api/v1/<domain>
 │   ├── services/                  # Business logic, LLM/PDF/Storage calls — see §11
 │   │   ├── llm_service.py         # Multi-vendor LLM dispatch (complete, complete_fast, complete_with_image)
+│   │   ├── llm_usage.py           # Normalizes vendor token counts; records every attempt to llm_calls
+│   │   ├── cost_service.py        # Prices and spend; the pricing itself is SQL (041)
 │   │   ├── pdf_service.py         # PDF text extraction (PyMuPDF + LLM vision fallback)
 │   │   ├── storage_service.py     # Supabase Storage wrapper for matter documents
 │   │   ├── docx_service.py        # Word document generation for discovery responses
@@ -107,6 +111,7 @@ cyclone/
 │               ├── LeadPromotePanel.tsx   # Promote a lead → client + matter (optional pleading)
 │               ├── TagManager.tsx          # Create/edit/retire matter tags; firm tags read-only
 │               ├── UndisclosedAccountsPanel.tsx  # Accounts referenced but never produced
+│               ├── CostsPage.tsx          # Admin > Costs: spend by month, missing prices, price table
 │               └── AdminPage.tsx
 ├── db/
 │   └── migrations/                # SQL DDL — run in numeric order
@@ -142,6 +147,12 @@ cyclone/
 │       ├── 035_production_scope.sql      # matters.*_produces_since; accounts.production_responsibility
 │       ├── 036_value_platforms.sql      # custodian rulings; holds[]; crypto account type; BNPL + platform seeds
 │       ├── 037_brokerage_cash_flow.sql   # investment categories + rules; statements.portfolio_summary
+│       ├── 038_insurance_accounts.sql   # life_insurance + annuity account types (cash-flow path)
+│       ├── 039_cost_tracking.sql        # minimal firms table + llm_calls cost ledger (append-only)
+│       ├── 040_enable_rls.sql           # ⚠ RLS on every public table; views closed to anon — see §15
+│       ├── 041_service_rates.sql        # dated prices; llm_call_costs view; report + set-price functions
+│       ├── 042_served_model.sql         # served_model + vendor_response_id; price on the model that ANSWERED
+│       ├── 043_cost_report_by_firm.sql  # llm_cost_report grouping by firm — co-tenancy groundwork
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -286,6 +297,42 @@ The test now builds a `Settings` from the file itself, and asserts every
 credential appears in it. Two line shapes: `NAME=` must be filled in,
 `# NAME=value` documents an optional default. Non-string settings are always the
 commented shape.
+
+### The build args are read on the HOST, and their absence is silent
+
+`docker-compose.yml` interpolates `${SUPABASE_URL}` and `${SUPABASE_ANON_KEY}`
+into the frontend build **before any container exists**, so `secret_source`
+cannot supply them and neither can SSM. Compose substitutes an **empty string**
+for a name it cannot find, prints one "variable is not set" line, and **exits
+0**.
+
+**This shipped.** `SUPABASE_URL` was removed from `.env` during the SSM
+migration — correct as far as the API was concerned, which reads it at runtime
+and stayed healthy — and the next build compiled an empty string into the
+bundle. Every route served a **blank white page**: `createClient("")` throws
+`supabaseUrl is required.` at module scope, before React mounts. The image
+built, the container was healthy, nginx answered `GET / → 304`, and **no server
+log anywhere held a single line about it** — the browser made no API calls to
+log, because the app died before its first fetch.
+
+Three guards, because one was not enough:
+
+- **`config_spec.COMPOSE_INTERPOLATED`** — deliberately **not a bucket**. The
+  buckets are disjoint and answer "what is this setting FOR?"; this answers
+  "does compose read it on the host?", and the answers overlap.
+  `SUPABASE_ANON_KEY` is `COMPOSE_ONLY` while `SUPABASE_URL` is
+  `INFRASTRUCTURE` (the API needs it too) and **both** are interpolated. Keying
+  the runtime guard on the bucket left a hole exactly the size of this bug.
+- **A test asserts the set equals what `docker-compose.yml` actually
+  interpolates**, so it cannot drift from the file it describes, and that each
+  name is a declared `Settings` field and a *required* line in `.env.example`.
+- **`deploy-version.bat` refuses to build** when the build machine's `.env` is
+  missing one. That is the only moment anything can catch it: the failure is
+  created at build time, on the build machine, and every later check — health,
+  fleet hash, startup log — passes.
+
+**A frontend built without its build args is healthy from every angle a server
+can see.** Load the app in a browser before calling a deploy done.
 
 **`API_BASE_URL` was a live trap of the same kind**: `docker-compose.yml`
 referenced `${API_BASE_URL}` and nothing declared it, so anyone who set it would
@@ -435,7 +482,7 @@ Route handlers (via Depends())     ← or services injected from handlers
 - `select_one` returns `None` on PGRST116 (no row found) — callers must handle `None`.
 - `insert()` will raise `ValueError` if `data` is a string. Always pass a `dict` (`model.model_dump()`).
 - `insert()` and `update()` both pass data through `_json_safe()` which converts `datetime`, `date`, and `Enum` values to JSON-serializable types before httpx serialization. This means you can pass `model_dump()` directly without worrying about serialization.
-- `update()` matches on the `id` field by default. It updates the entire record. There is no field-based update in the base class.
+- `update()` matches on the `id` field by default and sends **only the keys you pass** — it is a PostgREST PATCH, not a replace (checked against `SupabaseManager.update`; an earlier version of this line said it replaced the whole record). There is no field-based *match* in the base class.
 - `exists()` is a count-only check — use it for duplicate guards; do not use `select_one` for that purpose.
 
 ### Repository pattern
@@ -482,7 +529,7 @@ class MyEntityInDB(MyEntity):
 
 - Every field must have `description=` in `Field()`
 - `InDB` models always add `id`, `created_at`, `updated_at` — nothing else
-- **Exception:** `TrustLedgerEntry` and `AuditLog` are immutable — their `InDB` models have no `updated_at`
+- **Exception:** `TrustLedgerEntry`, `AuditLog` and `LlmCall` are immutable — their `InDB` models have no `updated_at`
 - **Exception:** `AuditLog` has `id: str` (UUID) rather than `int`
 - `model_config = ConfigDict(from_attributes=True)` goes on `InDB` only
 - Do not use `orm_mode = True` (deprecated Pydantic v1 syntax)
@@ -569,6 +616,76 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
   configuration or it produces bugs that cannot be reproduced**, which is why
   chains live in `app/config/llm_profiles.json` inside the image and not in any
   environment file: two nodes on the same image tag cannot disagree. See §5a.
+- **Every attempt is recorded to `llm_calls` with its token counts** (`services/llm_usage.py`,
+  migration 039). Nothing captured usage before: each `_call_*` returned a bare
+  string and discarded the response carrying the counts. Four rules, each with a
+  way to be quietly wrong:
+  - **Normalize, because vendors disagree about "input tokens".** Anthropic's
+    `input_tokens` excludes cached tokens; OpenAI's `prompt_tokens` and Gemini's
+    `prompt_token_count` include them, so they must be subtracted or a cache hit
+    is billed twice. Gemini reports thinking in `thoughts_token_count`, *beside*
+    its output count though billed as output, so it must be added. The mapping
+    per vendor is in `llm_usage`'s docstring, and `usage_raw` keeps the vendor
+    object verbatim so a wrong mapping can be recomputed — SDKs drift.
+  - **Record failed attempts too.** A reply that came back empty or was rejected
+    was still billed. Each `_call_*` calls `llm_usage.note_response()` the moment
+    the vendor returns, *before* extracting text, and `_run` records success and
+    failure alike. `begin_attempt()` clears the previous attempt's usage first,
+    or a timed-out call inherits the tokens of the call before it — a test
+    removes that line and fails.
+  - **`None` is not zero.** Unreported counts stay NULL; only the error *class* is
+    stored, never the message, which can quote the statement being read.
+  - **Recording never fails or slows the work.** A bounded queue and one writer
+    thread, because `SupabaseManager` retries with backoff. A missing table logs
+    once at ERROR naming migration 039 and disables recording for that process.
+- **Attribution comes from `util/usage_scope.py`, set where work starts** —
+  `run_claimed` (job, matter, requester), `AuthMiddleware` (route, `auth_uid`),
+  the CRM `_step` and welcome loop (step name, lead), billing parse (matter).
+  Two traps, both checked by running them: **a scope set around `pool.submit`
+  does not reach the pool thread**, and **a value set inside a sync FastAPI
+  dependency never reaches the endpoint** — which is why the request scope is in
+  the middleware and not `require_role`. No scope means `unattributed`, recorded
+  so the gap is visible in totals. Design and handoff: `docs/cost-tracking-design.md`.
+- **Spend is priced at READ time from `service_rates` (041), never stored on the ledger.**
+  Prices are entered late and corrected; tokens never change. The arithmetic is
+  SQL — `llm_call_costs` prices each call against the rate in force on *its*
+  date, `llm_cost_report()` groups by UTC month (vendor invoices are UTC) and
+  by firm, vendor/model, task, matter, staff or source (043), and
+  `set_service_rate()` closes the old price and opens the new one in one
+  transaction. Rules that each prevent a figure looking more complete than it is:
+  - **An exclusion constraint makes two prices for one meter at one instant
+    unrepresentable** — the pricing join would otherwise return both and price
+    every call in the overlap twice, with nothing wrong on its face.
+  - **`unpriced` and `no_usage` cost NULL, not 0**, and there is deliberately no
+    fallback from a cache-read price to the input price. A report with unpriced
+    calls sets `complete = false`, and the page calls the total a *floor* above
+    the number, not under the table. `llm_unpriced_meters` names exactly which
+    prices are missing, so none has to be guessed.
+  - **Prices are columns (`provider, model, meter`), never a composed key** like
+    `anthropic_claude-opus-5_input`, which would be rebuilt from strings in two
+    places and drift. Provider and model are trimmed on entry: a pasted trailing
+    space would leave every call unpriced.
+  - **A call is priced on the model that ANSWERED, not the one requested** (042).
+    `llm_calls.model` is the catalog's name for the request; `served_model` is
+    what the vendor's response says served it (`model` on Anthropic and
+    OpenAI-compatible replies, `model_version` on Gemini). A vendor serves an
+    alias or a preview name from whatever version it currently points at, so a
+    price keyed on the request charges the rate of a model that may never have
+    run. Pricing uses `coalesce(served_model, model)` and every priced row says
+    which (`billed_model_source`). When a vendor repoints an alias, the new
+    version turns up on `llm_unpriced_meters` under its own name — with the
+    requested names beside it, to find it on the pricing page — instead of being
+    charged at the old price. `vendor_response_id` is kept because it is the one
+    reference a vendor's billing support can look up.
+  - **Code deployed before 042 still writes the row.** A PGRST204 naming a 042
+    column makes the writer log one ERROR naming the migration and retry without
+    those columns. Losing who answered is bad; losing the tokens too is worse.
+  - Price strings keep six places end to end (`unitPrice()`), and a sub-cent
+    spend shows `<$0.01` (`cost()`), because `money()` truncates to cents and a
+    month of fractions of a cent would read as free.
+  - Tested against **real Postgres 16 in Docker** by `tests/test_cost_sql.py`,
+    which applies 039–042 and checks the figures. Without Docker it exits **2**
+    and prints SKIPPED — a check that silently did not run must not read as a pass.
 - **Failover:** the first candidate is tried; on *any* failure — network, quota, auth, API error, or an empty response — the service logs a `WARNING` and moves to the next candidate. No same-candidate retry. Chain exhausted → `LLMUnavailableError` (a `RuntimeError`).
 - **An unknown profile name raises `LLMUnavailableError`** listing the known names. Profile names are config; a typo must not silently run on some other model.
 - Candidates whose vendor has no API key, or that can't serve the call type (vision), are **skipped without being called**.
@@ -667,7 +784,84 @@ Covered by `tests/test_date_audit.py`.
 
 **`check_number` is stored and searchable** (`checks_only`, or one number). A check is the only debit that does not say where the money went, and not every bank prints the images — so the number is what a discovery request asks about. Stored as text: leading zeros are kept, the footnote asterisk in "2493*" is stripped (it marks a gap in the serial run, not the number), and it is never arithmetic.
 
+**THE INDEX IS WINDOWED, because one call could only ever see 60,000
+characters of it.** A long document is indexed once — accounts, periods,
+balances, page ranges — and then walked. That index pass was handed
+`raw_text[:_MAX_STATEMENT_CHARS]` and nothing else. A scanned statement page
+extracts to two to four thousand characters, so 60,000 is fifteen to thirty
+pages: **about eight monthly statements.** A two-year production was indexed as
+far as month eight and stopped. Reported from the field as *"eight months ingest
+and the rest has numerous errors"*, and measured in
+`tests/test_index_windowing.py`: 72 pages, 191,006 characters, **8 of 24
+statements reachable.**
+- **It clipped SILENTLY.** The single-pass path at least appends
+  `[DOCUMENT TRUNCATED — report only the statements above]` so the model knows;
+  this path said nothing, logged nothing, and flagged nothing. The import
+  reported success for what it found.
+- **And the tail was absorbed, not dropped.** A statement whose `last_page` the
+  index did not give defaults to the end of the document, and the walk cuts a
+  statement at the next *indexed* header — which was nowhere. So months nine
+  onward were read as part of month eight. That is what "numerous errors" looks
+  like from outside.
+- `_index_document` now indexes in page windows that each fit the budget,
+  **overlapping by `_INDEX_WINDOW_OVERLAP` pages** so a statement whose header
+  sits on a seam is still described whole by one side. A single-window document
+  takes exactly the call it always took, under the same `index` label.
+- **The descriptions are stitched, not chosen between.** The window that saw the
+  header knows the institution and opening balance; the one that saw the end
+  knows the closing balance and the last page. `_stitch_statement` keeps the
+  first non-null answer per field and the widest page range. It merges on
+  account+period, on period+touching pages, or — for a **fragment** carrying
+  neither, which is what a window starting after a long statement's header
+  produces — on touching pages alone. Nothing else: two real statements fused
+  into one loses a month.
+- **`PAGES_NOT_INDEXED` (warn) is the check that says the import is short**, and
+  the obvious version of it does not work. Unclaimed pages find nothing when the
+  previous statement absorbed them, so the signal is the document's own
+  pagination: a page matching `_PAGE_ONE` that begins no indexed statement is a
+  statement nobody read. Deterministic, free, and computed from the text rather
+  than asked of a model — the same argument as Bates and account numbers. A
+  blank or unreadable page is deliberately not reported: that is
+  `PAGE_UNREADABLE`'s job, and reporting it here would fire the warning on
+  documents where nothing is missing.
+
 **A long statement must be read in passes.** One call reliably handles a short statement and reliably gives up on a long one. A 27-page statement of 286 entries came back with 38 — every credit, then fifteen debits, then a closing brace. The JSON was valid, the input was 36,863 characters against a 60,000 ceiling, and the output used about a seventh of its 32,000-token budget: nothing failed, nothing was truncated, the model just stopped. **No limit can be raised to fix that, because no limit was reached.** Above `_MAX_SINGLE_PASS_PAGES` the document is indexed once (accounts, periods, balances, page ranges) and then each statement is walked `_PAGES_PER_CHUNK` pages at a time asking only for transactions, so every answer is small enough that finishing is the easy option. Line numbers are assigned in Python — each pass only ever saw a slice — and every pass is handed the statement period, or a line printed "12/04" has no year.
+
+**A printed total's side comes from its sign where the statement gives one,
+not from the word in its key.** `_DEBIT_WORDS` carries "payment" because on a
+bank statement a payment is money leaving. On an insurance or annuity statement
+a *premium payment* is money arriving and is usually the largest credit on the
+page — so an Ameriprise/RiverSource policy printing `premium_payments: 1500`
+matched as the printed DEBIT total, was compared against $598.17 of real
+deductions, and raised `INCOMPLETE_EXTRACTION` claiming a $901.83 shortfall on a
+statement that reconciled to the cent. **A warning that fires on every correct
+import is worse than no warning**, because the next real one is dismissed with
+it. A bank prints its summary buckets as magnitudes, a policy prints them
+signed, so `_printed_side` detects signedness per dict and only reads signs when
+the document actually supplies them — every bank statement keeps the behaviour
+it had. Note what this does NOT do: on that policy the debit side then resolves
+to *nothing* (`monthly_deductions` matches no debit word), so the check goes
+silent rather than becoming correct. Silence is right for a bank-shaped check on
+a document that is not a bank statement; the real fix is routing cash-value
+insurance to `_portfolio_findings`. Covered by `tests/test_long_statement.py` 9a.
+
+**ON A CARD OR A LOAN, THE SUMMARY'S WORDS NAME THE OPPOSITE SIDE.** An amount
+is signed by its effect on the printed balance, so a card purchase is POSITIVE
+and a payment NEGATIVE — while `_DEBIT_WORDS` carries both "purchase" and
+"payment" because on a bank statement they are money leaving. So Chase's printed
+`Purchases $244.11` matched as the DEBIT total, was compared against the
+extracted negative lines (a card with no payments has none), and reported
+`INCOMPLETE_EXTRACTION` *"short by 244.11"* on a statement whose three purchases
+sum to exactly 244.11 and which reconciled to the cent. **It fired on every card
+statement carrying purchases.** Unlike the RiverSource case below the sign
+cannot settle it — a card prints its summary as magnitudes — so the decision is
+the **account type**: `_LIABILITY_ACCOUNTS` selects `_LIABILITY_UP_WORDS` /
+`_LIABILITY_DOWN_WORDS`, and the sentence says "charge" and "payment" rather
+than "credit" and "debit" so it reads true of the document in somebody's hand.
+Deposit accounts keep the behaviour every bank statement depends on, and an
+unspecified type still reads as one. The FIS makes the same inversion for its
+own reason (`household_amount()`); these are the only two places anything does.
+Covered by `tests/test_long_statement.py` 9b.
 
 **Check the extraction against what the statement says about itself.** The account summary states its own answer — "24 Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and `_completeness_findings` compares both count and total per side, raising `INCOMPLETE_EXTRACTION` (warn). It reports a side only when the extraction falls **short** of what is printed, never when it exceeds it: a statement may split its debits across several named buckets — Bank of Texas prints "2 Checks & Withdrawals 159.11" and "Service Fees 2.00" separately — so extracting all three debits correctly reads as two too many against a single bucket. A shortfall has no innocent explanation; an excess usually does, and over-counting is caught by reconciliation instead. Reconciliation alone does catch a short read, but only as one unexplained delta; this says *which side* fell short and by how much, which is the difference between "something is wrong" and "the debits stopped after fifteen of two hundred sixty-two". Covered by `tests/test_long_statement.py`.
 
@@ -828,7 +1022,62 @@ point: this project traces sources and uses of cash.
   before filing is usually the prelude to a transfer, and only the transfer
   shows up here.
 
-Covered by `tests/test_brokerage_cash_flow.py`.
+**THERE IS ONE PROMPT, NOT ONE PER ACCOUNT TYPE, and the model evaluates the
+condition inside it.** That is workable, but it means the set of cash-flow
+account types is stated twice — once as `_CASH_FLOW_ACCOUNTS` in Python and
+once in English in `_TRANSACTIONS_SYSTEM` — and they drifted the first time a
+type was added. Adding `life_insurance` moved the *checks* onto the cash-flow
+path while the prompt still said the rule applied to `"brokerage" or
+"retirement"`, so a policy statement was **read** with bank rules and
+**checked** with brokerage rules. It came back with zero transactions where the
+previous run had extracted four that tied to the cent. The metadata prompts had
+drifted the same way and more quietly: their list of account types the model may
+answer with was still the 036-era set, so `crypto` was never an available answer
+for two migrations.
+
+Both lists are now built from the enums at import (`_ACCOUNT_TYPES`,
+`_CASH_FLOW_NAMES`) and substituted into the prompts on sentinels —
+`str.replace`, not `%` or `.format`, because these prompts contain literal
+braces and percent signs. `tests/test_statement_prompts.py` asserts the
+substitution happened, that every `AccountType` reaches the model, and that the
+prompt's cash-flow list equals `_CASH_FLOW_ACCOUNTS` exactly.
+
+**A POLICY OR ANNUITY STATEMENT HAS NO REGISTER, and its summary IS the
+activity.** Cash-value life insurance prints no transaction list at all; the
+"Value of your policy" block is the only place it says what moved. The prompt's
+standing rule that an ACCOUNT SUMMARY is never a register is correct everywhere
+else and fatal here — the model obeyed it and extracted nothing. So the
+cash-flow section now carries a worked example of the block and four rules:
+extract the **leaf** lines, never a subtotal (`Total change in value` restates
+two lines already taken), beginning and ending value are balances, and the
+investment-results line IS the change in market value whatever the insurer
+called it. `_MARKET_CHANGE` matches those spellings too — widened cautiously,
+because a line classified as market change is *excluded* from the flow
+comparison, so over-matching weakens the check that finds a missing withdrawal
+while under-matching only inflates a total the check reports short-only.
+
+**A FLAG MUST BE TRUE OF THE STATEMENT IT SITS ON.** The RiverSource policy
+reconciled to the cent and still carried three notes, two of them false:
+`SECURITIES_NOT_EXTRACTED` announced an omission that had not happened (a
+variable policy *can* hold sub-accounts, but one sitting wholly in its fixed
+account trades nothing, so the count was zero), and `MARKET_CHANGE_NOT_PRINTED`
+said "the balances will not tie" on a statement whose balances had just tied.
+Both are now conditional — on a non-zero count and on `not reconciled`
+respectively. A flag that contradicts its own row is worse than no flag: it
+teaches the reader that none of them mean anything.
+
+`UNDATED_TRANSACTIONS` is the third, and it splits rather than disappearing.
+Some lines dated and some not is a call that stopped reading the date column —
+the degraded read it was built for, still `warn`, still "date them from the
+source page", because there the dates are on the page. **Every** line undated on
+a cash-flow account is the other shape entirely: a policy statement has no
+register, its value block states period totals, and those figures never had
+dates. That is `info`, says so, keeps the consequence worth knowing (a
+date-range exhibit will not contain them) and drops the instruction nobody can
+follow.
+
+Covered by `tests/test_brokerage_cash_flow.py` and
+`tests/test_statement_prompts.py`.
 
 **One statement can be read as two, and the duplicate guard cannot see it.** `find_period` is scoped to an *account*, so it only catches a repeat once both copies land on the same account. The failure that gets past it: a summary table — a DAILY ENDING BALANCE list, an account summary — is read as a second transaction register, and because the institution is usually unreadable on the same document (letterhead graphic), the phantom gets its own invented account. Two accounts, one period, no collision. Three defences, in order: the prompt names the blocks that are not registers and states that a repeated page header is not a new statement; `resolve_missing_institutions` re-reads *every* name off the page when one upload reports more than one institution, since disagreement means at least one is a guess; and `commit_document` tracks page ranges across the document and raises `SUSPECT_SPLIT` (warn) when two statements overlap by more than a single
 boundary page, or share one while naming different institutions. **A shared page
@@ -851,6 +1100,25 @@ account whose institution differs or could not be read, which is the same signal
 Covered by `tests/test_deletes.py`.
 
 **Rejecting a statement deletes it.** Not a status flip — the statement, its transactions, and (when nothing of value would go with it) the account the bad import created. `review_status = 'rejected'` used to leave all of it filtered out of every view but still present, which is the worst of both worlds: nobody can act on invisible rows, and the empty account sits in the inventory forever. `_reason_to_keep()` spares an account that still has statements, sits in a succession chain, or carries attorney judgment (`ownership`, `property_character`, `purpose`, `notes`) — that is work the import did not do and should not undo. The source PDF stays in Storage: one upload can back several statements, so deleting it on one rejection would take another's source with it. Migration 027 applies the same rule to rows rejected under the old behaviour. Covered by `tests/test_statement_reject.py`.
+
+**A line can be ADDED after ingestion, and only with somebody's name on it.**
+`add_transaction` exists because the alternative was in use: a line the
+extraction never produced — a page a pass stopped reading — leaves the statement
+permanently out of balance, and the fix was an `INSERT` typed into the database
+at zero and then corrected through the app until the arithmetic closed. That
+works, and it leaves **no trace anybody reading the exhibit can see**. So the
+flag is the feature rather than the insert: every added line carries
+`MANUAL_ENTRY` with the person, the time and their reason, which is the promise
+`correct_transaction` already makes — an exhibit carries the Rule 1006 notice
+asserting the underlying records are available for examination, and a line
+nobody can find on the production is exactly what that notice must not cover
+silently. Nothing checks that the line really is printed on the document,
+because nothing can; that is why the record names a person. Two further
+decisions: `line_no` **appends** rather than inserting by date (it records the
+printed sequence, and a line that was not read off the page has no place in it),
+and the statement is re-reconciled **always**, not only when the gap closes,
+since a new line moves the sum in both directions. Covered by
+`tests/test_transaction_correction.py` 8-11.
 
 **A line can be corrected after ingestion, but never quietly.** `correct_transaction()` appends a `MANUAL_CORRECTION` flag per changed field — the field, both values, the staff member's name, the timestamp, and an optional reason — so the original stays recoverable from the record that goes into an exhibit. It also writes an `audit_log` entry (§13). Only the nine fields in `_CORRECTABLE` may be changed; structural columns are not editable, because changing which statement a line belongs to is a re-ingest, not an edit.
 
@@ -1610,6 +1878,34 @@ to lay it out. Filters that were not applied are omitted rather than listed as
 "none", so the block reads as a description and not as a form. `include_deleted`
 is always stated when on.
 
+**An amount filter is a MAGNITUDE range, and a typed sign picks the side.**
+`util/amount_filter.py` resolves the two boxes; the search, the export and the
+exhibit's Selection block all read it. Plain `5000` matches `+5000` **and**
+`-5000`, which is the point: a transfer out of one produced account and the same
+figure arriving in another are one movement of money, and an exhibit about it
+needs both lines. `-5000` is money out as the institution printed it, `+5000`
+money in.
+- **A lone signed bound would otherwise match everything.** Read as a literal
+  numeric bound, `-5000` in the "at least" box means `amount >= -5000` — the
+  whole production, returned without complaint, for the shortest query anybody
+  types. So both boxes are magnitudes and the sign is a *side*: `-5000` alone
+  becomes `amount <= -5000`.
+- **One ordering rule, therefore.** The smaller figure goes first whichever
+  direction is being searched, and `-1000` to `-500` is refused the same way
+  `1000` to `500` is. Two different signs are refused rather than guessed at.
+- **PostgREST cannot call `abs()`**, so an either-direction range is an `or` of
+  the two mirrored windows (`_apply_amount_range`). A ceiling alone needs no
+  `or` — one window straddles zero.
+- **It is the printed sign, never the FIS's household sign.** `household_amount()`
+  inverts a card or a loan to answer "what did this household spend"; this filter
+  answers "what does the statement show", and the words it puts on an exhibit
+  say which.
+- A bad figure **raises** — at the schema boundary and again in the service —
+  because a filter that ignored a typo would return a confident answer to a
+  question nobody asked. The page keeps a draft out of the API until it is a
+  whole figure, so a half-typed `-` never 422s mid-keystroke.
+- Covered by `tests/test_amount_filter.py`.
+
 `FinancialAccountTransactionRepository.search()` is the one place that builds a PostgREST query by hand instead of passing a condition dict: the dict supports equality, `IN`, and null checks only, so a date window and an `ILIKE` cannot be expressed through it at all. The "untagged" filter is expressed as *exclude the tagged ids*, never as the complement — the complement is the whole production and would blow both the URI limit and PostgREST's max-rows cap.
 
 ### Audit Logger (`audit_logger.py`)
@@ -1656,6 +1952,23 @@ Rules learned the hard way:
   buries the failures somebody can. `_NETWORK_FAULTS` → WARNING; everything else
   keeps the traceback, because that handler catches the landing-pages database,
   IMAP, SMTP, and the LLM, and the line identifying which is worth the width.
+- **So does Redis** (`redis_timeout_seconds`, connect and read alike), and it
+  did not until a dev box spent **74 seconds** on one test suite. `REDIS_URL`
+  moved into SSM and out of `.env`; a machine with no SSM fell back to the
+  `redis://localhost:6379/0` default, and every call cost ~4s before failing.
+  Lowering the timeout took the same suite to **8.9s**, which is how we know it
+  is wired end to end. Two measured caveats worth keeping: the cap bounds a
+  **hang**, not a refusal — a refused connect returned in 2.04s and never
+  reached a 3s cap — and `localhost` resolves to `::1` **and** `127.0.0.1`, both
+  tried in order, so that URL costs exactly twice what `127.0.0.1` costs when
+  nothing is listening.
+- **A localhost default is right in development and never right in
+  production**, and nothing said which you had. `local_defaults_in_production()`
+  now warns at startup for any unset `INFRASTRUCTURE` field whose default names
+  this machine — `REDIS_URL`, `HOST_URL`, `ID`. Asked of `model_fields_set`, not
+  of the value, so a value somebody deliberately typed is never reported. It
+  matters most for Redis: at its default, **every node believes it holds the
+  fleet-wide `crm:poller` lock**, so all of them poll the mailbox.
 - **Mail connections carry a timeout** (`mail_timeout_seconds`, IMAP and SMTP
   alike). Neither had one, which means the socket default of *never* — and the
   tick holds the fleet-wide poller lock, so a host that accepts a connection and
@@ -1863,6 +2176,67 @@ down that shares a common name.
 3. `AuthMiddleware` fetches JWKS from `{supabase_url}/auth/v1/.well-known/jwks.json` at module load
 4. Logs at `INFO`: `"Cyclone API started | env=%s log_level=%s llm_profiles: %s"`, then logs a `WARNING` per problem found by `llm_service.validate_profiles()`
 5. `util/schema_check.check_schema()` diffs the live columns against every model and logs an **`ERROR`** per mismatch
+6. `main._db_rejection_handler` is registered for PostgREST's `APIError` — a
+   constraint violation answers 4xx instead of raising a 500
+
+### Every table in `public` needs RLS, or the public key reads it (040)
+
+**Only migration 005 ever enabled Row-Level Security**, on the seventeen tables
+that existed then. Everything created afterwards — `jobs` (full pleading text in
+`result`), statements, transactions, CRM, KB, `llm_calls` — was created without
+it, and no migration revokes Supabase's default grants to `anon`. **The anon key
+is compiled into the frontend bundle**, so any such table is readable, and
+writable, at `/rest/v1/<table>` by anyone who opens the app and copies the key.
+The three views in 004 were worse: **a view runs with its owner's privileges**,
+so they bypassed RLS even on the tables 005 did protect.
+
+`040_enable_rls.sql` (tested against real Postgres by `tests/test_cost_sql.py`) enables RLS on every public table lacking it and closes
+every view to `anon` and `authenticated` (`security_invoker` plus `revoke`),
+**finding them from the catalog** so it also covers anything deployed without a
+migration. No policy is added, and that is safe: the backend uses the service
+role, which bypasses RLS, and the frontend never queries a table.
+
+**Verified on production 2026-09-17: every table already had RLS**, switched on
+in the dashboard and never recorded in a migration — drift in the safe
+direction, and a database rebuilt from the migrations alone would still have had
+the gap. **The live exposure was the views** `v_matter_summary` and
+`v_unbilled_entries`, which run as their owner. Note that a view's
+`relrowsecurity` is always false; for a view, `anon_can_select` is the column
+that matters.
+
+**Every new table must enable RLS in its own migration, every new view must be
+`security_invoker`, and every new callable function must revoke EXECUTE from
+`anon`.** `tests/test_migration_rls.py` enforces it for anything
+after 040.
+
+### A constraint violation must never reach the log (`main._db_rejection_handler`)
+
+PostgREST returns **the offending row** in an error's `details`:
+
+```
+Failing row contains (1, 1, RiverSource Life Insurance Company, life_insurance,
+0004, 0909 0823 2663 0 004, GABRIEL M SALMONS, ...)
+```
+
+Unhandled, FastAPI prints that whole traceback into the application log — a
+client name and a full account number, which §6 forbids outright — and it does
+so for a violation on **any** table, so the worst case is a row of a financial
+register. The row is now neither logged nor returned.
+
+The second reason is that a refused value is not a server fault. `23514` and
+`23502` answer **422**, `23505` and `23503` answer **409**, and the one fact
+passed on is the **constraint name**: it identifies the table and column, it is
+not client data, and it is what turns "Internal Server Error" into "run
+migration 038". Anything outside that table is **re-raised untouched** — a
+dropped connection or a permissions error must keep looking like one rather than
+being dressed up as something the caller could fix by editing their input.
+
+**A check violation is usually a migration that has not been run**, and nothing
+else catches it: `schema_check` compares COLUMNS only and says so, so a deploy
+that adds an enum member the database's CHECK does not list is invisible until
+somebody picks the new option. The 422 says that in as many words.
+
+Covered by `tests/test_db_error_handler.py`.
 
 ### Schema drift (`util/schema_check.py`)
 
@@ -1914,18 +2288,21 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | "Documents summarized in this exhibit" block | ✅ Built for the transaction export — filename and Bates range per upload, above the Rule 1006 notice. Not yet on the FIS schedule or the undisclosed-accounts exhibit, which summarize documents too |
 | Export query results: CSV / MD / DOCX / PDF | ✅ Built — CSV is a clean extraction; the rest are full exhibits |
 | Financial Information Statement generation | ✅ Built — whole-month averaging, recurrence-aware, three-panel UI, four-format export. Chart of accounts still to be populated |
-| Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks |
+| Long-statement extraction (multi-pass) | ✅ Built — indexed, then walked in page chunks. The **index itself is windowed** (`tests/test_index_windowing.py`): it used to see only the first 60,000 characters, so a 24-month file imported 8 months and absorbed the rest into the eighth statement. `PAGES_NOT_INDEXED` (warn) now names pages no statement accounts for |
 | Extraction completeness check | ✅ Built — extracted counts and totals vs the statement's own |
 | Bates detection + gap reporting | ✅ Built — pattern-based, per-page, with production-gap flags |
 | Account-number detection by pattern | ✅ Built — the digit run on every page; fills a null read, flags a conflict |
 | Repairing accounts split by a null account number | ❌ Not started — derive from stored `raw_text`, then merge into the real account |
 | Account merge (two rows, one real account) | ✅ Built — previewed, with blocking and forceable conflicts |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
+| Add a line the import missed | ✅ Built — `MANUAL_ENTRY` names the person, the time and their reason, and the statement re-reconciles on save. It replaces an INSERT typed into the database, which left nothing a reader of the exhibit could see |
+| Add a line the import missed | ✅ Built — `POST /statements/{id}/transactions`, from the statement drill-down. Flagged MANUAL_ENTRY with the person and reason, and the statement re-reconciles. Replaces an `INSERT` by hand, which left no trace on the exhibit |
 | Reject a statement (discards it and its lines) | ✅ Built — deletes; removes an emptied, uncharacterized account too |
 | Delete a transaction / statement / account | ✅ Built — soft for a line, hard for a statement or account |
 | Reassign an account to another matter | ❌ Not started — needs `ON UPDATE CASCADE` on the statements→accounts FK, as 026 did for transactions |
 | Matter-close workflow | ❌ Not started — must purge soft-deleted transactions |
 | Joint / sole account ownership | ✅ Built — `ownership` enum; drives division, so it is never inferred |
+| Cash-value life insurance + annuities | ✅ Built — 038. Own account types (not `other`): they divide by premium source, carry a beneficiary, and print a divisible cash value beside a non-divisible death benefit. Read on the cash-flow path |
 | Rule 1006 exhibit export | ✅ Built for transaction queries — every exhibit carries the verification notice |
 | Compliance matrix export (CSV / MD / DOCX / PDF) | ✅ Built — landscape, per side, with the gap list as `findings` and the dagger legend |
 | Compliance matrix (statements held, by year and month) | ✅ Built as an in-app grid — accounts by type, years down, months across, Bates in the cell, click through to the PDF. Opening/closing markers suppress the edges; per-account coverage names the missing **days**. Export to an exhibit not built |
@@ -1934,13 +2311,15 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | `matter_preferences` (other firm/user defaults) | ❌ Not started — the caption override still wants it |
 | Export on the undisclosed-accounts report | ✅ Built — its own account-shaped columns; the dagger travels with its footnote |
 | OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
-| Large-transaction query (dollar threshold) | ❌ Not started |
+| Large-transaction query (dollar threshold) | ✅ Built — an amount range on the Transactions tab. **Unsigned searches by MAGNITUDE and matches both directions**, which is what pairs a transfer out of one produced account with the same figure arriving in another; a typed `-` or `+` restricts to one side. Both boxes are magnitudes, so the smaller figure goes first either way |
 | Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Config drift detection across the fleet | ✅ Built — every node publishes a `fleet_hash` on `GET /api/config`; `scripts/check-fleet.sh` diffs them with no SSH and no credential |
 | Config as a versioned build artifact | ✅ Built — `config/fleet.env` + `config/environments/` committed, layered under the node's `.env` by compose |
 | Secrets from SSM under an IAM instance role | ✅ Built, opt-in — `CYCLONE_SECRETS_SOURCE=ssm`. Path from the EC2 instance tag, so no bootstrap credential and nothing to typo |
 | Supabase legacy key migration | ⏳ Code is ready and format-agnostic; startup warns with days remaining. **The key swap itself is a dashboard + .env change, deadline end of 2026** |
+| LLM cost pricing + Admin > Costs page | ✅ Built — 041, plus 043 for the **Firm** grouping. Dated `service_rates` priced at read time; spend by month × firm, vendor/model, task, matter, staff or source; missing-price to-do list; atomic set-price and audited corrections. Storage/hosting costs and budgets not started |
+| LLM usage ledger (`llm_calls`) | ✅ Built — 039. Every vendor attempt, normalized across vendors, attributed to firm / job / matter / staff / request / lead. Pricing is built (041); **storage and hosting costs, and budgets, are designed in `docs/cost-tracking-design.md` and not started** |
 | Per-firm settings in a `firms` table | ❌ Not started — `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT` are classified `PER_FIRM` and still served per process from `/api/config`. The multi-tenant blocker |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
@@ -1985,7 +2364,7 @@ order they came up.
 
 | # | Item |
 | - | ---- |
-| 4 | ✅ **Done** — `components/StatementPdfButton.tsx` on the exceptions queue and on every statement row in the Accounts tab. Still to do: the same button on a **transaction** row, which needs the transaction's statement id in the search response. |
+| 4 | ✅ **Done** — `components/StatementPdfButton.tsx` on the exceptions queue, on every statement row in the Accounts tab, and on every **transaction** row in the Transactions tab. On a transaction it sits inside the Bates/page cell rather than in a column of its own (a fourteenth column costs width on every row to serve one click) and passes that line's own `page`, so the document opens where the line is printed rather than at the statement's first transaction page. |
 | 5 | ✅ **Done** — the endpoint distinguishes "never stored", "purged", and "storage is down", and the button shows that sentence in a dialog. |
 | 6 | **A retention policy for stored PDFs**, deliberately less generous than the eternal retention of transaction data — a statement's numbers stay long after the scan needs to. Plus a user-requested purge for data hygiene. Interacts with the matter-close workflow, which is also unbuilt. The "purged" message in item 5 is written for a world where this exists. |
 
@@ -2036,6 +2415,89 @@ When the bot and the guide disagree, **the guide is what gets fixed** — it is 
 document staff are told to trust, and a chat answer that quietly contradicts it
 makes both useless.
 
+### Centralized logging
+
+Today each node's log lives in `docker compose logs` on that node, so diagnosing
+anything that crossed the load balancer means SSHing into both and guessing
+which one served the request. Asked for 2026-09-16; not started.
+
+| | |
+| - | - |
+| **CloudWatch Logs is the path of least new infrastructure.** | The nodes already run under an IAM instance role and already talk to AWS for SSM (§5a). The `awslogs` Docker logging driver ships container stdout with no agent and no new credential — one policy statement on the existing role. A third-party vendor would be a new secret and a new place client data goes. |
+| **Centralizing logs makes every PII leak permanent and searchable.** | A log line that stays on a node rotates away; one shipped to a store is retained, indexed and readable by anyone with the console. §6 stops being hygiene and becomes the whole risk. The unhandled `APIError` that printed a client name and account number (§15) is exactly what would have been shipped. Audit the logs for PII *before* turning shipping on, not after. |
+| **Every line must say which node and which build.** | The reason to centralize is to see both nodes at once, and a line that does not carry `ID` and `CYCLONE_BUILD` cannot be attributed once they are interleaved. `check-fleet.sh` exit 3 exists because two builds behaving differently looks like an intermittent bug. |
+| **Retention is a cost line.** | Set it explicitly (CloudWatch defaults to *never expire*) and add the log group to the service-cost records below. |
+
+### Cost tracking — storage, hosting, and budgets
+
+Asked for 2026-09-16: know what running Cyclone costs, per firm, per matter and
+per user, and be able to show that the question is under control.
+
+**Steps 1 and 2 of 4 are built** — capture (039, `llm_calls`) and pricing (041,
+dated `service_rates` priced at read time), with Admin › Costs over both.
+**Steps 3 and 4 remain designed, not built**, in `docs/cost-tracking-design.md`:
+storage snapshots and monthly service-cost entries, and dollar budgets gated at
+job enqueue.
+
+**Be precise about that boundary wherever it is described**, including to a
+partner or an acquirer: what exists is *model-API* spend. Supabase, AWS, storage
+and hosting are not in it, so nothing here is the cost of running Cyclone.
+
+- **Per-firm spend is already visible**, and the Costs page leads with a **Firm**
+  selector (043). It reads as one row today because there is one firm, and it is
+  in deliberately early for two reasons: `llm_calls` has carried a `firm_id` on
+  every row since 039 — **attribution cannot be backfilled** — and it is the
+  grouping that gives the others meaning under co-tenancy, where *spend by
+  matter* across two firms is a list nobody can act on without knowing whose
+  matters they are. The report keys on the firm's **id**, so renaming a firm
+  relabels its past months too. See *Co-tenancy* below for what multi-tenancy
+  would still demand of the rest of the codebase.
+- **Spend is not limited to jobs and billing.** Ten services call the model,
+  including the CRM agent in the worker (attributable to a *lead*, with no staff
+  member and no matter) and pleading and discovery uploads, which still run
+  inline in a request. `util/usage_scope.py` is what carries the answer; a path
+  that sets nothing is recorded as `unattributed` rather than lost.
+- **Still open, and worth doing first** (design doc §6): compare one day's
+  per-vendor token totals against each vendor's own usage console. The
+  field-by-field mappings were written against SDK documentation, and SDKs
+  drift. `usage_raw` keeps the vendor's own object, so a wrong mapping can be
+  recomputed over history rather than only fixed going forward.
+
+### The per-lead "Enable agent" toggle does nothing
+
+Found 2026-09-17 while documenting lead routing; not fixed, because the
+decision is which way to make it true.
+
+`leads_workflow.agent_enabled` is written by `lead_service.toggle_agent` and
+read back into the detail response, and **nothing in `crm_agent_service.py` or
+`crm_worker.py` ever reads it**. The welcome, the triage, the escalation and the
+drafts run on every eligible lead either way.
+
+| | |
+| - | - |
+| **The screen states the opposite, in as many words.** | *"When enabled, the AI agent will respond to inbound emails from this lead with welcome, scheduling, and fee information. It escalates to you on legal questions."* A control that claims to govern what a machine says to a prospective client, and does not, is worse than no control — somebody turns it off for a reason and is not told the reason still stands. |
+| **The column defaults to `false`.** | So honouring it as written silences the agent on every lead in the table, which is certainly not what the leads already flowing through it imply. The fix is a decision about the default, not only a gate. |
+| **Either direction is defensible; leaving it is not.** | Gate the pipeline on it and default the column to `true`, or remove the toggle and the copy. |
+
+The toggle is deliberately **not** described in `docs/user-guide/14-lead-routing.md`
+— documenting it would make the guide wrong in the same way the screen is.
+
+### Co-tenancy — a second firm on the same hardware
+
+Open question, nothing decided: `docs/co-tenancy-options.md` lays out shared
+schema + RLS, a Docker stack + Supabase project per firm, schema-per-firm, and
+database-per-firm, with what each demands of this codebase.
+
+Two facts from it worth carrying anywhere near the subject:
+
+| | |
+| - | - |
+| **`firm_id` + RLS would protect nothing on the path the app uses.** | `SupabaseManager` holds the service-role key and bypasses RLS by design (§7); access control is `require_role()` and `_verify_on_matter()`. Making RLS load-bearing means per-request database credentials, or a session variable read by policies — and a pooled connection or a pool thread that kept the previous firm's context does not raise, it returns another firm's rows. |
+| **Two stacks on one host collide in three silent places.** | `ports: "8094:80"` is hard-coded; `claim_once("job:<id>")` and the `crm:poller` lock share a Redis namespace while job ids come from a per-database sequence, so every firm has a job 1; and the SSM path comes from the EC2 instance tag, which cannot tell two stacks apart. |
+
+Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
+039 did for `llm_calls`: attribution cannot be backfilled.
+
 ### Larger, already noted elsewhere
 
 - Client portal, and the client re-categorization workflow that depends on
@@ -2048,7 +2510,6 @@ makes both useless.
 - Compliance matrix, and the `matter_preferences` table it needs (§16).
 - The ask-the-guide help chat above shares its surface with the tool
   dispatcher; build the read-only one first.
-- Large-transaction query with a dollar threshold (§16).
 
 ---
 
@@ -2071,7 +2532,8 @@ makes both useless.
 | `MAIL_TIMEOUT_SECONDS` | Worker | Seconds to wait on a mail server, IMAP and SMTP alike (default 30). Without one a host that stops talking hangs the tick, which holds the fleet-wide poller lock |
 | `JOB_CONCURRENCY` | Worker | Jobs one worker runs at once (default 5). Throughput for a stack of statements; trades against vendor rate limits |
 | `LEAD_POLL_INTERVAL_SECONDS` | Worker | CRM mailbox/lead polling cadence (default 60) |
-| `REDIS_URL` | Worker | Poller lock + job claim; job claiming degrades gracefully if unreachable |
+| `REDIS_URL` | Worker | Poller lock + job claim; job claiming degrades gracefully if unreachable. **Read at runtime, so SSM is a fine home for it** — unlike the compose build args |
+| `REDIS_TIMEOUT_SECONDS` | Worker | Seconds to wait on Redis, connect and read (default 3.0). Without one the socket default is *never*, and the tick holds a fleet-wide lock |
 | `{VENDOR}_API_KEY`, `{VENDOR}_BASE_URL` | Backend | Per-vendor credentials only |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Backend | Never expose to frontend |
 | `STRIPE_PUBLISHABLE_KEY` | Backend → `/api/config` → Frontend | |
@@ -2105,6 +2567,20 @@ makes both useless.
 | Cast `as Matter[]` on api.ts call results | Use the typed return signatures in `api.ts` |
 | Use `orm_mode = True` | Use `ConfigDict(from_attributes=True)` |
 | Log PII (names, amounts, case facts) | Log entity IDs only |
+| Sum raw vendor token counts across vendors | OpenAI and Gemini input includes cached tokens, Anthropic's does not; Gemini's thinking sits outside its output count. `llm_usage.normalize` |
+| Record only the attempt that answered | A failed-over or rejected reply is billed. Record every attempt, noting usage before the text is extracted |
+| Set an attribution scope in a sync dependency, or around `pool.submit` | Neither reaches the code that runs. Middleware for requests; inside `run_claimed` for jobs |
+| Price a call with a fallback when its meter has no rate | A guessed price is a wrong cost with nothing showing it was guessed. `unpriced`, NULL, and on the to-do list |
+| Sum unpriced calls into a total as zero | The total becomes a confident understatement. Count them, set `complete = false`, and call it a floor |
+| Show a sub-cent spend with `money()` | It truncates to cents, so fractions of a cent read `$0.00` — free. `cost()` says `<$0.01` |
+| Display a UTC-midnight date in local time | 1 October UTC is 30 September in Texas. Format the UTC calendar day |
+| Create a function in a migration without revoking EXECUTE from anon | Postgres grants it to PUBLIC and PostgREST serves it at `/rest/v1/rpc`. `tests/test_migration_rls.py` |
+| Price a call on the model the catalog REQUESTED | The vendor says which model answered. An alias or preview name can be served by a version with a different price, and on a large ingest that is the disputed figure. `coalesce(served_model, model)` |
+| Store a price on the usage row | Prices are entered late and corrected. Store tokens; price at read time from a dated rate table |
+| Create a table in `public` without enabling RLS in the same migration | Supabase grants `anon` access by default and the anon key ships in the JS bundle. Only 005 ever did it; everything after was readable with the public key. `tests/test_migration_rls.py` |
+| Create a view without `security_invoker` | A view runs as its owner and bypasses RLS on every table it reads — including tables that are protected |
+| Let a PostgREST `APIError` go unhandled | Its `details` holds the offending ROW. An unhandled one prints a client name and account number into the log, for any table |
+| Answer a refused value with a 500 | A constraint violation is a 4xx. Name the constraint — it is not client data, and it is what identifies the missing migration |
 | Import LLM SDKs outside `llm_service.py` | Call `llm_service.complete(...)` |
 | Add `{VENDOR}_MODEL` / `{VENDOR}_FAST_MODEL` env keys | Add the model to a chain in `app/config/llm_profiles.json` |
 | Read a vendor id or model name outside `llm_service.py` | Name the task: `complete(..., profile="analyze_pleading")` |
@@ -2119,6 +2595,8 @@ makes both useless.
 | Add a second category to a transaction | Category is one per line — it drives the FIS. Use a tag; that is what tags are for |
 | Set `category_id` from extraction | The LLM fills free-text `category` as a hint only; a human files the line |
 | Query transactions without resolving the matter's accounts first | Transactions carry no `matter_id`; the account list is the matter boundary |
+| Read a lone `-5000` amount bound as `amount >= -5000` | That is the entire production, for the commonest query anybody types. Both boxes are magnitudes; the sign selects the side (`util/amount_filter.py`) |
+| Filter on an absolute amount with one comparison | PostgREST cannot call `abs()`. An either-direction range is an `or` of the two mirrored windows |
 | Express "untagged" as the complement of the tagged set | Exclude the tagged ids — the complement is the whole production and blows the URI and max-rows limits |
 | Rely on `find_period` to catch a duplicated statement | It is account-scoped, so it misses the case where the account itself was misread. Page overlap is the document-scoped check |
 | Take a vision answer for the institution at face value | The form printer'"'"'s imprint is the other company name on the page. Reject known vendors; prefer unnamed to wrongly named |
@@ -2128,6 +2606,7 @@ makes both useless.
 | Soft-delete a statement or an account | The PDF in Storage is the undo. Soft state there infects account lists, queues, search scoping, and gap detection for no gain |
 | Leave a rejected extraction in the table "filtered out" | Delete it. Invisible-but-present means nobody can act on it and the empty account never goes away |
 | Delete an account that carries a characterization | `_reason_to_keep()` spares it. Ownership, character, purpose, and notes are attorney work, not import output |
+| Add a missing line with an INSERT into the database | It leaves no trace on the exhibit the figure reaches. `add_transaction` flags it MANUAL_ENTRY with the person and reason, and re-reconciles |
 | Overwrite an extracted value in place | Correct it through `correct_transaction()` — the flag trail is what makes the figure defensible |
 | Convert `Decimal`/`date` to `str` before `repo.update()` | Pass the native type; `json_safe` handles it, and converting early corrupts the returned model |
 | Add an `UNRECONCILED` flag on re-check | Replace the existing one, or a corrected statement keeps claiming it is out of balance |
@@ -2152,6 +2631,8 @@ makes both useless.
 | Assume a checks-summary table repeats debits already listed | On many statements it is the only place the check appears. Skip rows with no printed amount; dedupe the rest |
 | Read a multi-column table straight down one column | Statement tables are column groups read left to right; the extracted text interleaves them |
 | Raise `max_tokens` when an extraction comes back short | Check what it actually used first. A model that stops at a seventh of its budget did not run out of room — split the work instead |
+| Index a long document with one clipped call | 60,000 characters is about eight monthly statements, and the clip was silent. Window it, and stitch the descriptions (`_index_document`) |
+| Detect a missed statement by looking for unclaimed pages | The statement before it absorbs them, so every page has an owner. A page that restarts pagination and begins no indexed statement is the signal |
 | Trust a well-formed extraction because it parsed | Valid JSON says nothing about completeness. Compare it against the totals the statement prints for itself |
 | Gate Bates detection on perfect one-per-page steps | That rejects exactly the incomplete productions worth flagging. Gate on monotonicity |
 | Export the page the user is looking at | An export covers every matching line. A summary that stopped at the page size looks complete and is wrong |
@@ -2168,6 +2649,18 @@ makes both useless.
 | Derive change in market value by subtraction | It always balances, so it hides a missing wire instead of revealing it. Copy the printed figure or omit the line |
 | Reconcile a brokerage against the cash or sweep balance | The purchases that moved cash into securities are deliberately absent. Balance against total account value |
 | Apply the printed-counts check to a cash-flow-only extraction | Those counts include the trades that were deliberately skipped, so it fires on every statement |
+| Raise SECURITIES_NOT_EXTRACTED when nothing was omitted | The flag exists to explain missing rows. With none missing it asserts a silence that did not happen — and it fired on every policy statement |
+| Say "the balances will not tie" on a statement that tied | A flag contradicting its own row teaches the reader that none of the flags mean anything. Gate MARKET_CHANGE_NOT_PRINTED on `not reconciled` |
+| Tell somebody to copy a date the page does not print | A policy statement's figures are period totals with no dates, ever. All-undated on a cash-flow account is that shape; a MIXTURE is the degraded read the warn was built for |
+| State the cash-flow account types in the prompt as literal words | They are `_CASH_FLOW_ACCOUNTS` in Python and drifted the first time a type was added — the checks moved, the model did not. Build the prompt from the enum |
+| Let the prompt's `account_type` list be typed by hand | `crypto` was not an answer the model could give for two migrations. Derive it |
+| Apply "an ACCOUNT SUMMARY is not a register" to a policy statement | It has no other activity block, so that rule extracts nothing. The summary IS the register there |
+| Extract a statement's subtotal alongside its lines | "Total change in value" restates the two lines beneath it. Leaves only |
+| Read a card's printed "Purchases" as a debit total | A card purchase RAISES the balance, so it is positive. The summary words of a credit card or a loan name the opposite side; pass the account type (`_LIABILITY_ACCOUNTS`) |
+| Pick a printed total's SIDE from the word alone | "Payment" is money out on a bank statement and money IN on a policy. `premium_payments` was read as the debit total and reported a $901.83 shortfall on a statement that tied to the cent. Read the statement's own sign where it has one |
+| Read a cash-value policy or annuity as a bank account | Its value moves by flows plus market results, like a brokerage. 038 gives them types; they belong in `_CASH_FLOW_ACCOUNTS` |
+| Add `other` to `_CASH_FLOW_ACCOUNTS` to avoid a migration | `other` is the catch-all. A mistyped bank account would then silently stop having its transactions extracted |
+| Add an `AccountType` without a compliance label | `_TYPE_LABEL.get(t, "Other")` mislabels it on an exhibit handed to opposing counsel. `crypto` printed as "Other" from 036 to 038 |
 | Put unrealized market change in FIS income | Not net resources under Tex. Fam. Code 154.062(b), and one month's swing becomes months of "income" nobody received |
 | Sum raw amounts on the FIS without checking the account type | A card purchase is positive by the printed convention. Debit and credit spending then cancel out. `household_amount()` |
 | Average a quarterly or annual bill over the report window | It buys coverage past the window, so the figure moves every time the report runs. Trailing twelve months over twelve |
@@ -2263,6 +2756,10 @@ makes both useless.
 | Store a masked account number with no digits in it | It is the caption, scraped. `"Account Number:"` reached production twice |
 | Trust `json.loads(llm_response)` directly | Strip markdown fences first — LLMs wrap JSON in ``` ```json ``` ``` despite being told not to |
 | Open a mail connection with no timeout | The socket default is *never*, and the tick holds a fleet-wide lock. One wedged node stops all of them |
+| Open a Redis connection with no timeout | Same lock, same hole. `redis_timeout_seconds` bounds a hang; a refusal already returns fast and never reaches the cap |
+| Spell a Redis or service URL `localhost` when it may be unreachable | It resolves to `::1` AND `127.0.0.1`, tried in order, so a dead host costs exactly double. `127.0.0.1` halves it |
+| Let an infrastructure setting sit at a localhost default in production | Nothing distinguishes that from a choice. At its default every node thinks it holds the fleet-wide poller lock |
+| Signal "working" by disabling a text link | `text-navy underline` renders identically disabled. Add `disabled:no-underline disabled:opacity-40`, and say which row is working |
 | Run the CRM tick's steps as a bare sequence | The first to raise takes the rest with it. Mail failing must not stop the diff explainer |
 | Log a network blip as ERROR with a traceback | It repeats every minute and buries what matters. One line for the network, tracebacks for the unexpected |
 | Run a job to completion on the worker's main loop | One long statement then blocks every other job and the CRM tick. Claim to capacity, run in the pool |
@@ -2278,6 +2775,9 @@ makes both useless.
 | Report "deprecated setting in use" from its value | `db_type` defaults to `"supabase"`, so it fired on every node forever. `model_fields_set` |
 | Write a non-string setting as `KEY=` in .env.example | An empty string is not a float, an int, a bool or a JSON list, and pydantic refuses the whole file over one |
 | Add a compose `${VARIABLE}` without a Settings field | `extra = "forbid"` refuses the line and the container stops booting. `API_BASE_URL` was exactly that |
+| Key a compose-reads-this guard on the COMPOSE_ONLY bucket | `SUPABASE_URL` is INFRASTRUCTURE and interpolated anyway. Derive the list from `docker-compose.yml` — the file doing the interpolating is the only honest source |
+| Move a compose build arg into SSM | Compose runs on the host before any container exists. It substitutes an empty string, exits 0, and ships a blank white page with nothing in any log |
+| Call a deploy done because the containers are healthy | A frontend compiled without its build args passes every server-side check there is. Open it in a browser |
 | Let a node boot when its secret source is unreachable | A worker with no Anthropic key does not fail, it silently produces nothing. Raise |
 | Leave the AWS region to botocore's own environment scan | `AWS_REGION` was set and reached the process, and `boto3.client()` still raised `NoRegionError` — which variables botocore reads is a property of the pinned version. Resolve it and pass `region_name` |
 | Import `LoggerFactory` at module scope in anything `settings` imports | It closes the loop `settings → x → loggerfactory → settings`. Build the logger lazily |

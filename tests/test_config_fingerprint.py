@@ -30,7 +30,8 @@ from util.config_fingerprint import (  # noqa: E402
 )
 from util.config_spec import (  # noqa: E402
     ALL_BUCKETS, COMPOSE_ONLY, DEPRECATED, DEPRECATION_REASON, FINGERPRINTED,
-    INFRASTRUCTURE, SECRET, bucket_of, overlapping, unclassified,
+    COMPOSE_INTERPOLATED, COMPOSE_REQUIRED, INFRASTRUCTURE, SECRET,
+    bucket_of, overlapping, unclassified,
 )
 from util.settings import Settings  # noqa: E402
 
@@ -449,6 +450,48 @@ loaded, environ, _fake = with_fake_ssm(
     {"SUPABASE_SERVICE_ROLE_KEY": "from-ssm"}, env={"_TAG": "production"})
 check("the sibling service-role key is NOT compose-only and loads normally",
       loaded, ["SUPABASE_SERVICE_ROLE_KEY"])
+
+# ── What docker-compose.yml reads on the HOST ────────────────────────────────
+#
+# THE FILE THAT DOES THE INTERPOLATING IS THE ONLY HONEST SOURCE OF TRUTH, and
+# a hand-maintained list was not it. `_refuse_if_compose_reads_it` keyed on the
+# COMPOSE_ONLY bucket, which holds SUPABASE_ANON_KEY and API_BASE_URL. It does
+# NOT hold SUPABASE_URL -- that is INFRASTRUCTURE, because the API needs it at
+# runtime too -- and compose interpolates it all the same.
+#
+# So when SUPABASE_URL was removed from `.env` during the SSM migration, the
+# next build substituted an empty string into VITE_SUPABASE_URL and shipped a
+# bundle that threw `supabaseUrl is required.` at module scope. Blank white page
+# on every route, container healthy, nothing in any server log.
+print("")
+print("Every ${VARIABLE} in docker-compose.yml is accounted for")
+
+compose = io.open(os.path.join(ROOT, "docker-compose.yml"), encoding="utf-8").read()
+# `${NAME}` and `${NAME:-default}` alike; the name is what matters.
+interpolated = {m.lower() for m in re.findall(r"\$\{([A-Z_][A-Z0-9_]*)", compose)}
+
+check("the declared set matches the file exactly",
+      sorted(COMPOSE_INTERPOLATED), sorted(interpolated))
+
+# Each one must also be a Settings field, or `extra = "forbid"` refuses the
+# line the moment somebody sets it in .env -- the API_BASE_URL trap.
+undeclared = sorted(n for n in COMPOSE_INTERPOLATED
+                    if n not in Settings.model_fields)
+check("and every one is a declared Settings field", undeclared, [])
+
+# The ones with no compose-side default must be REQUIRED lines in the example
+# (`NAME=`), not commented ones. A commented default reads as optional, and
+# these are the opposite of optional: absent, they build a broken image.
+example = io.open(os.path.join(ROOT, ".env.example"), encoding="utf-8").read()
+for name in sorted(COMPOSE_REQUIRED):
+    upper = name.upper()
+    required_shape = re.search(r"(?m)^%s=\s*$" % re.escape(upper), example)
+    check_true(".env.example marks %s as required to fill in" % upper,
+               required_shape is not None)
+
+check_true("COMPOSE_REQUIRED is a subset of what compose actually reads",
+           COMPOSE_REQUIRED <= COMPOSE_INTERPOLATED)
+
 
 check("the source switches are not fingerprinted",
       sorted({"cyclone_secrets_source", "cyclone_env"} & FINGERPRINTED), [])

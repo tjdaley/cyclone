@@ -293,6 +293,116 @@ check("no market-change note either",
 check("and it still reconciles the way it always did", plain["reconciled"], True)
 check("its summary column stays empty", plain["portfolio_summary"], None)
 
+# ── 038: cash-value insurance is read the same way ────────────────────
+#
+# `_CASH_FLOW_ACCOUNTS` is not "brokerages" — it is accounts whose value moves by
+# flows plus market results, and a cash-value policy satisfies every one of the
+# five behaviours it turns on. Before 038 such a statement landed on `other` and
+# got the BANK-shaped completeness check: a RiverSource VUL that reconciled to
+# the cent (63,991.33 + 1,500 − 523.17 − 75 + 478.44 = 65,371.60) was flagged
+# INCOMPLETE_EXTRACTION because `premium_payments` matched as the printed DEBIT
+# total. A premium payment is money IN on a policy.
+print("038. cash-value insurance takes the cash-flow path")
+from db.models.financial import AccountType as _AT2  # noqa: E402
+from services.statement_service import _CASH_FLOW_ACCOUNTS  # noqa: E402
+
+check_true("life insurance is read for cash flow",
+           _AT2.life_insurance in _CASH_FLOW_ACCOUNTS)
+check_true("so are annuities", _AT2.annuity in _CASH_FLOW_ACCOUNTS)
+
+# The boundary is what makes this safe. `other` is the catch-all, so putting it
+# in the set would apply cash-flow-only extraction to any mistyped bank account
+# and SILENTLY STOP EXTRACTING ITS TRANSACTIONS — quiet data loss traded for
+# avoiding a migration.
+check_true("`other` is NOT, so a mistyped bank account keeps its register",
+           _AT2.other not in _CASH_FLOW_ACCOUNTS)
+check_true("nor is checking", _AT2.checking not in _CASH_FLOW_ACCOUNTS)
+
+
+# ── A flag must be true of the statement it sits on ─────────────────────
+#
+# The RiverSource policy reconciled to the cent and still carried three notes,
+# two of which said things that were not so. A flag that contradicts its own row
+# is worse than no flag: it teaches the reader that none of them mean anything.
+print("")
+print("Flags on a reconciled policy statement")
+
+# The real document. No register anywhere -- the value-of-policy block is the
+# activity, its figures are period totals, and it prints no dates at all.
+POLICY = {"statements": [{
+    "account": {"institution": "RiverSource Life Insurance Company",
+                "account_type": "life_insurance", "account_number_last4": "0004"},
+    "period": {"start_date": "2022-12-31", "end_date": "2023-03-31"},
+    "balances": {"beginning_balance": 63991.33, "ending_balance": 65371.60},
+    "portfolio_summary": {"additions": 1500.00, "withdrawals": -523.17},
+    "transactions": [
+        {"line_no": 1, "description": "Premium payments", "amount": 1500.00,
+         "physical_page_number": 2},
+        {"line_no": 2, "description": "Monthly deductions", "amount": -523.17,
+         "physical_page_number": 2},
+        {"line_no": 3, "description": "Premium expense charges", "amount": -75.00,
+         "physical_page_number": 2},
+        {"line_no": 4, "description": "Fixed and variable account results",
+         "amount": 478.44, "physical_page_number": 2},
+    ],
+}]}
+policy, policy_lines = commit(
+    POLICY, raw_text="<<<PAGE 1>>>\nRIVERSOURCE LIFE INSURANCE COMPANY\n")
+
+# 63,991.33 + 1,500 - 523.17 - 75 + 478.44 = 65,371.60
+check("the four leaf lines tie to the printed close", policy["reconciled"], True)
+check("with nothing left over", policy["reconciliation_delta"], Decimal("0.00"))
+check("and all four were written", len(policy_lines), 4)
+
+# NOTHING WAS OMITTED, SO NOTHING ANNOUNCES AN OMISSION. A variable policy CAN
+# hold sub-account investments -- that is what "variable" means -- but one
+# sitting entirely in its fixed account trades nothing.
+check("no securities note when the count is zero",
+      "SECURITIES_NOT_EXTRACTED" in codes(policy), False)
+
+# THE STATEMENT TIED. Saying "the balances will not tie" on it is false.
+check("no market-change note on a statement that reconciles",
+      "MARKET_CHANGE_NOT_PRINTED" in codes(policy), False)
+
+# The dates are genuinely absent and always will be, so "date them from the
+# source page" is an instruction nobody can follow. The CONSEQUENCE still gets
+# reported -- a date-range exhibit will not contain them -- but as info, not as
+# a warn that holds the statement in a queue awaiting an impossible correction.
+undated = next(f for f in policy["flags"] if f["code"] == "UNDATED_TRANSACTIONS")
+check("an all-undated cash-flow extraction is info, not warn",
+      undated["severity"], "info")
+check_true("it says the figures are period totals",
+           "period totals" in undated["note"])
+check_true("and still warns that a date-range exhibit misses them",
+           "date range will not contain them" in undated["note"])
+check("without telling anyone to copy a date that is not printed",
+      "source page" in undated["note"], False)
+
+print("")
+print("But a half-dated register is still the degraded read it always was")
+
+# SOME dated and some not is the other shape entirely: a call that stopped
+# reading the date column. That keeps the warn and the original remedy, because
+# there the dates ARE on the page.
+HALF = {"statements": [{
+    "account": {"institution": "Charles Schwab", "account_type": "brokerage",
+                "account_number_last4": "4448"},
+    "period": {"start_date": "2025-03-01", "end_date": "2025-03-31"},
+    "balances": {"beginning_balance": 0, "ending_balance": 200},
+    "transactions": [
+        {"line_no": 1, "transaction_date": "2025-03-02", "description": "TRANSFER IN",
+         "amount": 150, "physical_page_number": 1},
+        {"line_no": 2, "description": "TRANSFER IN", "amount": 50,
+         "physical_page_number": 1},
+    ],
+}]}
+half, _ = commit(HALF)
+mixed = next(f for f in half["flags"] if f["code"] == "UNDATED_TRANSACTIONS")
+check("a mixture keeps the warning", mixed["severity"], "warn")
+check_true("and keeps the remedy, because those dates are on the page",
+           "source page" in mixed["note"])
+
+
 print("")
 if FAILURES:
     print("%d FAILED: %s" % (len(FAILURES), ", ".join(FAILURES)))

@@ -59,6 +59,7 @@ from schemas.financial import (
     TransactionCategoryResponse,
     TransactionCategoryWriteRequest,
     TransactionCorrectionResponse,
+    TransactionAddRequest,
     TransactionDeleteRequest,
     ReviewRequest,
     TransactionResponse,
@@ -944,6 +945,55 @@ def correct_transaction(
     )
 
 
+@router.post("/statements/{statement_id}/transactions", response_model=TransactionCorrectionResponse,
+             status_code=201)
+def add_transaction(
+    statement_id: int,
+    body: TransactionAddRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> TransactionCorrectionResponse:
+    """
+    Add a line the import missed, and re-reconcile the statement with it.
+
+    The line carries a MANUAL_ENTRY flag naming the person and their reason,
+    because the figure reaches an exhibit under a Rule 1006 notice promising the
+    underlying records are available — and a line nobody can find on the
+    production must never be covered by that silently.
+
+    Posted under the statement rather than the account: a line belongs to the
+    document it is printed on, and the account is read from the statement rather
+    than taken from the caller.
+    """
+    staff, name = _staff_and_name(request, manager)
+    values = body.model_dump(exclude_unset=True)
+    reason = values.pop("reason", None)
+    try:
+        transaction, statement = statement_service.add_transaction(
+            manager, statement_id, values, staff.id, name, reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    # Adding evidence is at least as consequential as correcting it (§13).
+    AuditLogger(manager).log(
+        action="financial_transaction_added",
+        entity_type="financial_account_transactions",
+        entity_id=str(transaction.id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={
+            "statement_id": statement_id,
+            "amount": str(transaction.amount),
+            "reason": reason,
+        },
+    )
+    return TransactionCorrectionResponse(
+        transaction=TransactionResponse(**transaction.model_dump()),
+        statement=_statement_response(statement) if statement is not None else None,
+    )
+
+
 @router.post("/transactions/{transaction_id}/delete", response_model=TransactionCorrectionResponse)
 def delete_transaction(
     transaction_id: int,
@@ -1258,11 +1308,15 @@ def search_transactions(
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> TransactionSearchResponse:
     """
-    Filter a matter's transactions by account, date, category, tag, and text.
+    Filter a matter's transactions by account, date, amount, category, tag and text.
 
     The matter bounds every search: transactions carry no matter_id, so the
     service resolves the matter's accounts first and intersects any account
     filter against them.
+
+    **An unsigned amount searches by magnitude and matches both directions**,
+    which is how an offsetting pair is found; ``-5000`` restricts to money out
+    and ``+5000`` to money in (``util/amount_filter.py``).
     """
     result = transaction_search_service.search(
         manager=manager,
@@ -1279,6 +1333,8 @@ def search_transactions(
         text=body.text,
         check_number=body.check_number,
         checks_only=body.checks_only,
+        amount_min=body.amount_min,
+        amount_max=body.amount_max,
         include_deleted=body.include_deleted,
         limit=body.limit,
         offset=body.offset,

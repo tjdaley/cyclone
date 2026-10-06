@@ -296,6 +296,56 @@ def misplaced_secrets(settings: Any) -> list[dict[str, str]]:
     return found
 
 
+def local_defaults_in_production(settings: Any) -> list[dict[str, str]]:
+    """
+    Infrastructure settings nobody set, whose default points at this machine.
+
+    **A localhost default is right in development and never right in
+    production**, and the gap between those is silent. `REDIS_URL` went into
+    SSM during the migration and out of `.env`; on a dev box, which has no SSM,
+    `settings.redis_url` quietly fell back to ``redis://localhost:6379/0`` and
+    every Redis call cost four seconds before failing. Nothing said which of the
+    two situations you were in -- the fallback is indistinguishable from a
+    deliberate choice.
+
+    On a node it is worse than slow. `redis_url` at its default means the
+    fleet-wide `crm:poller` lock is being taken against a Redis nobody else can
+    see, so **every node believes it holds the lock** and all of them poll the
+    mailbox. `host_url` at its default means CORS allows only localhost and any
+    generated URL is wrong.
+
+    Asked of `model_fields_set` rather than of the value, the same question
+    `deprecated_in_use` asks: did somebody set this, or is it merely holding a
+    default? A value that happens to equal the default because somebody typed it
+    is a decision and is not reported.
+
+    :return: One entry per unset field whose default names this machine.
+    :rtype: list[dict[str, str]]
+    """
+    # Development is where these defaults are correct, and warning there would
+    # make this the noise that trains people to ignore the log.
+    if getattr(settings, "is_development", False):
+        return []
+
+    fields = getattr(type(settings), "model_fields", {})
+    was_set = getattr(settings, "model_fields_set", set())
+    found: list[dict[str, str]] = []
+    for field in sorted(INFRASTRUCTURE):
+        info = fields.get(field)
+        if info is None or field in was_set:
+            continue
+        default = info.default
+        if not isinstance(default, str) or not default:
+            continue
+        # "localhost", "127.0.0.1" and the bare id "local" are the shapes a
+        # default takes when it means "this machine".
+        if not ("localhost" in default or "127.0.0.1" in default
+                or default == "local"):
+            continue
+        found.append({"variable": field.upper(), "default": default})
+    return found
+
+
 def log_startup_summary(settings: Any) -> None:
     """
     Say the fingerprint once at boot, and name any dead settings still set.
@@ -313,6 +363,16 @@ def log_startup_summary(settings: Any) -> None:
             "%s. Replace it with the publishable credential and redeploy; treat the "
             "secret as disclosed and revoke it.",
             bad["variable"], bad["holds"], bad["exposure"],
+        )
+
+    for local in local_defaults_in_production(settings):
+        LOGGER.warning(
+            "%s is not set on this node and fell back to %s, which names THIS "
+            "machine. Nothing here is development, so that is almost certainly "
+            "not what was wanted: set it in .env or in SSM under this "
+            "environment's path. A Redis at localhost means every node believes "
+            "it holds the fleet-wide poller lock.",
+            local["variable"], local["default"],
         )
 
     LOGGER.info(

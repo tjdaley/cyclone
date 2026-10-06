@@ -114,6 +114,7 @@ Every account also needs your judgment recorded. These are never extracted.
 
 | Field | Why it matters |
 | ----- | -------------- |
+| **Account type** | Set from the statement, and worth checking. It decides how the account is read on a re-import and how it is labelled on a compliance exhibit — see below. |
 | **Held by** | `Our client, solely` / `Other party, solely` / `Jointly held` / `A third party` / `Not yet determined`. **Joint decides whether an asset divides**, so it is never inferred. The Accounts tab count in amber is the number still set to "Not yet determined". |
 | **Who produces** | Which compliance report this account appears on — see [Chapter 11](11-discovery-tracking.md). Usually follows "Held by", and sometimes does not. |
 | **Characterization** | Community, separate (Petitioner or Respondent), mixed, or disputed. An uncharacterized account shows an amber chip. |
@@ -121,6 +122,23 @@ Every account also needs your judgment recorded. These are never extracted.
 | **Purpose** | *Household operating account, business payroll, …* |
 | **Notes** | |
 | **Account is closed** | |
+
+### The account types, and the four that are not obvious
+
+Checking · Savings · **Brokerage** · **Crypto** · Credit card · **Retirement** ·
+HSA · Loan · **Life insurance** · **Annuity** · Other.
+
+| Type | Why it is its own type rather than "Other" or "Brokerage" |
+| ---- | -------------------------------------------------------- |
+| **Crypto** | It divides differently, it is valued on a date somebody has to argue for, and it is the asset most easily moved while a case is pending. Burying it under "brokerage" makes it unfilterable |
+| **Life insurance** | A cash-value policy divides by **where the premiums came from**, not by whose name is on it; it carries a **beneficiary designation**, which no brokerage account has; and it prints **two figures that must never be added together** — a cash value, which is divisible property, and a death benefit, which is not |
+| **Annuity** | One in payout behaves like an **income stream**, not an asset, which is why it is kept apart from life insurance rather than lumped in with it |
+| **Retirement** | Read for cash flow like a brokerage account ([Chapter 7](07-viewing-statements.md#brokerage-retirement-and-insurance-accounts-read-differently)) |
+
+> **If saving a type change fails**, read the message: it means this database has
+> not had the update that adds that option yet. Tell your administrator, and
+> nothing you entered was saved — see
+> [Chapter 5](05-import-problems.md#the-database-refused-this-value).
 
 ---
 

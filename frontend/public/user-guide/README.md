@@ -41,6 +41,8 @@ work happens in.
 | - | - |
 | [12. User roles](12-user-roles.md) | The four roles, what each can do, and how to change them |
 | [13. Assigning staff to a matter](13-matter-staff.md) | What assignment does — and what it does not |
+| [14. Where leads go](14-lead-routing.md) | How a lead reaches an attorney, who gets notified, and what to check when nobody was |
+| [15. AI costs and prices](15-costs.md) | What the AI work costs, who it was spent on, and how a vendor's price gets entered |
 
 ---
 

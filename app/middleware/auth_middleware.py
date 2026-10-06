@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 
 from util.loggerfactory import LoggerFactory
 from util.settings import settings
+from util.usage_scope import reset_scope, set_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -78,7 +79,22 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.email = email  # Used by the auth correlation endpoint
         LOGGER.debug("AuthMiddleware: authenticated uid=%s role=%s", uid, role)
 
-        return await call_next(request)
+        # LLM COST ATTRIBUTION FOR THE REQUEST, and it has to be set HERE. A value
+        # set inside `require_role` -- the obvious place, since that is where the
+        # staff member is resolved -- never reaches the endpoint: FastAPI runs a
+        # sync dependency in its own threadpool call and throws its context away.
+        # Checked by running it. The uid is recorded rather than resolved to a
+        # staff id, which would cost a database round trip on every call; a
+        # report joins staff.supabase_uid.
+        scope = set_scope(
+            source_type="request",
+            source_id="%s %s" % (request.method, request.url.path),
+            auth_uid=uid,
+        )
+        try:
+            return await call_next(request)
+        finally:
+            reset_scope(scope)
 
 
 def _extract_bearer_token(request: Request) -> Optional[str]:

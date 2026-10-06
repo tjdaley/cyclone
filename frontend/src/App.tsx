@@ -24,6 +24,7 @@ import LeadsListPage    from './pages/app/LeadsListPage'
 import LeadDetailPage   from './pages/app/LeadDetailPage'
 import ProfilePage      from './pages/app/ProfilePage'
 import AdminPage        from './pages/app/AdminPage'
+import CostsPage        from './pages/app/CostsPage'
 
 export default function App() {
   return (
@@ -60,6 +61,7 @@ export default function App() {
               <Route path="/app/leads/:sessionUuid"     element={<LeadDetailPage />} />
               <Route path="/app/profile"   element={<ProfilePage />} />
               <Route path="/app/admin"     element={<AdminPage />} />
+              <Route path="/app/costs"     element={<CostsPage />} />
             </Route>
           </Route>
 

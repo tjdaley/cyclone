@@ -35,6 +35,23 @@ class AccountType(str, Enum):
     retirement = "retirement"
     hsa = "hsa"
     loan = "loan"
+    # Cash-value insurance, added by 038. The same argument 036 made for crypto:
+    # a policy is not a brokerage account wearing different clothes. It divides
+    # by the source of the premiums rather than the titling, it carries a
+    # beneficiary designation no brokerage account has, and it prints TWO
+    # figures that must never be added -- a cash value that is divisible
+    # property and a death benefit that is not.
+    #
+    # Separated from each other because an annuity in payout behaves like an
+    # income stream rather than an asset, and a report that cannot tell them
+    # apart either treats a pension-like annuity as divisible property or misses
+    # a policy's cash value.
+    #
+    # Both are read as CASH-FLOW accounts (statement_service._CASH_FLOW_ACCOUNTS):
+    # a transfer between sub-accounts inside a policy is the same non-event as a
+    # stock purchase, and the balance is the total policy value.
+    life_insurance = "life_insurance"
+    annuity = "annuity"
     other = "other"
 
 

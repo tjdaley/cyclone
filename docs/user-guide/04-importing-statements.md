@@ -27,8 +27,9 @@ Two of the tabs carry an amber count when something needs you:
 
 ## Dropping the files
 
-Drag statement PDFs onto the drop zone, or click it to browse. Bank,
-brokerage, and credit card statements are all handled.
+Drag statement PDFs onto the drop zone, or click it to browse. Bank, brokerage,
+credit-card, crypto-exchange, cash-value life-insurance and annuity statements
+are all handled.
 
 **Drop the whole stack at once.** Several files are read at the same time, so
 twelve monthly PDFs dropped together finish far sooner than the same twelve
@@ -42,6 +43,14 @@ a time.
 > this software can be given — and if a client or opposing counsel produces one
 > enormous file, splitting it before you upload will save you doing it
 > afterwards.
+>
+> **A long document that is not read all the way through now says so**, on every
+> statement it produced, as **PAGES_NOT_INDEXED**
+> ([Chapter 5](05-import-problems.md#flag-reference)).
+> Until this release a twenty-four-month file could import eight months, absorb
+> the rest into the eighth statement, and look finished. **If you see that flag,
+> split the file and import it again** — do not work through the exceptions
+> queue, because the months that were never read are not in the queue either.
 
 A single file holding several statements still works — a combined statement
 where one bank prints every account you hold is ordinary input — and each
@@ -152,7 +161,9 @@ Understanding this makes every warning in the next chapter make sense.
    retirement** account this step is narrower on purpose — buying and selling
    are not recorded, because they move value between cash and securities inside
    one account without changing what it is worth. See
-   [Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently).
+   [Chapter 7](07-viewing-statements.md#brokerage-retirement-and-insurance-accounts-read-differently).
+   The same is true of a **life-insurance** or **annuity** statement, which has
+   no transaction register at all.
 4. **The account is matched.** Bank name **plus last four digits** is the key.
    A match files the statement against the existing account; no match creates a
    new one.

@@ -134,6 +134,31 @@ check("reported as duplicate", summary["results"][0]["status"], "duplicate")
 check("points at the one already filed", summary["results"][0]["statement_id"], 34)
 check("nothing written", len(s.rows), 1)
 check("no transactions written", len(t.rows), 0)
+# THE ROW HAS TO SAY WHICH ACCOUNT IT DUPLICATED. The import log read
+# "Unidentified institution" on every duplicate, which is the one thing it
+# certainly was not: the statement was identified well enough to match an
+# existing account. The name comes from that account, where the authoritative
+# one lives -- repaired by `resolve_missing_institutions`, or corrected by hand.
+check("named by the account it matched",
+      summary["results"][0]["institution"], "First Financial Bank")
+check("and the account is named too", summary["results"][0]["account_id"], 3)
+
+# From the ACCOUNT, not from this read. `find_match` compares institutions
+# case-insensitively, so a shouted letterhead matches the account on file and
+# the log should show the name the firm's record carries.
+#
+# (A read that could not make out the institution at all cannot reach here:
+# without a name it matches no account, so it opens a second one and is flagged
+# NO_ACCOUNT_MATCH or SAME_LAST4_DIFFERENT_INSTITUTION instead of duplicating.)
+print("1a. the account's name, not the read's")
+summary, a, s, t = run(
+    upload(institution="FIRST FINANCIAL BANK "),
+    accounts=[account(3)],
+    statements=[filed(34, 3, "2023-12-01", "2023-12-31")],
+)
+check("still a duplicate", summary["results"][0]["status"], "duplicate")
+check("reported as the account spells it",
+      summary["results"][0]["institution"], "First Financial Bank")
 
 # ── 2. A rejected copy does not block a re-run ───────────────────────────
 print("2. previously rejected, now re-uploaded")

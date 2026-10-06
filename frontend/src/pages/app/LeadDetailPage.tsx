@@ -67,6 +67,14 @@ const ACTION_LABELS: Record<LeadActionType, string> = {
   draft_pending: 'Draft awaiting approval',
 }
 
+// An escalation that reached nobody carries `error` in its metadata; a
+// successful one carries the responder ids instead. The hint says which half
+// of the routing is missing — the note itself only says that it is.
+const ESCALATION_FAILURE_HINTS: Record<string, string> = {
+  no_attorney: 'No staff record has a Slug matching this lead’s slug, and the lead is unassigned. Assign it to someone now, then fix the routing.',
+  no_responders: 'The responding attorney has nobody listed under Admin → Lead responders.',
+}
+
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -421,6 +429,34 @@ export default function LeadDetailPage() {
                           <div className="text-sm text-red-900 font-mono text-xs break-words">{errText}</div>
                           <div className="text-xs text-text-secondary">
                             {a.actor_type === 'staff' ? staffName(staff, a.staff_id) : 'System'}
+                          </div>
+                        </div>
+                      </li>
+                    )
+                  }
+
+                  // ── Escalation that notified nobody — red, like a send failure ──
+                  // Keyed on the presence of `error`, not on its two known values,
+                  // so a failure code added later is loud rather than silent.
+                  if (a.action_type === 'agent_escalated' && typeof meta?.error === 'string') {
+                    const hint = ESCALATION_FAILURE_HINTS[meta.error]
+                    return (
+                      <li key={a.id} className="text-sm">
+                        <div className="rounded-lg border-2 border-red-300 bg-red-50/40 p-3 space-y-1">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-xs uppercase tracking-widest font-semibold text-red-700">
+                              Escalation failed · nobody was notified
+                            </span>
+                            <span className="text-xs text-text-secondary whitespace-nowrap">{fmtDateTime(a.created_at)}</span>
+                          </div>
+                          <div className="text-sm text-red-900">{a.notes ?? 'Escalation failed.'}</div>
+                          {hint && <div className="text-xs text-red-800">{hint}</div>}
+                          <div className="text-xs text-text-secondary">
+                            {a.actor_type === 'ai_agent' ? 'AI agent' : 'System'}
+                            {' · '}
+                            <a href="/guide/14-lead-routing" target="_blank" rel="noreferrer" className="underline hover:text-navy">
+                              How leads are routed
+                            </a>
                           </div>
                         </div>
                       </li>

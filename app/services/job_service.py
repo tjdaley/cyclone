@@ -25,6 +25,7 @@ from db.repositories.job import JobRepository
 from db_handler import DatabaseManager
 from services.storage_service import StorageService
 from util.loggerfactory import LoggerFactory
+from util.usage_scope import usage_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -186,7 +187,14 @@ class JobService:
         if handler is None:
             LOGGER.error("job_service: no handler for job=%s kind=%s", job.id, job.kind)
             return
-        handler(manager, JobRepository(manager), job)
+        # Attribution is set HERE, inside the function the pool thread runs, and
+        # not around `pool.submit`: a context value does not cross into a
+        # ThreadPoolExecutor thread, so a scope set by the caller would be gone
+        # before the first LLM call. Intake has no matter yet; its spend is
+        # still the job's and the requester's.
+        with usage_scope(source_type="job", source_id=job.id,
+                         staff_id=job.requested_by_staff_id, matter_id=job.matter_id):
+            handler(manager, JobRepository(manager), job)
 
     def run_pending(self, manager: DatabaseManager, limit: int = 3) -> int:
         """

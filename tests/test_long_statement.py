@@ -21,7 +21,11 @@ sys.path.insert(0, r"d:\Local Projects\cyclone\app")
 
 import services.statement_service as mod  # noqa: E402
 from services.llm_service import LLMResult  # noqa: E402
-from services.statement_service import _completeness_findings, statement_service  # noqa: E402
+from services.statement_service import (  # noqa: E402
+    _CREDIT_WORDS, _DEBIT_WORDS, _completeness_findings, _printed_side,
+    statement_service,
+)
+from db.models.financial import AccountType  # noqa: E402
 
 FAILURES = []
 
@@ -259,6 +263,126 @@ check("one line where two are printed still reports",
       any("1 debit line(s) extracted, but the statement prints 2" in f for f in findings), True)
 check("and the money that is missing",
       any("short by 146.14" in f for f in findings), True)
+
+
+# ── 9a. "Payment" changes direction between documents ─────────────────
+# Ameriprise/RiverSource variable universal life, statement 344, 12-31-22 to
+# 03-31-23. It reconciles to the cent — 63,991.33 + 1,500 − 523.17 − 75 +
+# 478.44 = 65,371.60, the printed ending value — and the completeness check
+# reported it short by $901.83 anyway.
+#
+# `_DEBIT_WORDS` carries "payment" because on a bank statement a payment is
+# money LEAVING. On an insurance or annuity statement a *premium payment* is
+# money ARRIVING, and it is the largest credit on the page. So
+# `premium_payments: 1500` matched as the printed DEBIT total and was compared
+# against $598.17 of real deductions.
+#
+# The statement's own sign is what settles it: a policy prints
+# `monthly_deductions: -523.17`, signed, where a bank prints its buckets as
+# magnitudes. Signedness is detected per dict, so bank statements are untouched.
+print("9a. a premium payment is a credit, whatever the word says")
+riversource_totals = {
+    "premium_payments": 1500,
+    "monthly_deductions": -523.17,
+    "total_change_in_value": 403.44,
+    "premium_expense_charges": -75,
+    "net_deposits_withdrawals": 976.83,
+    "dividends_interest_income": 0,
+    "fixed_and_variable_account_results": 478.44,
+}
+riversource = [
+    {"amount": 1500.00},    # Premium payments          — money IN
+    {"amount": -523.17},    # Monthly deductions
+    {"amount": -75.00},     # Premium expense charges
+    {"amount": 478.44},     # Fixed and variable account results
+]
+check("a complete policy statement raises nothing",
+      _completeness_findings(riversource, riversource_totals, {}), [])
+
+# The specific misreading, pinned: the premium must never be taken as the
+# printed debit figure. Asserted through the public function rather than the
+# helper, because the sign only reaches it from the caller.
+check("the premium is not read as a debit total",
+      any("1500" in f for f in
+          _completeness_findings(riversource, riversource_totals, {})), False)
+
+# WHAT THIS FIX DOES AND DOES NOT DO, pinned so nobody reads more into it.
+# The debit side now resolves to NOTHING on this statement: `premium_payments`
+# is excluded by its sign, and `monthly_deductions` matches no debit word at all
+# ("deduction" is not one). So the check went SILENT here rather than becoming
+# correct — which is the right outcome for a bank-shaped check on a document
+# that is not a bank statement, and is not a substitute for routing a
+# cash-value policy to `_portfolio_findings`.
+check("nothing on the debit side is claimed at all",
+      _printed_side({"premium_payments": 1500, "monthly_deductions": -523.17},
+                    _DEBIT_WORDS, _CREDIT_WORDS, -1), None)
+
+# A SIGNED dict must still catch a genuine shortfall where a key DOES name the
+# side, or this trade would have bought silence rather than accuracy.
+check("a signed summary still reports a real shortfall",
+      any("short by 448.17" in f for f in _completeness_findings(
+          [{"amount": 1500.00}, {"amount": -75.00}],
+          {"premium_payments": 1500, "withdrawals": -523.17}, {})),
+      True)
+
+
+# ── 9b. On a CARD, "purchase" is the side money arrives on ───────────────
+# Chase Southwest Rapid Rewards x4855, 09/15/23-10/14/23. Three purchases
+# totalling 244.11, no payments, beginning 0.00, printed close 244.11: it
+# reconciles to the cent. The completeness check reported it SHORT BY 244.11.
+#
+# Amounts are signed by their effect on the printed balance, so a card purchase
+# is POSITIVE -- it raises what is owed. `_DEBIT_WORDS` carries "purchase"
+# because on a bank statement a purchase is money leaving, so Chase's printed
+# "Purchases $244.11" matched as the DEBIT total and was compared against the
+# extracted negative lines, of which a card with no payments has none.
+#
+# Unlike the RiverSource case above, the sign cannot settle it: a card prints
+# its summary as magnitudes. What decides is the ACCOUNT TYPE.
+print("9b. a card purchase is not a debit")
+southwest_totals = {
+    "previous_balance": 0.00,
+    "payment_credits": 0.00,
+    "purchases": 244.11,
+    "cash_advances": 0.00,
+    "balance_transfers": 0.00,
+    "fees_charged": 0.00,
+    "interest_charged": 0.00,
+}
+southwest = [
+    {"amount": 135.26},    # TARGET.COM
+    {"amount": 15.59},     # TARGET ADDISON TX
+    {"amount": 93.26},     # WAL-MART #5311 MCKINNEY TX
+]
+check("a complete card statement raises nothing",
+      _completeness_findings(southwest, southwest_totals, {}, AccountType.credit_card), [])
+check("and nothing claims it is short by its own purchases",
+      any("244.11" in f for f in
+          _completeness_findings(southwest, southwest_totals, {}, AccountType.credit_card)),
+      False)
+
+# The check must still WORK on a card, or this would have bought silence.
+check("a card read short still reports, in the card's own words",
+      _completeness_findings([{"amount": 135.26}], southwest_totals, {},
+                             AccountType.credit_card),
+      ["Charge lines total 135.26, but the statement prints 244.11 (short by 108.85)"])
+check("and the payment side reports too",
+      any("short by 300.00" in f for f in _completeness_findings(
+          [{"amount": -200.00}, {"amount": 244.11}],
+          {"payment_credits": 500.00, "purchases": 244.11}, {},
+          AccountType.credit_card)), True)
+check("a loan is a liability too",
+      _completeness_findings(southwest, southwest_totals, {}, AccountType.loan), [])
+
+# A DEPOSIT account is untouched: there the words and the signs agree, and this
+# is the behaviour every bank statement above depends on.
+check("a bank account still reads 'purchases' as a debit",
+      any("short by 244.11" in f for f in
+          _completeness_findings(southwest, southwest_totals, {}, AccountType.checking)),
+      True)
+check("and an unspecified type still reads as a deposit account",
+      any("short by 244.11" in f for f in
+          _completeness_findings(southwest, southwest_totals, {})), True)
 
 
 # ── 10. A pass whose answer will not parse ───────────────────────────────

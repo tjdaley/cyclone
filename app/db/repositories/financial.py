@@ -17,6 +17,7 @@ from db.models.financial import (
     PayeeClassificationInDB,
 )
 from db_handler import BaseRepository, DatabaseManager
+from util.amount_filter import AmountRange, AmountSide
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -25,6 +26,57 @@ LOGGER = LoggerFactory.create_logger(__name__)
 def _chunks(items: list[int], size: int) -> list[list[int]]:
     """Split an id list so a PostgREST ``in_`` filter stays inside the URI limit."""
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _plain(value) -> str:
+    """A Decimal as PostgREST wants it: plain digits, never 5E+3."""
+    return format(value, "f")
+
+
+def _apply_amount_range(query, amount_range: AmountRange):
+    """
+    Add an amount filter, given magnitudes and a side.
+
+    **An either-direction range cannot be one comparison**, because PostgREST
+    filters column-to-constant and has no way to call ``abs()``. It becomes an
+    ``or`` of the two windows — ``[low, high]`` and ``[-high, -low]`` — which is
+    exact, uses the same index, and keeps the whole filter in one request.
+
+    The one-sided cases are plain comparisons, and the direction is the printed
+    sign: money OUT is negative on a deposit account (CLAUDE.md §11).
+    """
+    low, high, side = amount_range
+    if low is None and high is None:
+        # Nothing was typed. Guarded here as well as at the call site: a filter
+        # helper that needs a precondition will eventually be called without it.
+        return query
+
+    if side is AmountSide.into:
+        if low is not None:
+            query = query.gte("amount", _plain(low))
+        if high is not None:
+            query = query.lte("amount", _plain(high))
+        return query
+
+    if side is AmountSide.out:
+        # Mirrored: a larger magnitude is a smaller number.
+        if low is not None:
+            query = query.lte("amount", _plain(-low))
+        if high is not None:
+            query = query.gte("amount", _plain(-high))
+        return query
+
+    # Either direction.
+    if low is not None and high is not None:
+        return query.or_(
+            "and(amount.gte.%s,amount.lte.%s),and(amount.gte.%s,amount.lte.%s)"
+            % (_plain(low), _plain(high), _plain(-high), _plain(-low))
+        )
+    if low is not None:
+        # A magnitude floor with no ceiling: everything outside [-low, low].
+        return query.or_("amount.gte.%s,amount.lte.%s" % (_plain(low), _plain(-low)))
+    # A ceiling alone is one window straddling zero, so no `or` is needed.
+    return query.gte("amount", _plain(-high)).lte("amount", _plain(high))  # type: ignore[operator]
 
 
 class FinancialAccountRepository(BaseRepository[FinancialAccountInDB]):
@@ -334,6 +386,7 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
         text: Optional[str] = None,
         check_number: Optional[str] = None,
         checks_only: bool = False,
+        amount_range: Optional[AmountRange] = None,
         include_deleted: bool = False,
         limit: int = 200,
         offset: int = 0,
@@ -373,6 +426,12 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             that does not say where the money went, so this is how a payment
             gets traced back to the instrument that made it.
         :param checks_only: Every check on the account and nothing else.
+        :param amount_range: Magnitudes and a side, from
+            ``util.amount_filter.resolve``. **Postgres has ``abs()`` and
+            PostgREST cannot call it in a filter**, so an either-direction range
+            is expressed as an ``or`` of the two signed windows rather than as
+            one comparison — which is also why the bounds arrive as magnitudes
+            and the side arrives separately.
         :param include_deleted: Show lines a person dropped from their
             statement. Off by default — a dropped line must never reach a total
             or an exhibit through an oversight.
@@ -412,6 +471,8 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             query = query.eq("check_number", check_number.strip().rstrip("*").strip())
         elif checks_only:
             query = query.not_.is_("check_number", "null")
+        if amount_range is not None and amount_range.is_set:
+            query = _apply_amount_range(query, amount_range)
         if not include_deleted:
             query = query.is_("deleted_at", "null")
         if text:

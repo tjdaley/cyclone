@@ -129,6 +129,112 @@ can be deleted from the code — which is why the warning exists at all
 
 ---
 
+## A setting whose default names this machine
+
+```text
+WARNING  REDIS_URL is not set on this node and fell back to
+         redis://localhost:6379/0, which names THIS machine. Nothing here is
+         development, so that is almost certainly not what was wanted: set it in
+         .env or in SSM under this environment's path. A Redis at localhost
+         means every node believes it holds the fleet-wide poller lock.
+```
+
+Raised for any per-node setting that was never set and whose default points at
+the node itself — `REDIS_URL`, `HOST_URL`, `ID`. **Suppressed in development**,
+where those defaults are exactly right, and asked of *whether somebody set it*
+rather than of the value, so a deliberate choice is never reported.
+
+**On Redis it is the serious one.** The mail-poller lock is what makes polling
+fleet-wide single-runner; at a localhost default every node holds its own lock,
+so **every node polls the mailbox**. Set it in `.env` or in SSM under this
+environment's path.
+
+> **Related, and the reason a dev box can go slow:** `REDIS_TIMEOUT_SECONDS`
+> (new, fleet-wide, default `3.0`) bounds connecting *and* reading. It bounds a
+> **hang**, not a refusal — a refused connection already fails in about two
+> seconds and never reaches the cap. What it fixes is a host that accepts a
+> connection and then goes quiet, which used to stall the poller tick
+> indefinitely **while holding the fleet-wide lock**.
+>
+> If a developer's test suite suddenly crawls, this is usually why: `REDIS_URL`
+> now lives in SSM, a laptop has no SSM, and the fallback waits on every call.
+> Measured 74.7s for one suite against 8.9s once bounded. Put `REDIS_URL` back
+> in the **dev** `.env`. Note also that `localhost` resolves to both `::1` and
+> `127.0.0.1` and both are tried, so an unreachable `localhost` costs exactly
+> twice what `127.0.0.1` costs — 4.07s against 2.04s, measured.
+
+---
+
+## The usage ledger has something to say
+
+These three come from cost recording (migrations 039 and 042). **Running the
+migration is never enough on its own — restart api and worker**, because each
+process decides once, at the point of failure, and keeps that decision for its
+lifetime.
+
+```text
+ERROR  llm_usage: the llm_calls table does not exist. Run
+       db/migrations/039_cost_tracking.sql. LLM usage is NOT being recorded by
+       this process until it restarts.
+```
+
+**Recording is off for the life of that process.** Spend between now and the
+restart is gone — it is not backfilled from anywhere, because nothing else holds
+the token counts. Run `039`, restart api **and** worker.
+
+```text
+ERROR  llm_usage: llm_calls has no served_model column. Run
+       db/migrations/042_served_model.sql, then restart api and worker. Until
+       this process restarts, usage is recorded WITHOUT the model the vendor
+       actually served, and is priced on the model requested.
+```
+
+Said once. **Usage is still recorded** — this is the smaller loss of the two.
+The rows written meanwhile are priced on the model that was *requested* rather
+than the one that answered, permanently, because nothing recorded which
+answered. The same missing migration also shows up as
+`ERROR Database schema: … llm_calls … served_model / vendor_response_id`.
+
+```text
+WARNING  llm_usage: could not write a cost record (APIError); 10 consecutive
+         failure(s)
+WARNING  llm_usage: ledger queue full; 250 cost record(s) dropped
+```
+
+The first is reported at failures 1, 10, 100 and then every 1000 — **each
+failing row is lost** once the database client's own retries are spent. The
+second means the database has been unreachable long enough for ten thousand rows
+to pile up, and spend is now being dropped. Both point at database
+connectivity; the second is urgent if it persists.
+
+> Recovery reports itself too: `llm_usage: ledger writes recovered after N
+> failure(s)`, at INFO.
+
+---
+
+## A write the database refused
+
+Not a startup line — this one arrives during ordinary work, and it is here
+because the response is the same: run a migration.
+
+```text
+ERROR  Database rejected a write: check constraint, sqlstate=23514,
+       path=/api/v1/financial-accounts/41. The offending row is deliberately
+       not logged (it is client data).
+```
+
+**Almost always a migration that has not been run.** Somebody picked an option
+the screen offers and the database does not accept yet — the first instance was
+choosing **Life insurance** before `038`. The user saw a sentence saying exactly
+that, so they may quote it to you.
+
+**The row is deliberately absent from the log**, and that is the second reason
+this handler exists: unhandled, the database client prints the offending row
+into the traceback, and for a financial account that is a client name and a full
+account number. Constraint names are safe to log; rows are not.
+
+---
+
 ## Lines from the rest of the boot sequence
 
 | Line | Means |

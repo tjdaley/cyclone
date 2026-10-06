@@ -85,11 +85,13 @@ it can be uploaded again.
 
 ---
 
-## Brokerage and retirement accounts read differently
+## Brokerage, retirement and insurance accounts read differently
 
-**A brokerage register in Cyclone is much shorter than the one the statement
-prints, and that is deliberate.** A statement showing fifty lines may produce
-five here.
+Four account types are read this way: **brokerage**, **retirement**, **life
+insurance** and **annuity**.
+
+**The register Cyclone builds is much shorter than the one the statement prints,
+and that is deliberate.** A statement showing fifty lines may produce five here.
 
 Buying, selling, redeeming, maturing, exchanging, reinvesting and splitting all
 move value between cash and securities **inside one account**. An $8,500 stock
@@ -111,8 +113,31 @@ the account threw off:
 
 **The statement says how many lines it skipped.** A row reading
 *"41 securities transaction(s) were present and deliberately not extracted"*
-([Chapter 5](05-import-problems.md#brokerage-and-retirement-statements)) is what
-tells you the short register was a decision rather than a failed import.
+([Chapter 5](05-import-problems.md#brokerage-retirement-life-insurance-and-annuity-statements))
+is what tells you the short register was a decision rather than a failed import.
+It appears only when something really was skipped, so a policy that trades
+nothing does not carry it.
+
+### A policy or annuity has no transaction register
+
+A cash-value life-insurance policy prints no list of transactions anywhere. Its
+**"value of your policy"** block is the only place it says what moved, so that
+block *is* the activity, and those are the lines you will see: premiums paid in,
+cost-of-insurance and administrative deductions taken out, and the investment
+results for the period.
+
+Two consequences follow, and both are normal:
+
+- **Those figures are period totals and carry no dates**, because the statement
+  never printed any. The statement says so in grey
+  ([Chapter 5](05-import-problems.md#dates-and-individual-lines)) rather than
+  asking you to date them. **A date-range search or exhibit will not include
+  them** — that is the part worth remembering.
+- **A handful of lines is the whole statement**, not a short read.
+
+> **Read the leaf lines, never the subtotal.** Where a statement prints *"Total
+> change in value"* over the two lines that make it up, only the two lines are
+> imported. The subtotal would count the same money twice.
 
 ### Two things that surprise people
 
@@ -121,8 +146,14 @@ securities, taken from the portfolio summary. The cash or sweep balance cannot
 be used here, because the purchases that turned cash into securities are
 deliberately missing from the register — so nothing would tie.
 
+On a policy that means **the total policy value**, which is not the same figure
+as the cash value and is never the death benefit — those two must never be added
+together, and only the cash value is divisible property.
+
 **Change in market value is copied off the statement and never calculated.**
-Working it out by subtraction would make *every* brokerage statement balance
+Insurers print it under their own names — *"Investment results"*, *"Fixed and
+variable account results"*, *"Change in value"* — and any of those is read as
+this line. Working it out by subtraction would make *every* such statement balance
 perfectly, which sounds desirable and is the opposite: a $50,000 wire nobody
 extracted would be silently absorbed into "market change" and the statement
 would be stamped reconciled. Where the statement prints no such figure, the line
@@ -175,6 +206,46 @@ one misread figure. When you change an amount:
 
 Which statement a line belongs to, and which account, are not editable.
 Changing those is a re-import, not an edit.
+
+---
+
+## Adding a line the import missed
+
+A line that is printed on the statement but absent from the import leaves the
+balance permanently short. **Add it by hand**, from the statement's transaction
+list:
+
+1. Open the statement.
+2. Click **Add a line**.
+3. Type the amount. Sign it the way the statement prints it — negative for money
+   out, positive for money in.
+4. Type the date, the description, and anything else the page shows: the
+   counterparty, the check number, the page number, the Bates number.
+5. Type your reason for the addition.
+6. Click **Save**.
+
+Cyclone re-checks the balance at once, so a line that was missing takes the
+statement back into balance as soon as you save it.
+
+**The new line carries a `MANUAL_ENTRY` flag with your name, the time, and your
+reason.** That is the point of the feature rather than a side effect of it:
+every exhibit carries a notice promising the underlying records are available
+for examination, and a figure nobody can find on the production is exactly what
+that promise must not cover in silence.
+
+> **Use it only for a line that is printed on the document.** Nothing can check
+> that, which is why the record names a person rather than merely noting an
+> edit.
+>
+> The date may be left empty. A policy statement's figures are period totals and
+> never had dates ([above](#a-policy-or-annuity-has-no-transaction-register)) —
+> but an **empty** date is the only acceptable blank. Never guess a month: an
+> undated line is excluded from date-filtered searches, which is recoverable,
+> and a wrongly dated one is not.
+
+**What this replaces is a row typed straight into the database** — entered at
+zero, then corrected through the app until the arithmetic closed. That works,
+and it leaves nothing on the page a reader can see.
 
 ---
 

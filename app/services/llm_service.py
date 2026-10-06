@@ -21,10 +21,12 @@ Which models serve a task is therefore a config edit
 (``app/config/llm_profiles.json``), never a code change.
 """
 import re
+import time
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
 
+from services import llm_usage
 from util.llm_profiles import LLMCandidate, LLMProfile, LLMUnavailableError, llm_profiles
 from util.loggerfactory import LoggerFactory
 from util.settings import settings
@@ -356,6 +358,24 @@ class LLMService:
                 profile_name, position, candidate.vendor, candidate.model,
                 _MAX_LOG_CHARS, user_message,
             )
+            # EVERY ATTEMPT IS RECORDED, including the ones that fail over. A
+            # call that timed out after the vendor started generating, or whose
+            # reply came back empty, is billed all the same, and a ledger of
+            # successes only would understate spend exactly when the chain is
+            # misbehaving. Recording itself never raises (llm_usage).
+            llm_usage.begin_attempt()
+            started_at = llm_usage.now()
+            clock = time.monotonic()
+
+            def _record(succeeded: bool, error: Optional[BaseException] = None) -> None:
+                llm_usage.record_attempt(
+                    profile=profile_name, call_type=call_type,
+                    vendor=candidate.vendor, model=candidate.model,
+                    chain_position=position, succeeded=succeeded, error=error,
+                    started_at=started_at,
+                    duration_ms=int((time.monotonic() - clock) * 1000),
+                )
+
             try:
                 if is_vision:
                     response = handler(profile, candidate, system_prompt, user_message, image_base64, image_media_type)
@@ -365,12 +385,15 @@ class LLMService:
                     raise LLMUnavailableError("empty response")
             except Exception as e:  # noqa: BLE001 — any failure means: try the next candidate
                 last_error = e
+                _record(False, e)
                 LOGGER.warning(
                     "LLMService: profile=%s position=%d vendor=%s model=%s failed (%s: %s) — failing over",
                     profile_name, position, candidate.vendor, candidate.model,
                     type(e).__name__, str(e),
                 )
                 continue
+
+            _record(True)
 
             if position > 1:
                 LOGGER.info(
@@ -427,6 +450,7 @@ class LLMService:
             params["temperature"] = _temperature(profile, candidate) or 0.0
 
         response = client.messages.create(**params)  # type: ignore[arg-type]
+        llm_usage.note_response("anthropic", response)
         return _anthropic_text(response)
 
     def _call_gemini(self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str) -> str:
@@ -459,6 +483,7 @@ class LLMService:
                 top_p=_top_p(profile, candidate),
             ),
         )
+        llm_usage.note_response("gemini", response)
         return response.text  # type: ignore[attr-defined]
 
     def _call_openai(self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str) -> str:
@@ -495,6 +520,7 @@ class LLMService:
                 {"role": "user", "content": user_message},
             ],
         )
+        llm_usage.note_response("openai", response)
         return response.choices[0].message.content or ""
 
     def _call_groq(self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str) -> str:
@@ -528,6 +554,7 @@ class LLMService:
                 {"role": "user", "content": user_message},
             ],
         )
+        llm_usage.note_response("groq", response)
         return response.choices[0].message.content or ""
 
     def _call_deepseek(self, profile: LLMProfile, candidate: LLMCandidate, system_prompt: str, user_message: str) -> str:
@@ -561,6 +588,7 @@ class LLMService:
                 {"role": "user", "content": user_message},
             ],
         )
+        llm_usage.note_response("deepseek", response)
         return response.choices[0].message.content or ""
 
     # ── Vision implementations ────────────────────────────────────────────
@@ -587,6 +615,7 @@ class LLMService:
                 temperature=_temperature(profile, candidate),
             ),
         )
+        llm_usage.note_response("gemini", response)
         return response.text  # type: ignore[attr-defined]
 
     def _call_anthropic_vision(
@@ -617,6 +646,7 @@ class LLMService:
                 ],
             }],
         )
+        llm_usage.note_response("anthropic", response)
         return _anthropic_text(response)
 
     def _call_openai_vision(
@@ -641,6 +671,7 @@ class LLMService:
                 ]},
             ],
         )
+        llm_usage.note_response("openai", response)
         return response.choices[0].message.content or ""
 
 

@@ -26,6 +26,13 @@ check would then confirm an agreement that does not exist.
 
 Edit that one line per release.
 
+**It refuses to build** when `SUPABASE_URL` or `SUPABASE_ANON_KEY` is missing
+from **this machine's** `.env`. That is not a formality: those two are compiled
+into the JavaScript bundle, and the build machine is the only place they are
+read. Without them compose substitutes an empty string, the build succeeds, and
+the deployed app is a blank white page on every route
+([Chapter 1](01-configuration.md#where-each-value-has-to-live)).
+
 ## Roll out
 
 On each node: update the `image:` tags in `docker-compose.yml`, then
@@ -38,6 +45,10 @@ docker compose -f docker-compose.yml up -d
 `docker-compose.override.yml` when it is present, and the override is the
 **development** configuration.
 
+**Rebuild and redeploy api, worker and frontend together** unless you are
+certain a change touches only one. The usage ledger is written by the api *and*
+the worker, and every new screen is frontend code.
+
 Then prove it landed:
 
 ```sh
@@ -45,6 +56,11 @@ scripts/check-fleet.sh https://cyclone.jdbot.us
 ```
 
 Exit 3 (build skew) is normal *during* the rollout and a problem after it.
+
+**Then open the app in a browser.** A frontend built without its build args
+passes every check a server can make — healthy container, 200 from nginx, clean
+fleet hash — and is a blank page to every user. Nothing but a browser will tell
+you.
 
 ---
 
@@ -68,7 +84,31 @@ this project.
 by hand, and **release notes must name the migration files** so they can be
 applied before the containers come up.
 
-This release: **`036_value_platforms.sql`** and **`037_brokerage_cash_flow.sql`**.
+**This release: `038` through `043`, in order.** All six are safe to run before
+the deploy, and that is the right order — a migration run late costs data that
+was never recorded.
+
+| File | What it does | Run it late and… |
+| ---- | ------------ | ---------------- |
+| `038_insurance_accounts.sql` | Adds `life_insurance` and `annuity` as account types | Choosing either is refused with a sentence naming the constraint (§[5](05-startup-log.md)) |
+| `039_cost_tracking.sql` | The `firms` row and the `llm_calls` usage ledger | **Spend before it is gone.** Recording also switches itself off for the life of each process that started without the table, so run it, then restart api and worker |
+| `040_enable_rls.sql` | Row-Level Security on every table lacking it; views closed to the public key | See [below](#row-level-security-on-every-new-table-and-view) |
+| `041_service_rates.sql` | The price table, pricing views and report function | The Costs page has no prices to show |
+| `042_served_model.sql` | Records which model actually answered, and prices on that | Rows written meanwhile are priced on the *requested* model, permanently |
+| `043_cost_report_by_firm.sql` | Adds **Firm** to the Costs page's groupings | That grouping is missing |
+
+Two things about this set that are not in the files:
+
+- **⚠ Re-running `041` after `042` fails, deliberately.** It runs in one
+  transaction, so nothing changes. The failure exists to stop `041` quietly
+  switching pricing back to the model that was *requested* rather than the one
+  that answered. If `041` ever has to be re-applied, run `042` again right after.
+- **Rename the firm once, by hand.** `039` seeds `'Default firm'` because a
+  migration cannot read `FIRM_NAME`:
+
+  ```sql
+  update firms set name = '<firm name>' where id = 1;
+  ```
 
 ### 3. Anything compiled into the frontend needs a rebuild, not a restart
 
@@ -77,9 +117,47 @@ baked into the JavaScript bundle. Changing one means rebuilding and redeploying
 the frontend image — restarting a container does nothing at all.
 
 It is also the failure that hides best: compose substitutes an empty string for
-a missing variable, the build succeeds with a warning nobody reads, and the
-first symptom is a user who cannot log in. See
+a missing variable, the build succeeds with a warning nobody reads, and **every
+route serves a blank white page** — there is no login screen to fail at. See
 [Chapter 1](01-configuration.md#where-each-value-has-to-live).
+
+---
+
+## Row-Level Security on every new table and view
+
+**Supabase grants the public `anon` key access to a new table by default, and
+that key is compiled into the frontend bundle.** Anything it can read is
+readable by anyone who opens the app. A **view** is worse: it runs with its
+owner's privileges, so it reads *through* RLS even on tables that are protected.
+On this deployment the tables turned out to be covered — switched on in the
+dashboard, never recorded in a migration — and **two views were the real
+exposure**.
+
+`040` closes both, finding tables and views from the database catalog so it also
+covers anything created by hand. It adds no policies, which is safe: the backend
+uses the service role and bypasses RLS, and the frontend never queries tables.
+
+**The standing rule, for every migration from here on:**
+
+- enable RLS on every new **table**;
+- create every new **view** with `security_invoker = on`;
+- `revoke execute … from public, anon, authenticated` on every new **function**.
+
+`tests/test_migration_rls.py` enforces it for anything numbered after 040.
+
+**Check it**, in the Supabase SQL editor:
+
+```sql
+select c.relname, c.relkind, c.relrowsecurity,
+       has_table_privilege('anon', c.oid, 'SELECT') as anon_can_select
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public' and c.relkind in ('r', 'v')
+ order by anon_can_select desc, c.relname;
+```
+
+Every **view** should report `anon_can_select = false`. A view always reports
+`relrowsecurity = false` — that column means nothing for a view, so read the
+privilege column instead. **Fix by running `040`**, which is idempotent.
 
 ---
 

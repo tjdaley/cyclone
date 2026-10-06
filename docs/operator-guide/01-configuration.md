@@ -123,15 +123,26 @@ is solved twice over without a file anybody hand-copies:
 
 ### Must stay in `.env` — SSM cannot supply it
 
-| | Why |
-| - | --- |
-| `ID` | Genuinely per-node. It is how a report traces back to a machine |
-| `CYCLONE_SECRETS_SOURCE` | Chicken and egg — it is the switch that turns the loader on |
-| `SUPABASE_URL` | **compose build arg** |
-| `SUPABASE_ANON_KEY` | **compose build arg** |
-| `API_BASE_URL` | **compose build arg** |
+**The division is build time against runtime, not one node against another**,
+and saying only "keep it in `.env`" is what invited the outage below.
 
-**The last three are the trap.** `docker-compose.yml` substitutes them on the
+| | In `.env` on | Why |
+| - | ------------ | --- |
+| `ID` | **every node** | Genuinely per-node. It is how a report traces back to a machine |
+| `CYCLONE_SECRETS_SOURCE` | **every node** | Chicken and egg — it is the switch that turns the loader on |
+| `AWS_REGION` | **every node**, optional where instance metadata answers | Bootstrap, before any SSM call can be made |
+| `SUPABASE_URL` | **the machine that runs `docker compose build`** | compose build arg |
+| `SUPABASE_ANON_KEY` | **the machine that runs `docker compose build`** | compose build arg |
+| `API_BASE_URL` | **nowhere** | compose gives it a `:-` default |
+
+So a production node's `.env` legitimately holds `ID`,
+`CYCLONE_SECRETS_SOURCE`, `AWS_REGION` and optionally `CYCLONE_ENV` — nothing
+else. `SUPABASE_URL`, `REDIS_URL` and `HOST_URL` can all come from SSM, because
+the API reads them at runtime inside the container. Keeping the two build args
+in a node's `.env` anyway is cheap insurance against somebody one day building
+on a server.
+
+**The build args are the trap.** `docker-compose.yml` substitutes them on the
 host, before any container exists, to build the frontend bundle:
 
 ```yaml
@@ -141,14 +152,40 @@ VITE_API_BASE_URL: ${API_BASE_URL:-}
 ```
 
 The secret loader runs *inside* the container and cannot possibly supply them.
-Move `SUPABASE_ANON_KEY` to SSM only, and compose substitutes an **empty
-string**: one "variable is not set" warning in a build log, exit code 0, an
-image built with no anon key, and a failure that first appears **in a browser at
-login**. Nothing in the API log. Nothing on the fleet hash. Container healthy.
+Compose substitutes an **empty string** for a name it cannot find, prints one
+"variable is not set" line, and exits 0.
 
-A guard now refuses to start if a compose-only value arrives from SSM — but it
-can only fire if somebody created that parameter by hand, because the seeding
-script will not create one. **Know the rule, not just the guard.**
+#### What that actually looks like, because it shipped
+
+`SUPABASE_URL` was removed from the **build machine's** `.env` during the SSM
+migration — correct as far as the API was concerned, which reads it at runtime
+and stayed healthy throughout.
+
+- The next build compiled an empty string into the bundle.
+- **Every route served a blank white page.** `createClient("")` throws
+  `supabaseUrl is required.` at module scope, before React mounts — so there is
+  no login screen to fail at, which is what earlier versions of this chapter
+  said.
+- The build exited 0. The container was healthy. nginx answered `GET / → 304`.
+  The fleet hash was clean.
+- **No server log anywhere carried a line about it**, because the app died
+  before making its first request.
+- The only evidence was four words in the **browser console**.
+
+> **Troubleshooting: a blank white page after a deploy.** Open the browser
+> console. `supabaseUrl is required` means the build machine's `.env` was
+> missing a build arg. Fix it there, **rebuild**, and redeploy the frontend
+> image. Restarting a container does nothing — the empty string is compiled in.
+
+**Three guards now exist, and they are backstops for the rule, not the rule:**
+
+1. **`deploy-version.bat` refuses to build** without both names. This is the
+   only moment the problem can be caught, because it is created at build time
+   and every later check passes.
+2. **The runtime guard keys on the names compose interpolates**, not on a
+   bucket. It used to key on `COMPOSE_ONLY`, and `SUPABASE_URL` is
+   `INFRASTRUCTURE` — that is exactly the size of the hole this fell through.
+3. **A test fails** if that list stops matching `docker-compose.yml`.
 
 > `SUPABASE_SERVICE_ROLE_KEY` is perfectly fine in SSM. Only its `ANON` sibling
 > is a build arg. This is easy to get backwards.
@@ -158,8 +195,6 @@ script will not create one. **Know the rule, not just the guard.**
 - **`CYCLONE_ENV`** — the fallback that names the environment. See
   [Chapter 2](02-secrets.md#which-environment-a-node-is-in). It costs nothing and
   prevents an outage.
-- **`AWS_REGION`** — optional wherever instance metadata is reachable, but far
-  cheaper to state than to debug.
 
 ### Belongs in SSM
 

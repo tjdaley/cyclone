@@ -109,6 +109,20 @@
           "number": "13",
           "title": "Assigning staff to a matter",
           "summary": "What assignment does \u2014 and what it does not"
+        },
+        {
+          "slug": "14-lead-routing",
+          "file": "14-lead-routing.md",
+          "number": "14",
+          "title": "Where leads go",
+          "summary": "How a lead reaches an attorney, who gets notified, and what to check when nobody was"
+        },
+        {
+          "slug": "15-costs",
+          "file": "15-costs.md",
+          "number": "15",
+          "title": "AI costs and prices",
+          "summary": "What the AI work costs, who it was spent on, and how a vendor's price gets entered"
         }
       ]
     }

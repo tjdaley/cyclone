@@ -6,11 +6,13 @@ Configures middleware, mounts routers, and performs startup validation.
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from postgrest.exceptions import APIError
 
 from middleware.auth_middleware import AuthMiddleware
-from routers import admin, attorney_lead_responder, auth_flow, billing, category_rules, clients, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
+from routers import admin, attorney_lead_responder, auth_flow, billing, category_rules, clients, costs, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 from util.config_fingerprint import log_startup_summary
@@ -51,6 +53,76 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown logic (connection pool cleanup, etc.) goes here if needed.
 
 
+#: Postgres SQLSTATEs that mean "the value you sent is not allowed", not "the
+#: server broke". Each becomes a 4xx with a sentence somebody can act on.
+_DB_REJECTIONS = {
+    # check_violation — a CHECK constraint refused the value. The overwhelmingly
+    # common cause in this project is a migration that has not been run: the
+    # code gained an enum member and the database's CHECK still lists the old
+    # set. `schema_check` cannot see this (it compares COLUMNS only, by its own
+    # documentation), so nothing reports it until somebody uses the new value.
+    "23514": (422, "check"),
+    # unique_violation
+    "23505": (409, "unique"),
+    # exclusion_violation -- two prices for one meter covering the same instant
+    # (service_rates), or set_service_rate refusing a date before a later price.
+    # The message is the database's own sentence and names no client data.
+    "23P01": (409, "exclusion"),
+    # foreign_key_violation
+    "23503": (409, "foreign key"),
+    # not_null_violation
+    "23502": (422, "missing required value"),
+}
+
+
+async def _db_rejection_handler(request: Request, exc: APIError) -> JSONResponse:
+    """
+    Turn a constraint violation into an answer instead of a 500 and a traceback.
+
+    **THE PRIMARY REASON IS PII, NOT TIDINESS.** PostgREST returns the offending
+    row in ``details``:
+
+        Failing row contains (1, 1, RiverSource Life Insurance Company,
+        life_insurance, 0004, 0909 0823 2663 0 004, GABRIEL M SALMONS, ...)
+
+    A client name and a full account number. Unhandled, FastAPI prints that whole
+    traceback to the application log, which §6 forbids outright — and it does it
+    for a constraint violation on ANY table, so the worst case is a row of a
+    financial register. The row is never logged here and never returned.
+
+    The SECOND reason is that a check violation is not a server fault. The value
+    was refused, which is a 422, and the only fact worth passing on is the
+    CONSTRAINT NAME: it names the table and column, it is not client data, and it
+    is what turns "Internal Server Error" into "run migration 038".
+
+    Anything not in `_DB_REJECTIONS` is re-raised untouched — a genuine database
+    failure must keep looking like one.
+    """
+    code = str((exc.code or "")).strip()
+    if code not in _DB_REJECTIONS:
+        raise exc
+
+    status, kind = _DB_REJECTIONS[code]
+    # The message names the constraint; `details` holds the row. Take the first,
+    # never the second.
+    constraint = (exc.message or "").strip() or "a database constraint"
+    LOGGER.error(
+        "Database rejected a write: %s constraint, sqlstate=%s, path=%s. "
+        "The offending row is deliberately not logged (it is client data).",
+        kind, code, request.url.path,
+    )
+
+    detail = constraint
+    if code == "23514":
+        detail += (
+            " — the database refused this value. If the application was just "
+            "updated to offer a new option here, the matching migration has not "
+            "been run on this database yet; migrations are applied by hand, in "
+            "numeric order."
+        )
+    return JSONResponse(status_code=status, content={"detail": detail})
+
+
 def create_app() -> FastAPI:
     """
     Construct and configure the FastAPI application.
@@ -85,6 +157,10 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(AuthMiddleware)
 
+    # A constraint violation is the caller's problem, not a server fault, and
+    # its `details` carries the offending row. See _db_rejection_handler.
+    app.add_exception_handler(APIError, _db_rejection_handler)
+
     # ── Routers ─────────────────────────────────────────────────────────────
     app.include_router(health.router)       # /api/health, /api/config (no auth)
     app.include_router(auth_flow.router)    # /api/v1/auth/me, /api/v1/auth/correlate-staff
@@ -103,6 +179,7 @@ def create_app() -> FastAPI:
     app.include_router(attorney_lead_responder.router)  # /api/v1/attorney-lead-responders
     app.include_router(kb.router)           # /api/v1/kb-articles
     app.include_router(admin.router)        # /api/v1/admin
+    app.include_router(costs.router)        # /api/v1/costs — prices and spend (admin)
 
     return app
 

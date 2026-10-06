@@ -44,6 +44,7 @@ There are two places to do it. They write the same thing.
    | **Description contains** | `pilot point`, `wedding`, `transfer`… |
    | **Check #** | An exact check number |
    | **From** / **To** | A date window |
+   | **Amount at least** / **Amount at most** | A money range. Read [the sign rule](#finding-large-transactions) before you use it |
    | **Category** | Including **Uncategorized**, and a tick box for whether subcategories are included |
    | **Accounts** | Click account chips to include them |
    | **Tags** | Click tag chips; **Untagged**, **Checks only**, and **Show removed** are chips too |
@@ -53,6 +54,39 @@ There are two places to do it. They write the same thing.
 4. In the blue bar that appears, choose **File under…** and pick a category.
 
 **— clear category —** in the same dropdown removes a category.
+
+### Finding large transactions
+
+To list every movement of $10,000 or more:
+
+1. Go to **Financials** → **Transactions**.
+2. Type `10000` in **Amount at least**.
+3. Leave **Amount at most** empty.
+
+**Both boxes take a magnitude, and a sign selects the side:**
+
+| You type | You get |
+| -------- | ------- |
+| `10000` | Money out **and** money in, $10,000 or more |
+| `-10000` | Money out only, $10,000 or more |
+| `+10000` | Money in only, $10,000 or more |
+| `-500` to `-1000` | Money out, between $500 and $1,000 |
+
+Type the smaller magnitude in **Amount at least**. That order holds for signed
+and unsigned searches alike.
+
+**Cyclone refuses a range that mixes `-` and `+`**, and says so under the boxes.
+Leave both signs off to search across zero.
+
+> **An unsigned search finds the other half of a pair, which is usually the
+> point.** A $5,000 transfer out of one produced account and the $5,000 arriving
+> in another are one movement of money, and an exhibit about it needs both
+> lines. The hint under the boxes is permanent because no label can carry that.
+>
+> Remember which way the signs run: amounts are signed by **how they moved the
+> balance the bank printed** ([Chapter 7](07-viewing-statements.md#the-transaction-list)).
+> On a credit card, money out is a **payment**. The FIS flips that for household
+> spending; this filter does not, because it answers a different question.
 
 ### From the FIS panel — for reviewing and correcting
 
@@ -210,8 +244,9 @@ and it is why interaccount transfers appear under **Excluded**.
 
 ## Investment activity, and where it lands on the FIS
 
-Brokerage and retirement statements contribute far fewer lines than they print
-([Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently)),
+Brokerage, retirement, life-insurance and annuity statements contribute far
+fewer lines than they print
+([Chapter 7](07-viewing-statements.md#brokerage-retirement-and-insurance-accounts-read-differently)),
 and the lines they do contribute are filed by keyword rule as they arrive:
 
 | Category | Sits under | On the FIS? |

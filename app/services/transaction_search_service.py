@@ -34,6 +34,7 @@ from db.repositories.financial import (
 )
 from db_handler import DatabaseManager
 from services.exhibit_service import Column, Exhibit, caption_lines, money
+from util import amount_filter
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
@@ -107,6 +108,8 @@ class TransactionSearchService:
         text: Optional[str] = None,
         check_number: Optional[str] = None,
         checks_only: bool = False,
+        amount_min: Optional[str] = None,
+        amount_max: Optional[str] = None,
         include_deleted: bool = False,
         limit: int = 200,
         offset: int = 0,
@@ -133,6 +136,13 @@ class TransactionSearchService:
         :param checks_only: Every check on the account and nothing else — the
             starting point for asking where money went that the statement does
             not describe.
+        :param amount_min: Smallest amount, **as typed**. A plain figure
+            searches by magnitude and matches both directions, which is what
+            finds an offsetting pair; a leading ``-`` restricts to money out and
+            ``+`` to money in. Kept as a string precisely because the sign is
+            the user's instruction and not part of the number
+            (``util.amount_filter``).
+        :param amount_max: Largest amount, as typed. Same rules.
         :param include_deleted: Show lines somebody dropped from a statement.
             Off by default, so a dropped line cannot reach an exhibit through an
             oversight; on, it is how they are found again to restore.
@@ -196,6 +206,11 @@ class TransactionSearchService:
             text=text,
             check_number=check_number,
             checks_only=checks_only,
+            # Raises ValueError on an unreadable figure, which the router
+            # answers as a 422. A filter that silently ignored a typo would
+            # return a result set that looks authoritative and answers a
+            # different question.
+            amount_range=amount_filter.resolve(amount_min, amount_max),
             include_deleted=include_deleted,
             limit=min(limit, MAX_PAGE_SIZE),
             offset=offset,
@@ -465,6 +480,15 @@ class TransactionSearchService:
                 "%s (%s)" % (", ".join(names.get(i, "#%d" % i) for i in filters["tag_ids"]),
                              "all" if filters.get("tag_match_all") else "any"),
             ))
+
+        # Stated in words, because a reader who did not run the query cannot
+        # otherwise tell a both-directions search from a one-sided one — and
+        # two exhibits drawn from the same matter would look contradictory.
+        amounts = amount_filter.describe(
+            amount_filter.resolve(filters.get("amount_min"), filters.get("amount_max"))
+        )
+        if amounts:
+            described.append(("Amount", amounts))
 
         if filters.get("text"):
             described.append(("Description contains", filters["text"]))

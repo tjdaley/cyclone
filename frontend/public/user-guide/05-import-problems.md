@@ -93,6 +93,21 @@ truncated pass.
 > deleted** — Cyclone checks it can get the file back before destroying
 > anything.
 
+**What you will see while it runs:**
+
+| | |
+| - | - |
+| The row you clicked | Its Accept / Retry / Reject links are replaced by a spinner and **"Re-reading this document · 12s"** |
+| Every other row in the queue | Its links **fade and lose their underline**. Hovering one explains why: the rows from that upload are being discarded and recreated, so acting on one now would act on a row that is about to be replaced |
+| The upload area | Says **"Re-reading the document…"** with the timer, and **refuses new files** until the re-read finishes |
+
+**You can leave the page.** The re-read runs in the background like any other
+import, and the result is waiting when you come back.
+
+> **The faded links used to look live and do nothing**, which is why this is
+> worth a paragraph: people clicked Retry down the list and nothing happened,
+> so they clicked again. A control that is unavailable now says so.
+
 ### Reject and delete
 
 Deletes the statement and its transactions permanently. If that leaves the
@@ -202,19 +217,29 @@ Every flag you can meet, what it means, and what to do about it.
 | Flag | What it means | What to do |
 | ---- | ------------- | ---------- |
 | **INCOMPLETE_EXTRACTION** | The statement prints its own totals ("262 Checks/Debits 195,600.04") and the extraction falls short of them. This is the strongest signal that a read stopped early, and it usually accompanies **UNRECONCILED**. On a **brokerage or retirement** statement the comparison is against the statement's own change-in-value block instead — if it prints withdrawals of $51,000 and only $1,000 was found, that is caught even when the arithmetic ties. | If the source PDF is long or holds several statements, **reject, split it into one statement per file, and re-import** — retrying the same big file will lose its place the same way. On a PDF that is already a single statement, **Retry** once. Never accept. |
+| **PAGES_NOT_INDEXED** | Named pages of the source document begin a statement nobody read, or belong to no statement that was read. Anything printed there **is not in this record** — and where such a page falls inside another statement's page range, its lines may have been filed against *that* statement instead. | **Reject the upload and split the PDF**, one statement per file, then import again. Check the named pages first: this almost always means the document holds more statements than were found. The flag appears on **every** statement from that upload, because the defect belongs to the document rather than to one statement. |
 | **PASS_UNREADABLE** | Named pages were read but the answer could not be understood, twice. Transactions printed there are missing, and the balances will be short by that amount. | **Retry.** If it fails the same way again, those pages need reading and entering by hand. |
 | **PAGE_UNREADABLE** | Named pages could not be read at all — neither the text layer nor OCR. | Look at those pages in the source. Usually a bad scan. Get a better copy if you can; otherwise re-scan, or enter those pages by hand. |
 | **NO_TRANSACTIONS** | No transactions were found at all. | Almost always a page that is not a transaction register — a cover page, a disclosure, a summary. Look at the source, then reject if that is what it is. |
 
-### Brokerage and retirement statements
+### Brokerage, retirement, life insurance and annuity statements
 
-Both of these are grey. Neither means anything went wrong, and both exist so
+All of these are grey. Neither means anything went wrong, and both exist so
 that a register which *looks* wrong can be told from one that is.
 
 | Flag | What it means | What to do |
 | ---- | ------------- | ---------- |
-| **SECURITIES_NOT_EXTRACTED** *(grey)* | Buying, selling and redeeming are deliberately not recorded — they move value between cash and securities inside one account without changing what it is worth. The flag names how many lines were skipped. | Nothing. It is here because a brokerage register showing four lines where the statement shows fifty is indistinguishable from a failed import, and this is what says the silence was a decision. See [Chapter 7](07-viewing-statements.md#brokerage-and-retirement-accounts-read-differently). |
-| **MARKET_CHANGE_NOT_PRINTED** *(grey)* | The statement printed no change-in-market-value figure, so there is no line for it and **the balances will not tie**. | Expect an **UNRECONCILED** flag alongside it, and treat this as the explanation rather than a second problem. The figure is never computed here: one derived by subtraction would make every statement balance and would swallow a withdrawal nobody extracted. If the statement does print such a figure, look at the source — it was missed, and a **Retry** is worth one attempt. |
+| **SECURITIES_NOT_EXTRACTED** *(grey)* | Buying, selling and redeeming are deliberately not recorded — they move value between cash and securities inside one account without changing what it is worth. The flag names how many lines were skipped. | Nothing. It is here because a register showing four lines where the statement shows fifty is indistinguishable from a failed import, and this is what says the silence was a decision. See [Chapter 7](07-viewing-statements.md#brokerage-retirement-and-insurance-accounts-read-differently). |
+| **MARKET_CHANGE_NOT_PRINTED** *(grey)* | The statement printed no change-in-market-value figure, so there is no line for it and **the balances did not tie**. | Expect an **UNRECONCILED** flag alongside it, and treat this as the explanation rather than a second problem. The figure is never computed here: one derived by subtraction would make every statement balance and would swallow a withdrawal nobody extracted. If the statement does print such a figure, look at the source — it was missed, and a **Retry** is worth one attempt. Insurers rarely call it "change in market value": look for **"Investment results"**, **"Fixed and variable account results"**, or **"Change in value"**. |
+
+> **Both of these now appear only when they are true of the statement in front
+> of you.** `SECURITIES_NOT_EXTRACTED` used to appear on every statement of
+> these types, including a policy that holds no investments and trades nothing;
+> `MARKET_CHANGE_NOT_PRINTED` used to announce that the balances would not tie
+> on statements that had just tied to the cent. A flag that contradicts its own
+> row teaches you that none of them mean anything, which is the one thing the
+> flag reference cannot afford. **A statement imported before this release keeps
+> the flags it was given** — see [below](#a-statement-imported-before-this-release-keeps-its-old-flags).
 
 ### One statement may have been read as two
 
@@ -246,7 +271,8 @@ that a register which *looks* wrong can be told from one that is.
 
 | Flag | What it means | What to do |
 | ---- | ------------- | ---------- |
-| **UNDATED_TRANSACTIONS** | Some lines have no date even after the date column was re-read. They count toward the statement's balance but **are excluded from every date-filtered search** — so an exhibit built by date range will not contain them. | Open the source and date them by hand ([Chapter 7](07-viewing-statements.md)). Do not leave these: they are invisible in exactly the place they matter most. |
+| **UNDATED_TRANSACTIONS** | **Some** lines have no date even after the date column was re-read. They count toward the statement's balance but **are excluded from every date-filtered search** — so an exhibit built by date range will not contain them. | Open the source and date them by hand ([Chapter 7](07-viewing-statements.md)). Do not leave these: they are invisible in exactly the place they matter most. |
+| **UNDATED_TRANSACTIONS** *(grey)* | **Every** figure on a brokerage, retirement, life-insurance or annuity statement has no date. That is a different fact: this kind of statement has no transaction register at all, and the figures are period totals its value summary prints without dates. They count toward the balance and are bounded by the statement period. | **Nothing to do** — the dates are not on the page to copy. The consequence still holds, and is the reason this is said at all: **a date-range search or exhibit will not include them.** |
 | **LINE_WARNINGS** | Some transaction lines carry warnings of their own. | Open the statement's transactions and look at the flags on individual lines (below). |
 | **DUPLICATE_CHECK_ROWS** *(grey)* | Checks appeared both in the debit list and again in the checks summary table; the repeats were dropped. | Informational — this is Cyclone preventing a double count. |
 
@@ -264,7 +290,63 @@ statement.
 | **LOCATION_INFERRED** | A city or state was split off the description. |
 | **DESCRIPTION_TRUNCATED** | The description ran off the page. |
 | **MANUAL_CORRECTION** | Somebody edited this line. The field, both values, who, and when are all recorded. |
+| **MANUAL_ENTRY** | Somebody added this line by hand, because the import missed it. Their name, the time, and their reason are recorded. See [Chapter 7](07-viewing-statements.md#adding-a-line-the-import-missed). |
 | **MANUAL_DELETION** / **MANUAL_RESTORE** | Somebody removed or restored this line. |
+
+---
+
+## "The database refused this value"
+
+Occasionally a save is refused with a sentence naming a database constraint,
+followed by:
+
+> *…the database refused this value. If the application was just updated to
+> offer a new option here, the matching migration has not been run on this
+> database yet; migrations are applied by hand, in numeric order.*
+
+**Tell your administrator, and quote that sentence.** It is almost always what
+it says: the screen is offering a choice this database has not been taught to
+accept yet. The first time anyone saw it was choosing **Life insurance** as an
+account type before the update that adds it had been applied.
+
+- **Nothing you entered was saved**, and **nothing is wrong with the matter** or
+  the statement. The save simply did not happen.
+- **Do not work around it** by choosing a different value that does save — an
+  account typed wrongly to get past an error is worse than one that is not typed
+  at all.
+- A **duplicate** or conflicting entry answers the same way, with its own
+  sentence. There the fix is usually yours rather than the administrator's:
+  something equivalent already exists.
+
+> Before this release these came back as **"Internal Server Error"**, which said
+> nothing and sent people looking in the wrong place.
+
+---
+
+## A statement imported before this release keeps its old flags
+
+**Flags are written once, at import, and are never recomputed.** A cash-value
+life-insurance policy or an annuity imported before this release may therefore
+still show:
+
+- flags that were false even then — *"securities were not extracted"* on a
+  policy that trades nothing, or *"the balances will not tie"* on one that tied;
+- **no transactions at all**, because the value summary was not read as activity
+  until now;
+- an account typed as **Other**, because Life insurance and Annuity did not
+  exist as choices.
+
+Nothing is wrong with the underlying document, and nothing needs deleting. To
+bring one up to date:
+
+1. On the **Accounts** tab, set the account type to **Life insurance** or
+   **Annuity**.
+2. **Retry** the statement, so the document is read again under the new rules.
+3. Check the account type again afterwards — the re-read sets it from the
+   document, and this is the moment to confirm it landed where you put it.
+
+Remember that Retry discards **every** statement from that upload, not just the
+one you clicked.
 
 ---
 

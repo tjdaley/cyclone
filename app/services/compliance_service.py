@@ -47,13 +47,25 @@ LOGGER = LoggerFactory.create_logger(__name__)
 # order is the reading order of a property inventory — what the money sits in,
 # then what is owed, then what is locked away — not alphabetical, which would
 # put Brokerage between an account's two credit cards.
+# EVERY AccountType MUST APPEAR IN BOTH, and a test enforces it. An unlisted
+# type sorts last (harmless) and is LABELLED "Other" (not harmless) -- so it is
+# mislabelled on a document handed to opposing counsel, which is the confident-
+# wrong failure this codebase spends its effort avoiding. `crypto` shipped in
+# 036 and was never added here, so until 038 every crypto account on a
+# compliance exhibit printed under "Other".
+#
+# New types are INSERTED rather than appended, keeping the relative order of the
+# existing ones so an exhibit re-run after this change groups as it did before.
 _TYPE_ORDER = (
     AccountType.checking,
     AccountType.savings,
     AccountType.credit_card,
     AccountType.loan,
     AccountType.brokerage,
+    AccountType.crypto,
     AccountType.retirement,
+    AccountType.life_insurance,
+    AccountType.annuity,
     AccountType.hsa,
     AccountType.other,
 )
@@ -64,7 +76,10 @@ _TYPE_LABEL = {
     AccountType.credit_card: "Credit cards",
     AccountType.loan: "Loans",
     AccountType.brokerage: "Brokerage",
+    AccountType.crypto: "Crypto",
     AccountType.retirement: "Retirement",
+    AccountType.life_insurance: "Life insurance",
+    AccountType.annuity: "Annuities",
     AccountType.hsa: "HSA",
     AccountType.other: "Other",
 }

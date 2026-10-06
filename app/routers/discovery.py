@@ -30,6 +30,7 @@ from schemas.discovery import (
 from services.discovery_service import discovery_service
 from services.pdf_service import pdf_service
 from util.loggerfactory import LoggerFactory
+from util.usage_scope import usage_scope
 
 LOGGER = LoggerFactory.create_logger(__name__)
 
@@ -193,35 +194,38 @@ def upload_discovery(
     if staff is None:
         raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
 
-    # Extract text from PDF
-    pdf_bytes = file.file.read()
-    try:
-        raw_text = pdf_service.extract_text(pdf_bytes)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    if not raw_text.strip():
-        raise HTTPException(status_code=422, detail="No text could be extracted from the PDF")
-
-    # Parse the override date if provided
-    date_override = None
-    if propounded_date:
+    # LLM cost attribution: OCR here and extraction in the service both spend
+    # tokens, so the matter is set around BOTH rather than inside the service.
+    with usage_scope(matter_id=matter_id, staff_id=staff.id):
+        # Extract text from PDF
+        pdf_bytes = file.file.read()
         try:
-            date_override = date.fromisoformat(propounded_date)
-        except ValueError:
-            raise HTTPException(status_code=422, detail="propounded_date must be in YYYY-MM-DD format")
+            raw_text = pdf_service.extract_text(pdf_bytes)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
-    # Run the ingestion pipeline
-    try:
-        doc_record, item_records, warnings = discovery_service.ingest(
-            manager=manager,
-            matter_id=matter_id,
-            staff_id=staff.id,
-            raw_text=raw_text,
-            propounded_date_override=date_override,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+        if not raw_text.strip():
+            raise HTTPException(status_code=422, detail="No text could be extracted from the PDF")
+
+        # Parse the override date if provided
+        date_override = None
+        if propounded_date:
+            try:
+                date_override = date.fromisoformat(propounded_date)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="propounded_date must be in YYYY-MM-DD format")
+
+        # Run the ingestion pipeline
+        try:
+            doc_record, item_records, warnings = discovery_service.ingest(
+                manager=manager,
+                matter_id=matter_id,
+                staff_id=staff.id,
+                raw_text=raw_text,
+                propounded_date_override=date_override,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
     # Store the original PDF
     try:

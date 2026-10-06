@@ -22,6 +22,7 @@ import type {
   TransactionTag, TransactionTagPayload,
   TransactionSearchFilter, TransactionSearchResult, BulkResult,
   AccountMergePreview, AccountMergeResult,
+  TransactionAddPayload,
   TransactionCorrectionPayload, TransactionCorrectionResult,
   StatementReviewResult, StatementRejectResult, AccountDeletePreview,
   UndisclosedReport, ExportFormat, DownloadedFile,
@@ -920,14 +921,23 @@ export async function exportUndisclosedAccounts(
  * it the reader lands on page 1 of sixty and hunts for the month they clicked.
  * The page is where the statement's first TRANSACTION is printed, so it can be
  * a page or two into the statement rather than at its head.
+ *
+ * `page` overrides that hint, and is how a TRANSACTION row opens the document
+ * at its own line rather than at the statement's first. Opening a sixty-page
+ * production at the right statement but the wrong page inside it is most of the
+ * hunt the hint exists to remove.
  */
-export async function openStatementPdf(statementId: number): Promise<void> {
+export async function openStatementPdf(
+  statementId: number,
+  page?: number | null,
+): Promise<void> {
   const tab = window.open('', '_blank')
   try {
-    const { url, page } = await apiFetch<{
+    const { url, page: statementPage } = await apiFetch<{
       url: string; expires_in: number; page: number | null; source_filename: string | null
     }>(`/api/v1/statements/${statementId}/pdf-url`)
-    const target = page ? `${url}#page=${page}` : url
+    const landOn = page ?? statementPage
+    const target = landOn ? `${url}#page=${landOn}` : url
     if (tab) tab.location.href = target
     else window.location.href = target
   } catch (e) {
@@ -1113,6 +1123,25 @@ export async function reviewStatement(
  * entry per changed field, so posting a whole form invents a history of edits
  * that never happened.
  */
+/**
+ * Add a line the import did not produce, to the statement it is printed on.
+ *
+ * The line is flagged MANUAL_ENTRY with the person's name and reason, and the
+ * statement comes back re-reconciled — which is the point: a missed line leaves
+ * a statement permanently out of balance. Before this existed the fix was a row
+ * typed straight into the database, which left no trace anybody reading the
+ * exhibit could see.
+ */
+export async function addTransaction(
+  statementId: number,
+  payload: TransactionAddPayload,
+): Promise<TransactionCorrectionResult> {
+  return apiFetch<TransactionCorrectionResult>(
+    `/api/v1/statements/${statementId}/transactions`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
 export async function correctTransaction(
   transactionId: number,
   payload: TransactionCorrectionPayload,
@@ -1501,4 +1530,47 @@ export async function addLeadAction(sessionUuid: string, payload: AddActionPaylo
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+// ── Costs (admin) ────────────────────────────────────────────────────────────
+//
+// Prices and what running Cyclone spends. The pricing is SQL (migration 041);
+// these only fetch it. Money stays a string end to end.
+
+import type {
+  CorrectServiceRatePayload, CostGroup, CostReport, ServiceRate,
+  SetServiceRatePayload, UnpricedMeter,
+} from '../types'
+
+export async function getServiceRates(): Promise<ServiceRate[]> {
+  return apiFetch<ServiceRate[]>('/api/v1/costs/rates')
+}
+
+/** A new price from a date. A 409 means a price already starts on or after it. */
+export async function setServiceRate(payload: SetServiceRatePayload): Promise<ServiceRate> {
+  return apiFetch<ServiceRate>('/api/v1/costs/rates', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function correctServiceRate(
+  rateId: number, payload: CorrectServiceRatePayload,
+): Promise<ServiceRate> {
+  return apiFetch<ServiceRate>(`/api/v1/costs/rates/${rateId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** Spend by UTC month. `fromMonth`/`toMonth` are any day in those months, YYYY-MM-DD. */
+export async function getCostReport(
+  fromMonth: string, toMonth: string, group: CostGroup,
+): Promise<CostReport> {
+  const query = new URLSearchParams({ from_month: fromMonth, to_month: toMonth, group })
+  return apiFetch<CostReport>(`/api/v1/costs/report?${query}`)
+}
+
+export async function getUnpricedMeters(): Promise<UnpricedMeter[]> {
+  return apiFetch<UnpricedMeter[]>('/api/v1/costs/unpriced')
 }
