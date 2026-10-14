@@ -17,6 +17,13 @@ you know it, you know it everywhere.
 | **Compliance matrix** | Compliance tab |
 | **Accounts referenced but not produced** | Accounts tab, in that panel |
 
+> ⛔ **One download is not an exhibit: the normalized statement.** The
+> **Normalized** link on a statement row offers the same four formats, and what
+> it produces is deliberately **not** a court document — no caption, no Rule
+> 1006 notice, and PRO-FORMA printed on its face. It is a working copy for
+> checking our reading against the original, and it stays in the office. See
+> [Chapter 7](07-viewing-statements.md#the-normalized-statement-our-reading-in-the-banks-shape).
+
 ---
 
 ## Using it

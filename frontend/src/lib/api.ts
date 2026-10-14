@@ -996,6 +996,23 @@ export async function getInventory(matterId: number): Promise<InventoryReport> {
   return apiFetch<InventoryReport>(`/api/v1/matters/${matterId}/inventory`)
 }
 
+/**
+ * One statement redrawn in the shape of a statement, to lay beside the original.
+ *
+ * A working document rather than an exhibit: no court caption, and the Rule
+ * 1006 notice is replaced by a disclaimer saying it is pro-forma.
+ */
+export async function exportNormalizedStatement(
+  statementId: number,
+  format: ExportFormat,
+  exhibitName = 'Normalized Statement',
+): Promise<DownloadedFile> {
+  return apiDownload(
+    `/api/v1/statements/${statementId}/normalized`,
+    { format, exhibit_name: exhibitName },
+  )
+}
+
 export async function exportInventory(
   matterId: number,
   format: ExportFormat,

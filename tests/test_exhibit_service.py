@@ -306,6 +306,78 @@ try:
 except ValueError as e:
     check_true("an unknown format is refused", "xlsx" in str(e))
 
+print("\nA running footer — what the sheet pertains to, page six included")
+# Opt-in, so no existing exhibit's footer changes: the caption already answers
+# this on page one of a filed exhibit, and a document with no caption at all
+# (the normalized statement) has nothing else that does.
+IDENTITY = "Peter Segalini - Segalini v. Segalini"
+
+
+def footed(footer=IDENTITY, rows=60, margin=1.0):
+    return Exhibit(
+        name="Footer probe",
+        columns=(Column("Date"), Column("Description"),
+                 Column("Amount", numeric=True, money=True)),
+        rows=tuple(("06/%02d" % ((i % 28) + 1), "LINE %d" % i, "10.00") for i in range(rows)),
+        footer=footer, margin_inches=margin,
+    )
+
+
+import pymupdf  # noqa: E402
+
+
+def footer_bands(exhibit):
+    """Every page's footer band, as text, with whether it stayed in the margins."""
+    margin = exhibit.margin_inches * 72
+    document = pymupdf.open(stream=to_pdf(exhibit), filetype="pdf")
+    try:
+        found = []
+        for page in document:
+            band = pymupdf.Rect(0, page.rect.height - margin - 14,
+                                page.rect.width, page.rect.height)
+            words = page.get_text("words", clip=band)
+            inside = not words or (min(w[0] for w in words) >= margin - 1
+                                   and max(w[2] for w in words) <= page.rect.width - margin + 1)
+            found.append((page.get_text("text", clip=band).strip().replace("\n", " "), inside))
+        return found
+    finally:
+        document.close()
+
+
+bands = footer_bands(footed())
+check("it repeats on every page, not just the first", len(bands), 2)
+check_true("with the identity ahead of the page number",
+           all(b.startswith(IDENTITY) and "Page" in b for b, _ in bands))
+check_true("inside the margins", all(inside for _, inside in bands))
+check_true("and at half-inch margins too",
+           all(inside for _, inside in footer_bands(footed(margin=0.5))))
+check_true("an exhibit with no footer still gets its page numbers",
+           all(b.startswith("Page") and inside for b, inside in footer_bands(footed(footer=""))))
+
+# MUPDF'S BASE-14 HELVETICA MEASURES "…" AT 2.5pt AND RENDERS IT FAR WIDER, so
+# a string truncated to fit BY MEASUREMENT still ran off the page. Same font
+# substitution that swaps the ligature glyphs in these PDFs, showing up as a
+# measurement that lies rather than a glyph that looks wrong.
+LONG = ("Bartholomew Fitzwilliam-Montgomery III - In the Matter of the Marriage of "
+        "Bartholomew Fitzwilliam-Montgomery III and Arabella Fitzwilliam-Montgomery "
+        "and In the Interest of Three Children")
+long_bands = footer_bands(footed(footer=LONG))
+check_true("an over-long footer is truncated to fit, not allowed to overflow",
+           all(inside for _, inside in long_bands))
+check_true("the front of it survives, which is the part that identifies the page",
+           all(b.startswith("Bartholomew Fitzwilliam-Montgomery III") for b, _ in long_bands))
+check_true("and it is truncated with ASCII dots, never a single ellipsis glyph",
+           all("..." in b and "…" not in b for b, _ in long_bands))
+
+check_true("markdown carries it, having no pages to put it on",
+           "*%s*" % IDENTITY in to_markdown(footed()).decode("utf-8"))
+check("the CSV does not, like the caption and the notice",
+      "Segalini" in to_csv(footed()).decode("utf-8-sig"), False)
+with zipfile.ZipFile(__import__("io").BytesIO(to_docx(footed()))) as archive:
+    footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+check_true("the .docx puts it in a real Word footer", IDENTITY in footer_xml)
+check_true("ahead of the page-number field, which is still a field", "PAGE" in footer_xml)
+
 print("\nFilenames")
 check("a name with punctuation is made safe",
       Exhibit(name="Gabe's Accounts (2023)").filename_stem, "Gabe_s_Accounts_2023")

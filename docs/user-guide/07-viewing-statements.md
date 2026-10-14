@@ -39,6 +39,54 @@ something different:
 
 ---
 
+## The normalized statement: our reading in the bank's shape
+
+Beside the PDF button on every statement row there is a **Normalized** link. It
+downloads **one statement redrawn as a statement**: a header, an account
+summary, then the transactions in order with a running balance.
+
+Choose **PDF**, **Word**, **Markdown** or **CSV**.
+
+**It exists for one job: to be laid beside the original and read down.** Cyclone
+holds a reading of a document; this is that reading, in the same shape as the
+document, so the two can be compared line by line.
+
+### ⛔ It is not evidence, and it is built so nobody can mistake it for evidence
+
+| | |
+| - | - |
+| **No court caption** | Every exhibit Cyclone produces carries one. This carries none — a pro-forma reconstruction wearing a case style invites exactly the mistake it exists to prevent |
+| **It says so on its face** | The header ends with **PRO-FORMA — NOT THE ORIGINAL STATEMENT** |
+| **No Rule 1006 notice** | That notice promises the underlying records are available for examination. This document is not a summary offered in their place, so the notice is **replaced** by a disclaimer saying what it is: a working copy for comparison, and not an evidentiary substitute |
+
+**Do not produce it, attach it, or hand it to anybody outside the office.** If
+you need the statement itself, produce the PDF. If you need a summary to file,
+build an exhibit ([Chapter 10](10-exports.md)).
+
+### What is on it
+
+| Part | |
+| ---- | - |
+| **Header** | The institution, the account, the period in full dates, and the pro-forma line |
+| **Account summary** | Beginning balance, the money in and out, **ending balance (as printed)** and **ending balance (computed)** |
+| **Transactions** | Date, check number, description, amount, and **Balance (computed)** |
+| **Footer** | The client and matter name on every page, so a loose sheet can be identified |
+
+**The balance column is computed, not copied**, and the heading says so. It is
+the beginning balance plus each amount in turn — which is the whole point:
+reading down it beside the original shows **the exact line where the two part
+company**.
+
+> **A check column appears only when the statement has checks on it**, so a card
+> statement is not printed with an empty column down the page.
+>
+> **Removed lines are left out and counted.** The count is stated on the
+> document, because a hand-check that silently dropped two rows would send
+> somebody hunting an extraction bug that is really a deletion a colleague made
+> on purpose ([below](#removing-a-line-and-putting-it-back)).
+
+---
+
 ## What a statement row tells you
 
 ```text

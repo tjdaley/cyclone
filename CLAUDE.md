@@ -1217,6 +1217,52 @@ and the statement is re-reconciled **always**, not only when the gap closes,
 since a new line moves the sum in both directions. Covered by
 `tests/test_transaction_correction.py` 8-11.
 
+**THE NORMALIZED STATEMENT IS A WORKING DOCUMENT, NOT AN EXHIBIT**
+(`build_normalized_exhibit`). One statement redrawn in the shape of a
+statement, to lay beside the original and read down. It renders through
+`exhibit_service` like everything else, and the two things it does *differently*
+are the whole design:
+
+- **No court caption.** The caption slot carries the institution, the account,
+  the period and the words PRO-FORMA — NOT THE ORIGINAL STATEMENT, which is a
+  statement's letterhead rather than a case style. A reconstruction wearing a
+  cause number invites exactly the mistake it exists to prevent.
+- **The Rule 1006 notice is REPLACED, not supplemented.** That notice asserts
+  the underlying records are available for examination; this is not a summary
+  offered in their place, it is a redrawing of one of them. `Exhibit.notice`
+  takes the disclaimer instead, so it lands at the foot of the markdown, the
+  DOCX and the PDF with no renderer change.
+- **The running balance is COMPUTED, and that is what it is for.** Opening
+  balance plus each amount in turn, so reading the column beside the original
+  shows the exact line where the two part company — which is the job when a
+  statement will not reconcile. Labelled "Balance (computed)" and again in the
+  notes, because a figure that looks like one the bank printed must never pass
+  for one.
+- **The footer names the case on every page** — `[Client] - [Matter]`, because
+  these are printed and read in a stack and the letterhead names the *bank*.
+  `Exhibit.footer` is the generic capability and is empty by default, so no
+  filed exhibit's footer changes; the caption answers this on page one of a
+  real exhibit, and the normalized statement is the document that has no
+  caption. It rides on the same centred line as the page number, which makes a
+  collision structurally impossible, and the lookup is wrapped: a footer is how
+  somebody finds a sheet in a pile, and failing to build one must never cost
+  them the sheet.
+- **A statement that does not tie says so across its own face**, as a banner
+  row carrying the difference, and the download warns before it prints.
+- **Dropped lines are excluded, counted, and admitted to.** A hand-check that
+  silently omitted two rows sends somebody hunting an extraction bug that is
+  really a deletion they made on purpose.
+- The check column appears only on a statement that has checks on it; a column
+  that is empty on every row costs width on every row. The summary's words
+  follow `_LIABILITY_ACCOUNTS` — "Charges" and "Payments and credits" on a card,
+  "Deposits and credits" and "Withdrawals and debits" on a bank account.
+- **The CSV carries no disclaimer**, by the same rule as every other export:
+  that file is the data. The three document formats carry it.
+- The filename holds the account and the period, or a year of these is twelve
+  files with one name — `name` is the only thing the reader sees it in, since
+  this document has no caption block.
+- Covered by `tests/test_normalized_statement.py`.
+
 **A MISREAD BALANCE HAS NO OTHER REPAIR, AND EVERY ALTERNATIVE IS WORSE**
 (`correct_balances`). `beginning_balance` and `ending_balance` are written once,
 at ingest, so a figure the extraction got wrong used to leave three bad options:
@@ -1852,6 +1898,15 @@ Anything in Cyclone that produces a table worth taking to court builds an
   cannot afford. Markdown's separator and the PDF's `th` class had always
   aligned heading with column; only Word did not, which also left every
   numeric column's heading adrift from its figures.
+- **`footer` is a running identity line, and it is opt-in.** `[Client] - [Matter]`
+  at the foot of every page, for knowing what a sheet pertains to once it is out
+  of the stapler. Empty by default, so no filed exhibit changes: a caption
+  answers this on page one, and the document that needs it is the one with no
+  caption at all (the normalized statement). It shares the page number's centred
+  line rather than taking a position of its own — two things aiming at the same
+  band collide at some width, and on one line that cannot happen — and it is
+  truncated to the content width, because a footer running into the margins is
+  worse than a shortened one.
 - **`footnotes` ride with the table**, not in `selection`. A reader meeting a
   dagger in a cell looks directly below the table for what it means; a mark
   whose explanation stayed on the screen is worse than no mark, because the
@@ -2611,6 +2666,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Bates numbers entered by hand | ✅ Built — consecutive across the pages held, the range checked against them, flagged `BATES_MANUALLY_ENTERED` on the statement and every line |
 | Motion-to-compel text | ✅ Built — the compliance gaps as a numbered paragraph, in whole dates, copied to the clipboard |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
+| Normalized statement (pro-forma, for hand-checking) | ✅ Built — one statement redrawn as a statement, from the statement row in the Accounts tab, in all four formats. **Not an exhibit:** no court caption, and the Rule 1006 notice is replaced by a disclaimer. Its running balance is computed line by line, which is what locates where an extraction diverged from the original |
 | Correct a balance the import read wrong | ✅ Built — the balances on the statement row in the Accounts tab are the control. Re-reconciles on save and flags `BALANCE_MANUALLY_ENTERED` with both figures and the person. The dialog shows what the adjacent statements say the figure should be, since an opening balance is the previous statement's close |
 | Add a line the import missed | ✅ Built — `MANUAL_ENTRY` names the person, the time and their reason, and the statement re-reconciles on save. It replaces an INSERT typed into the database, which left nothing a reader of the exhibit could see |
 | Add a line the import missed | ✅ Built — `POST /statements/{id}/transactions`, from the statement drill-down. Flagged MANUAL_ENTRY with the person and reason, and the statement re-reconciles. Replaces an `INSERT` by hand, which left no trace on the exhibit |
@@ -3056,6 +3112,10 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Format a CSV amount as currency | A spreadsheet reads `-$2,500.00` as text and will not sum it. Currency is for the exhibit formats; the CSV carries the raw figure |
 | Ship a summary that cannot name the documents behind it | The notice promises the records are available; `sources` says which. Group by upload, not statement |
 | Sort Bates stamps as strings | "KF 9" follows "KF 10" alphabetically and precedes it on the production. Sort on the numeric tail |
+| Give a pro-forma reconstruction a court caption and the Rule 1006 notice | They assert it is evidence offered in place of records available for examination. A working copy says what it is instead — `Exhibit.notice` takes the disclaimer |
+| Truncate a PDF string with "…" and trust the measurement | MuPDF's base-14 Helvetica measures the ellipsis glyph at 2.5pt and renders it far wider, so a footer "fitted" to 415.6pt of a 417pt budget still ran off the page. ASCII dots (`_ELLIPSIS`), and leave `_FIT_PAD` of slack |
+| Give a footer its own position beside the page number | Two things aiming at the same band collide at some width. Same centred line, identity first — a collision then cannot be expressed |
+| Bold an empty cell in markdown | `**` around an empty string renders as four literal asterisks. A heading row whose label sits in a later column produced exactly that |
 | Ship an exhibit without the Rule 1006 notice in the file | On screen it is no use once the document has left. A wrong date inside a period reconciles cleanly and reaches an exhibit unflagged |
 | Require a movement verb before reading a masked number | Nobody masks a confirmation number. `Deposit from … XXXXXXX3640` was invisible for want of the word "transfer" |
 | Add a parser route without adding its database term | The gate is pushed to the query. A line the regex would accept is never fetched to be parsed |

@@ -236,6 +236,18 @@ class Exhibit:
     and scanners these documents pass through — a quarter inch buys another 36pt
     and risks losing the edge of the page on any of them.
     """
+    footer: str = ""
+    """
+    One line repeated at the foot of every page, before the page number.
+
+    For knowing what a sheet pertains to once it is out of the stapler and in a
+    pile with forty others. The caption answers that on page one of a filed
+    exhibit; a footer answers it on page six, and on a document that has no
+    caption at all — which is exactly the normalized statement's case.
+
+    Empty by default, so no existing exhibit's footer changes. Absent from the
+    CSV, like the caption and the notice.
+    """
     show_headers: bool = True
     """
     Whether the exhibit formats print a header row.
@@ -545,7 +557,12 @@ def to_markdown(exhibit: Exhibit) -> bytes:
                 # leading whitespace, and here the indentation is the form.
                 cells[0] = ("  " * row.depth) + cells[0]
                 if row.heading or row.rule:
-                    cells[0] = "**%s**" % cells[0]
+                    # Guarded the same way the last cell already was: `**` around
+                    # an empty string renders as four literal asterisks, which is
+                    # what a heading row whose label sits in a later column
+                    # produced.
+                    if cells[0].strip():
+                        cells[0] = "**%s**" % cells[0]
                     if len(cells) > 1 and cells[-1].strip():
                         cells[-1] = "**%s**" % cells[-1]
             out.append("| " + " | ".join(cells) + " |")
@@ -586,6 +603,12 @@ def to_markdown(exhibit: Exhibit) -> bytes:
 
     out.append("---")
     out.append("")
+    if exhibit.footer:
+        # Markdown has no pages, so this cannot be a running footer — but what
+        # the document pertains to is worth saying in a format that is read on
+        # screen and pasted into a model as readily as printed.
+        out.append("*%s*" % exhibit.footer)
+        out.append("")
     out.append("*%s*" % exhibit.notice)
     out.append("")
     return "\n".join(out).encode("utf-8")
@@ -797,6 +820,10 @@ def to_docx(exhibit: Exhibit) -> bytes:
 
     footer = document.sections[0].footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if exhibit.footer:
+        # Ahead of the page number on the same line, as in the PDF. Word wraps
+        # it if it is long, so it needs none of the PDF's truncation.
+        footer.add_run("%s · " % exhibit.footer)
     _docx_page_number(footer)
     for run in footer.runs:
         run.font.size = Pt(9)
@@ -1153,10 +1180,44 @@ def to_pdf(exhibit: Exhibit) -> bytes:
     writer.end_page()
     writer.close()
 
-    return _stamp_page_numbers(buffer.getvalue(), margin)
+    return _stamp_page_numbers(buffer.getvalue(), margin, exhibit.footer)
 
 
-def _stamp_page_numbers(pdf_bytes: bytes, margin: float = 72.0) -> bytes:
+#: Three ASCII periods, NOT "…". MuPDF's base-14 Helvetica measures the single
+#: ellipsis character at 2.5pt and then renders something far wider, so a string
+#: truncated to fit by measurement still ran past the margin — the same font
+#: substitution that swaps ligature glyphs in these PDFs, showing up as a
+#: measurement that lies rather than a glyph that looks wrong. Measured: a
+#: 103-character identity "fitted" to 415.6pt of a 417pt budget and overflowed
+#: the page.
+_ELLIPSIS = "..."
+
+#: Slack left at the end of a fitted line. A name carrying a character the base
+#: font substitutes measures short by a little, and a footer is not worth a
+#: single character of overflow risk.
+_FIT_PAD = 6.0
+
+
+def _fit_text(text: str, available: float, fontsize: float = 9) -> str:
+    """``text`` shortened with an ellipsis until it fits ``available`` points."""
+    import pymupdf
+
+    def width(value: str) -> float:
+        return pymupdf.get_text_length(value, fontname="helv", fontsize=fontsize)
+
+    budget = available - _FIT_PAD
+    if budget <= 0:
+        return ""
+    if width(text) <= budget:
+        return text
+    for end in range(len(text) - 1, 0, -1):
+        candidate = text[:end].rstrip() + _ELLIPSIS
+        if width(candidate) <= budget:
+            return candidate
+    return ""
+
+
+def _stamp_page_numbers(pdf_bytes: bytes, margin: float = 72.0, footer: str = "") -> bytes:
     """
     Write "Page N of M" centred in the footer band of every page.
 
@@ -1166,6 +1227,12 @@ def _stamp_page_numbers(pdf_bytes: bytes, margin: float = 72.0) -> bytes:
     The baseline follows the margin rather than sitting at a fixed height: the
     footer band is the 18pt strip below the content, and at half-inch margins a
     number hard-coded 50pt from the foot lands back inside the table.
+
+    ``footer`` rides on the SAME centred line rather than taking a position of
+    its own, which keeps it structurally unable to collide with the page number.
+    It is truncated to whatever the content width allows: a footer that ran into
+    the margins would be worse than a shortened one, and the part that matters
+    for finding a page in a pile is the front of it.
     """
     import pymupdf
 
@@ -1174,6 +1241,10 @@ def _stamp_page_numbers(pdf_bytes: bytes, margin: float = 72.0) -> bytes:
         total = document.page_count
         for index, page in enumerate(document, start=1):
             label = "Page %d of %d" % (index, total)
+            if footer:
+                available = page.rect.width - (2 * margin) - pymupdf.get_text_length(
+                    " · " + label, fontname="helv", fontsize=9)
+                label = "%s · %s" % (_fit_text(footer, available), label)
             width = pymupdf.get_text_length(label, fontname="helv", fontsize=9)
             page.insert_text(
                 ((page.rect.width - width) / 2, page.rect.height - margin - 5),

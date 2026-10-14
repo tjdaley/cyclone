@@ -17,6 +17,7 @@ import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import FisPanel from './FisPanel'
 import CompliancePanel from './CompliancePanel'
 import InventoryPanel from './InventoryPanel'
+import NormalizedStatementButton from '../../components/NormalizedStatementButton'
 import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import TransactionAddDialog from './TransactionAddDialog'
@@ -1258,6 +1259,10 @@ export default function MatterFinancialsPage() {
                           {period(s)}
                         </button>
                         <StatementPdfButton statementId={s.id} />
+                        {/* Beside the link to the original, because the two are
+                            used together: one is opened on screen and the other
+                            printed to read against it. */}
+                        <NormalizedStatementButton statementId={s.id} disabled={busy} />
                         <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${REVIEW_COLOR[s.review_status]}`}>
                           {REVIEW_LABEL[s.review_status]}
                         </span>

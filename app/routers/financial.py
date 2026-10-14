@@ -621,6 +621,44 @@ def export_compliance_matrix(
     return Response(content=content, media_type=media_type, headers=headers)
 
 
+@router.post("/statements/{statement_id}/normalized")
+def export_normalized_statement(
+    statement_id: int,
+    body: ExhibitExportRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> Response:
+    """
+    One statement redrawn as a statement, to lay beside the original.
+
+    A working document, not an exhibit: no court caption, and the Rule 1006
+    notice is replaced by a disclaimer saying it is pro-forma and not an
+    evidentiary substitute for the original.
+    """
+    try:
+        exhibit = statement_service.build_normalized_exhibit(
+            manager, statement_id, body.exhibit_name.strip() or "Normalized Statement")
+        content, media_type, filename = exhibit_service.render(exhibit, body.format)
+    except ValueError as e:
+        message = str(e)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message) from e
+        raise HTTPException(status_code=400, detail=message) from e
+    except Exception as e:  # noqa: BLE001 — a renderer failure must not read as an empty export
+        LOGGER.error("financial.export_normalized_statement: statement=%s format=%s failed: %s",
+                     statement_id, body.format, str(e))
+        raise HTTPException(status_code=500, detail="Could not build the export") from e
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="%s"' % filename,
+        "X-Exhibit-Rows": str(len(exhibit.rows)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Exhibit-Rows, X-Exhibit-Warnings",
+    }
+    if exhibit.warnings:
+        headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
 @router.patch("/statements/{statement_id}/balances", response_model=StatementResponse)
 def correct_statement_balances(
     statement_id: int,

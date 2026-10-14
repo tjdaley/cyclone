@@ -65,6 +65,10 @@ next move.
 > printed on**. The button on a statement row opens at the statement's first
 > transaction page. On a sixty-page production that is the difference between
 > checking a figure and hunting for it.
+>
+> **Its companion is the Normalized link** beside it, which gives you *our*
+> reading of the same statement in the same shape — the document to hold against
+> the page ([Chapter 7](07-viewing-statements.md#the-normalized-statement-our-reading-in-the-banks-shape)).
 
 ### Accept
 
@@ -142,6 +146,16 @@ force it to balance.
 
 There are **three** reasons this happens, and they have different repairs. Work
 out which one you have before doing anything else.
+
+> **The fastest way to tell them apart is the normalized statement**
+> ([Chapter 7](07-viewing-statements.md#the-normalized-statement-our-reading-in-the-banks-shape)).
+> Download it, print it, and lay it beside the original: its balance column is
+> **computed**, so reading down the two together shows the line where they part
+> company. A difference that appears at one line is a misread figure; one that
+> appears where the lines simply stop is a short read.
+>
+> It is a working copy and **never leaves the office** — no caption, no Rule
+> 1006 notice, and it says PRO-FORMA on its face.
 
 ### Cause 1 — The import failed *(much the most common)*
 
