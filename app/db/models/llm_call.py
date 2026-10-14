@@ -53,6 +53,14 @@ class LlmCall(BaseModel):
         default=None,
         description="Exception class on failure. Never the message, which can quote the prompt")
     duration_ms: Optional[int] = Field(default=None, description="Wall time of the vendor call")
+    stop_reason: Optional[str] = Field(
+        default=None,
+        description="Why the vendor stopped generating, in its own word (046). None when no "
+                    "response arrived or none was reported")
+    stop_reason_class: Optional[str] = Field(
+        default=None,
+        description="stop_reason reconciled across vendors: complete, truncated, refused, "
+                    "or other. What tells 'it ran out of room' from 'it decided it was done'")
 
     input_uncached_tokens: Optional[int] = Field(
         default=None, description="Input billed at the full rate. None means not reported")

@@ -84,7 +84,7 @@ this project.
 by hand, and **release notes must name the migration files** so they can be
 applied before the containers come up.
 
-**This release: `038` through `045`, in order.** All eight are safe to run
+**This release: `038` through `046`, in order.** All nine are safe to run
 before the deploy, and that is the right order — a migration run late costs data
 that was never recorded.
 
@@ -98,6 +98,7 @@ that was never recorded.
 | `043_cost_report_by_firm.sql` | Adds **Firm** to the Costs page's groupings | That grouping is missing |
 | `044_client_portal_tagging.sql` | Client tags, cleared tags, client-visible tags, and the per-matter tagging lock. Seeds seven client-facing waste tags | The client portal's tagging cannot be switched on. Applied and re-applied against real Postgres 16 |
 | `045_no_marital_interest.sql` | A fifth account characterization: *no marital property interest* | Choosing it is refused with a constraint sentence ([Chapter 5](05-startup-log.md#a-write-the-database-refused)) |
+| `046_stop_reason.sql` | Records **why** a vendor stopped generating — its own word, plus a class reconciled across the three vocabularies | Usage is still recorded, without the stop reason, and one ERROR names the file. Same shape as `042`: run it, then **restart api and worker** |
 
 Two things about this set that are not in the files:
 

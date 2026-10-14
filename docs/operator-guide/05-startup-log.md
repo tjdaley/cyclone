@@ -189,6 +189,9 @@ ERROR  llm_usage: llm_calls has no served_model column. Run
        actually served, and is priced on the model requested.
 ```
 
+**`046_stop_reason.sql` reports itself the same way**, naming its own columns:
+usage keeps being recorded without the stop reason until the process restarts.
+
 Said once. **Usage is still recorded** — this is the smaller loss of the two.
 The rows written meanwhile are priced on the model that was *requested* rather
 than the one that answered, permanently, because nothing recorded which

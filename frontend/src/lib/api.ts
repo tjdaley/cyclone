@@ -1026,6 +1026,23 @@ export async function createFinancialAccount(
 }
 
 /** Number a statement's pages by hand, when detection found no series. */
+/**
+ * Correct an opening or closing balance the extraction read wrong.
+ *
+ * Amounts cross as STRINGS, like every other money value here: they are
+ * `numeric(14,2)` in Postgres and `Decimal` in Python, and parsing one through
+ * a JS number is what loses the cent. Omitting an end leaves it alone.
+ */
+export async function correctStatementBalances(
+  statementId: number,
+  balances: { beginning_balance?: string; ending_balance?: string; reason?: string },
+): Promise<AccountStatement> {
+  return apiFetch<AccountStatement>(`/api/v1/statements/${statementId}/balances`, {
+    method: 'PATCH',
+    body: JSON.stringify(balances),
+  })
+}
+
 export async function setStatementBates(
   statementId: number,
   first: string,

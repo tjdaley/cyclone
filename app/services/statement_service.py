@@ -224,9 +224,22 @@ and never let one become a statement of its own:
   - INTEREST RATE SUMMARY, rate tables, yield tables.
   - Checkbook reconciliation worksheets, and any blank form the customer fills in.
   - Check images, disclosures, error-resolution notices, marketing inserts.
+  - REWARDS or POINTS activity — "SHOP WITH POINTS ACTIVITY", "REWARDS
+    ACTIVITY", "POINTS ACTIVITY", "MEMBERSHIP REWARDS", "CASH BACK ACTIVITY",
+    and any continuation of one headed "(CONTINUED)". A table carrying a
+    REWARDS or POINTS column beside its dollar column is this block whatever it
+    is titled, and that column is the surest way to recognise it.
+    These are the SAME purchases already listed in the account activity, shown
+    again to report the points earned or redeemed on each. Extracting them
+    charges the card twice for one purchase.
+    THE SUB-HEADINGS INSIDE THIS BLOCK ARE THE EXACT WORDS A REAL REGISTER
+    USES — "PURCHASES AND REDEMPTIONS", "RETURNS AND OTHER CREDITS" — so the
+    heading on a row cannot tell you where you are. What the block sits under
+    can.
 A date column next to an amount column does not make a table a register. Ask
 whether each row is a payment, deposit, or charge that moved the balance. A
-check did; a balance, a total, or a rate did not.
+check did; a balance, a total, or a rate did not, and neither did a purchase
+being counted a second time for its points.
 
 Return ONLY a valid JSON object of the form {"statements": [ ... ]}. Each
 statement object has:
@@ -564,8 +577,19 @@ These blocks are NOT transactions. Never turn one into an entry:
   - DAILY ENDING BALANCE, or any table of dates against running balances
   - ACCOUNT SUMMARY / SUMMARY OF ACCOUNTS, INTEREST RATE SUMMARY, OVERDRAFT SUMMARY
   - Checkbook reconciliation worksheets, check images, disclosures, notices
+  - REWARDS or POINTS activity — "SHOP WITH POINTS ACTIVITY", "REWARDS
+    ACTIVITY", "POINTS ACTIVITY", "MEMBERSHIP REWARDS", "CASH BACK ACTIVITY",
+    and any page continuing one under "(CONTINUED)". A table with a REWARDS or
+    POINTS column beside its dollar column is this block whatever it is called.
+    It restates purchases already listed in the account activity to report the
+    points on them, so extracting it charges the card twice for one purchase.
+    Its sub-headings are the words a real register uses — "PURCHASES AND
+    REDEMPTIONS", "RETURNS AND OTHER CREDITS" — so judge the block, not the row.
+    THESE PAGES MAY BE THE ONLY THING ON THIS CHUNK. A chunk holding nothing but
+    a rewards block correctly returns no transactions at all.
 A date column beside an amount column does not make a table a register. Ask
-whether the row moved the balance. A check did; a running balance did not.
+whether the row moved the balance. A check did; a running balance did not, and
+neither did a purchase counted again for its points.
 
 FLAGS — record every inference. severity "info" for a routine derivation, "warn"
 for something a human should look at. Codes: YEAR_INFERRED, LOCATION_INFERRED,
@@ -3488,6 +3512,84 @@ class StatementService:
             "reconciliation_delta": delta,
             "flags": flags,
         })
+
+    def correct_balances(
+        self,
+        manager: DatabaseManager,
+        statement_id: int,
+        beginning: Optional[Decimal],
+        ending: Optional[Decimal],
+        staff_id: int,
+        staff_name: str,
+        reason: Optional[str] = None,
+    ) -> Any:
+        """
+        Correct a statement's opening or closing balance, with a name on it.
+
+        **A MISREAD BALANCE HAS NO OTHER REPAIR, AND THE ALTERNATIVES ARE ALL
+        WRONG.** The figure is written once, at ingest, so until now the only
+        routes were a Retry -- which re-reads the same PDF through a
+        ``temperature: 0.0`` profile and returns the same wrong number -- or an
+        ``UPDATE`` typed into the database, which leaves nothing a reader of the
+        exhibit can see. The third temptation is worse than either: editing
+        TRANSACTIONS until the arithmetic closes falsifies lines to fix a
+        header figure, and the statement then claims to reconcile while the
+        balance printed on the page disagrees with the record.
+
+        So the flag is the feature, exactly as with ``add_transaction``. A
+        balance anchors the whole reconciliation and reaches an exhibit through
+        the inventory's as-of figures, so each changed end carries
+        ``BALANCE_MANUALLY_ENTERED`` with both values, the person, the time and
+        their reason. Nothing checks that the new figure is the one printed on
+        the page, because nothing can -- which is precisely why the record
+        names somebody.
+
+        ``review_status`` is deliberately untouched, like ``_rereconcile``:
+        whether an exception clears is a decision, not a consequence of
+        arithmetic.
+
+        :param beginning: New opening balance, or None to leave it alone.
+        :param ending: New closing balance, or None to leave it alone.
+        :raises ValueError: Unknown statement, or nothing actually changed.
+        :return: The statement, re-reconciled.
+        """
+        statement_repo = FinancialAccountStatementRepository(manager)
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        statement = statement_repo.select_one(condition={"id": statement_id})
+        if statement is None:
+            raise ValueError("Statement %d not found" % statement_id)
+
+        changes: dict[str, Any] = {}
+        flags = list(statement.flags)
+        for field, new in (("beginning_balance", beginning), ("ending_balance", ending)):
+            if new is None:
+                continue
+            old = getattr(statement, field)
+            # Decimal("100.00") == Decimal("100.0"), so an unchanged figure
+            # typed in a different shape is correctly not a change.
+            if old is not None and old == new:
+                continue
+            changes[field] = new
+            flags.append(_flag(
+                "BALANCE_MANUALLY_ENTERED", "info",
+                "%s set to %s by %s%s. Extraction read %s." % (
+                    field.replace("_", " "), new, staff_name,
+                    " (%s)" % reason if reason else "",
+                    "nothing" if old is None else old),
+                "balances.%s" % field,
+            ))
+            flags[-1].update({"field": field, "from": None if old is None else str(old),
+                              "to": str(new), "by": staff_name, "by_staff_id": staff_id})
+
+        if not changes:
+            raise ValueError("Nothing to change: both balances already hold those figures")
+
+        changes["flags"] = flags
+        statement_repo.update(statement_id, changes)
+        # Re-read and re-reconcile rather than computing here: the balances have
+        # moved, and _rereconcile is the one place that decides what UNRECONCILED
+        # should say afterwards.
+        return self._rereconcile(statement_repo, transaction_repo, statement_id)
 
     # ── Discarding a bad extraction ───────────────────────────────────────
 

@@ -16,6 +16,7 @@ Two answers, tested here:
     itself, so a short extraction can never pass quietly again.
 """
 import sys
+from decimal import Decimal
 
 sys.path.insert(0, r"d:\Local Projects\cyclone\app")
 
@@ -383,6 +384,87 @@ check("a bank account still reads 'purchases' as a debit",
 check("and an unspecified type still reads as a deposit account",
       any("short by 244.11" in f for f in
           _completeness_findings(southwest, southwest_totals, {})), True)
+
+
+# ── 9c. A REWARDS block is not a register ────────────────────────────────
+#
+# Chase Amazon Prime Visa x8445, 05/18/26-06/17/26. Ten pages, read in four
+# passes, and the register was read PERFECTLY: 246 lines whose two sides hit
+# the printed totals to the cent. Then the `pages 9-10` pass read SHOP WITH
+# POINTS ACTIVITY as a second register and took 22 rows more.
+#
+# Those rows are the same Amazon purchases already in the account activity,
+# restated to report the points earned or redeemed on each. The block's own
+# sub-headings are the words a register uses -- "PURCHASES AND REDEMPTIONS",
+# "RETURNS AND OTHER CREDITS" -- which is exactly why it reads as one.
+print("9c. a points-rewards block restates purchases already listed")
+
+AMAZON_BEGINNING = Decimal("9638.75")
+AMAZON_CLOSE = Decimal("6887.80")
+amazon_totals = {
+    "purchases": 9677.76,
+    "payments_credits": -12428.71,
+    "cash_advances": 0.00,
+    "balance_transfers": 0.00,
+    "fees_charged": 0.00,
+    "interest_charged": 0.00,
+}
+# The real register, by the page sums the import stored: credits on page 3,
+# purchases over pages 4-8, and the tail of the register at the top of page 9.
+amazon_register = [Decimal("-12428.71"), Decimal("9580.81"), Decimal("96.95")]
+# SHOP WITH POINTS ACTIVITY: sixteen redemptions and two credits on page 9,
+# four more rows under "(CONTINUED)" on page 10.
+amazon_rewards = [Decimal(s) for s in (
+    "43.13", "33.14", "17.58", "11.06", "8.65", "3.29", "33.80", "2.15",
+    "13.15", "26.03", "13.49", "7.29", "24.87", "13.11", "4.84", "2.93",
+    "-13.11", "-0.95",
+    "1.40", "9.81", "0.90", "22.06",
+)]
+
+check("22 rows in the rewards block", len(amazon_rewards), 22)
+check("the register alone ties to the printed close",
+      AMAZON_BEGINNING + sum(amazon_register), AMAZON_CLOSE)
+check("and its charge side IS the printed purchases",
+      sum(a for a in amazon_register if a > 0), Decimal("9677.76"))
+check("the rewards block nets the exact reconciliation delta",
+      sum(amazon_rewards), Decimal("278.62"))
+check("so extracting it produces the balance the import actually stored",
+      AMAZON_BEGINNING + sum(amazon_register) + sum(amazon_rewards), Decimal("7166.42"))
+
+# NOTHING ELSE CATCHES THIS, and that is by design rather than by oversight.
+# The completeness check reports a side only when the extraction falls SHORT
+# (§9 above): an excess usually means the statement split its totals across
+# named buckets. Here the excess is a double count, so reconciliation is the
+# only check that can see it -- which is why the statement arrived carrying
+# UNRECONCILED and nothing more specific.
+rows = [{"amount": float(a)} for a in amazon_register]
+extra = [{"amount": float(a)} for a in amazon_rewards]
+check("the completeness check is silent on the correct extraction",
+      _completeness_findings(rows, amazon_totals, {}, AccountType.credit_card), [])
+check("and silent on the doubled one too -- it is short-only",
+      _completeness_findings(rows + extra, amazon_totals, {}, AccountType.credit_card), [])
+check("while a genuinely short read still reports",
+      _completeness_findings([{"amount": -12428.71}, {"amount": 5000.00}],
+                             amazon_totals, {}, AccountType.credit_card),
+      ["Charge lines total 5000.00, but the statement prints 9677.76 (short by 4677.76)"])
+
+# So the fix is the prompt, and these assertions are what stop it being edited
+# away. Both prompts carry it: a 10-page card goes through the chunked path,
+# but a short one is read in a single call and has the same block on it.
+for name, prompt in (("single-pass", mod._STATEMENT_SYSTEM),
+                     ("chunked", mod._TRANSACTIONS_SYSTEM)):
+    # Flattened, because these prompts are wrapped prose: asserting on the raw
+    # text makes the pass depend on where a line happens to break, so rewrapping
+    # a paragraph would fail a rule that is still there.
+    flat = " ".join(prompt.split())
+    check("the %s prompt names the block" % name,
+          "SHOP WITH POINTS ACTIVITY" in flat, True)
+    check("the %s prompt gives the column as the tell" % name,
+          "REWARDS or POINTS column" in flat, True)
+    check("the %s prompt warns the sub-headings look like a register" % name,
+          "PURCHASES AND REDEMPTIONS" in flat, True)
+    check("the %s prompt covers a continuation page" % name,
+          "CONTINUED" in flat, True)
 
 
 # ── 10. A pass whose answer will not parse ───────────────────────────────

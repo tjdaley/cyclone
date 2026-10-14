@@ -35,6 +35,36 @@ LOGGER = LoggerFactory.create_logger(__name__)
 
 _MAX_LOG_CHARS = 200  # Truncate prompt/response in DEBUG logs
 
+# THE SDKs RETRY UNDERNEATH US, AND IT MULTIPLIES THE DEADLINE.
+#
+# Both the Anthropic and OpenAI clients default to ``max_retries=2``
+# (``anthropic/_constants.py``, ``openai/_constants.py``), and a timeout is in
+# the set they retry. The deadline is applied *per attempt*, so an
+# `extract_account_statement` profile asking for 300 seconds was really asking
+# for 900 — measured exactly: one Chase card statement's `pages 5-8` chunk
+# failed with `APITimeoutError` after **901,587 ms**, 3 x 300s plus connection
+# setup, and that single dead call was fifteen of the job's twenty-three
+# minutes.
+#
+# Three reasons it is zero rather than one:
+#
+#   * **The failover IS the retry, and it is the better one.** The chain moves
+#     to a different vendor; an SDK retry asks the model that just failed the
+#     same question again. Here the second candidate answered in 196 seconds,
+#     after the first had burned 901 doing nothing.
+#   * **It made the documented behaviour false.** This module's contract is "no
+#     same-candidate retry" — true of the code and untrue of the process.
+#   * **The retries were invisible and billable.** `llm_usage` records one row
+#     per *our* attempt, and a timed-out call reports no usage at all, so three
+#     generations of a ~34,000-token answer left a single row with NULL tokens.
+#     Spend nothing on the Costs page can see is the one kind that cannot be
+#     questioned.
+#
+# Gemini needs nothing here: with ``retry_options`` unset, google-genai's
+# ``retry_args`` returns ``stop_after_attempt(1)``. The vendor last in every
+# chain was the only one already honouring the deadline as written.
+_MAX_RETRIES = 0
+
 
 # LLMUnavailableError is defined in util.llm_profiles (so the catalog can raise
 # it on an unknown profile) and re-exported here — it is the error every LLM
@@ -438,7 +468,8 @@ class LLMService:
         import anthropic  # noqa: PLC0415 — imported lazily to avoid load cost when not in use
         timeout = _timeout(profile, candidate)
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout,
+                                     max_retries=_MAX_RETRIES)
 
         params: dict[str, str | int | float | list[dict[str, str]]] = {
             "model": candidate.model,
@@ -504,7 +535,8 @@ class LLMService:
         from openai import OpenAI  # noqa: PLC0415
         timeout = _timeout(profile, candidate)
 
-        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout,
+                        max_retries=_MAX_RETRIES)
         response = client.chat.completions.create(
             model=candidate.model,
             # max_completion_tokens, not max_tokens — chat.completions rejects
@@ -545,6 +577,7 @@ class LLMService:
             api_key=settings.groq_api_key,
             base_url=settings.groq_base_url,
             timeout=timeout,
+            max_retries=_MAX_RETRIES,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -579,6 +612,7 @@ class LLMService:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             timeout=timeout,
+            max_retries=_MAX_RETRIES,
         )
         response = client.chat.completions.create(
             model=candidate.model,
@@ -626,7 +660,8 @@ class LLMService:
         import anthropic  # noqa: PLC0415
         timeout = _timeout(profile, candidate)
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=timeout,
+                                     max_retries=_MAX_RETRIES)
         response = client.messages.create(
             model=candidate.model,
             max_tokens=_max_tokens(profile, candidate),
@@ -657,7 +692,8 @@ class LLMService:
         from openai import OpenAI  # noqa: PLC0415
         timeout = _timeout(profile, candidate)
 
-        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        client = OpenAI(api_key=settings.openai_api_key, timeout=timeout,
+                        max_retries=_MAX_RETRIES)
         response = client.chat.completions.create(
             model=candidate.model,
             max_completion_tokens=_max_tokens(profile, candidate),

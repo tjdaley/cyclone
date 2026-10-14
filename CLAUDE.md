@@ -158,6 +158,7 @@ cyclone/
 │       ├── 043_cost_report_by_firm.sql  # llm_cost_report grouping by firm — co-tenancy groundwork
 │       ├── 044_client_portal_tagging.sql # client tags, cleared tags, client-visible tags, the hearing lock
 │       ├── 045_no_marital_interest.sql  # a fifth property character: the estate holds nothing here
+│       ├── 046_stop_reason.sql          # why the vendor stopped: out of room, refused, or done
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -599,6 +600,26 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
 - Object keys: `description`, `extends`, `chain`, `temperature`, `top_p`, `max_tokens`, `timeout_seconds`, `vision`. Unknown keys are rejected at load. Top-level keys starting with `_` are ignored — that's how you comment in JSON.
 - **Convention:** `default`, `fast`, and `vision` are the physical model chains; every task profile `extends` one of them. Retune a task by changing what it extends.
 - **A deadline too short for the work selects for the model that gives up soonest.** This is the non-obvious failure and it cost a session to see. At the global 90s, a 27-page statement extraction "succeeded" only because that model stopped at 38 of 286 transactions — a short answer is the only kind that fits — while the run where all three vendors tried to finish was killed three times over. `timeout_seconds` on a profile fixes it where the answer is long: `extract_account_statement` 300s, `ocr_document_page` 180s, everything else on the global 90s. Both run inside background jobs, where a generous deadline costs only patience.
+- **THE SDKs RETRY UNDERNEATH US, SO THE DEADLINE WAS THREE TIMES WHAT THE
+  PROFILE SAID.** Anthropic and OpenAI both default to `max_retries=2`
+  (`anthropic/_constants.py`, `openai/_constants.py`) and a timeout is in the
+  set they retry, with the deadline applied **per attempt**. Measured exactly:
+  one Chase card statement's `pages 5-8` chunk failed `APITimeoutError` after
+  **901,587 ms** — 3 × 300s plus connection setup — and that one dead call was
+  fifteen minutes of a twenty-three-minute job. `_MAX_RETRIES = 0` is now passed
+  at every client construction. Three reasons it is zero and not one: **the
+  failover IS the retry and it is the better one** (the chain moves to a
+  different vendor; an SDK retry asks the model that just failed the same
+  question again — here the second candidate answered in 196 seconds after the
+  first burned 901 doing nothing); **it made this module's documented contract
+  false**, since "no same-candidate retry" was true of the code and untrue of
+  the process; and **the retries were invisible and billable** — `llm_usage`
+  writes one row per *our* attempt and a timed-out call reports no usage at all,
+  so three generations of a ~34,000-token answer left a single row with NULL
+  tokens. Spend the Costs page cannot see is the one kind nobody can question.
+  **Gemini needed nothing**: with `retry_options` unset, google-genai's
+  `retry_args` returns `stop_after_attempt(1)`, so the vendor last in every
+  chain was the only one already honouring the deadline as written.
 - **Gemini enforces the deadline server-side**, so an overrun arrives as a structured `504 DEADLINE_EXCEEDED` from Google rather than a client timeout. Anthropic and OpenAI raise client-side (`APITimeoutError`). Same event, three different shapes — do not read the Gemini 504 as a network fault.
 - **Chain order is measured, not priced.** The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI complete and correct, Gemini good but stopped at 200 entries, DeepSeek lost and mis-stated amounts and invented JSON keys. `default` and `vision` therefore run Claude → OpenAI → Gemini. **DeepSeek is in no chain and must not be added to one that touches evidence.**
 - **`complete_detailed()` returns `LLMResult`** — the text plus the vendor, model, and how many candidates were tried. Use it wherever the answer becomes part of a record that has to say how it was produced. `complete()` still returns a bare string and is right everywhere else. The profile name says what was *asked for*; it cannot say who answered, and on a long statement read in passes it cannot even be one answer — the chain is walked independently per call, so a single document can be part Claude and part OpenAI.
@@ -638,6 +659,24 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
     failure alike. `begin_attempt()` clears the previous attempt's usage first,
     or a timed-out call inherits the tokens of the call before it — a test
     removes that line and fails.
+  - **Record WHY it stopped, because the alternative is an inference** (046).
+    "The extraction came back short — did it run out of room, or decide it was
+    done?" wants opposite fixes, and `output_tokens` against a `max_tokens`
+    that lives in a JSON file inside the image can only ever imply the answer.
+    Every vendor states it: `stop_reason` on Anthropic,
+    `choices[0].finish_reason` on OpenAI-compatible replies,
+    `candidates[0].finish_reason` on Gemini — or `prompt_feedback.block_reason`
+    when Gemini blocks a prompt outright and returns **no candidates at all**,
+    which is the shape the refusal below actually takes. Both are stored: the
+    vendor's own word verbatim (the `usage_raw` argument), and
+    `stop_reason_class` reconciling three vocabularies into
+    `complete` / `truncated` / `refused` / `other`, because a query for "what
+    truncated?" must not require knowing all three spellings. An unrecognized
+    word classes as `other` rather than being guessed at. **`refused` closes a
+    blind spot**: Gemini's filters decline this firm's routine evidence and the
+    refusal is otherwise invisible — the failover simply serves the next model.
+    Truncations and refusals also log one WARNING each, since both are silent
+    today (a truncated reply arrives as valid JSON that merely stops).
   - **`None` is not zero.** Unreported counts stay NULL; only the error *class* is
     stored, never the message, which can quote the statement being read.
   - **Recording never fails or slows the work.** A bounded queue and one writer
@@ -867,6 +906,33 @@ Deposit accounts keep the behaviour every bank statement depends on, and an
 unspecified type still reads as one. The FIS makes the same inversion for its
 own reason (`household_amount()`); these are the only two places anything does.
 Covered by `tests/test_long_statement.py` 9b.
+
+**A REWARDS OR POINTS BLOCK IS NOT A REGISTER, AND IT IS THE HARDEST ONE TO
+SEE.** A Chase Amazon Prime Visa statement prints SHOP WITH POINTS ACTIVITY
+after the register: the same purchases again, annotated with the points earned
+or redeemed on each. The ten-page document read **perfectly** — 246 lines whose
+two sides hit the printed totals to the cent — and then the `pages 9-10` pass
+took 22 rows more, which netted **278.62**, exactly the reconciliation delta
+reported.
+
+- **The sub-headings inside it are the words a real register uses** —
+  "PURCHASES AND REDEMPTIONS", "RETURNS AND OTHER CREDITS" — so no rule about a
+  row can separate them. The tell is the block: a **Rewards or Points column**
+  beside the dollar column, under a heading naming points. The prompts now say
+  to judge the block rather than the row, and to carry it onto a page headed
+  "(CONTINUED)".
+- **The rule is in BOTH prompts.** A ten-page card takes the chunked path, but a
+  short one is read in a single call and prints the same block — the drift that
+  let a policy statement be *read* with bank rules and *checked* with brokerage
+  rules is the same shape of mistake.
+- **Nothing but reconciliation can catch it, by design.** `_completeness_findings`
+  reports a side only when the extraction falls SHORT, because an excess usually
+  means the statement split its totals across named buckets. A double count is
+  an excess, so the statement arrived carrying `UNRECONCILED` and nothing more
+  specific — correct behaviour, and worth knowing when reading one.
+- Covered by `tests/test_long_statement.py` 9c, which pins the real figures:
+  the register alone ties to the printed close, and the rewards rows alone are
+  the delta.
 
 **Check the extraction against what the statement says about itself.** The account summary states its own answer — "24 Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and `_completeness_findings` compares both count and total per side, raising `INCOMPLETE_EXTRACTION` (warn). It reports a side only when the extraction falls **short** of what is printed, never when it exceeds it: a statement may split its debits across several named buckets — Bank of Texas prints "2 Checks & Withdrawals 159.11" and "Service Fees 2.00" separately — so extracting all three debits correctly reads as two too many against a single bucket. A shortfall has no innocent explanation; an excess usually does, and over-counting is caught by reconciliation instead. Reconciliation alone does catch a short read, but only as one unexplained delta; this says *which side* fell short and by how much, which is the difference between "something is wrong" and "the debits stopped after fifteen of two hundred sixty-two". Covered by `tests/test_long_statement.py`.
 
@@ -1150,6 +1216,36 @@ printed sequence, and a line that was not read off the page has no place in it),
 and the statement is re-reconciled **always**, not only when the gap closes,
 since a new line moves the sum in both directions. Covered by
 `tests/test_transaction_correction.py` 8-11.
+
+**A MISREAD BALANCE HAS NO OTHER REPAIR, AND EVERY ALTERNATIVE IS WORSE**
+(`correct_balances`). `beginning_balance` and `ending_balance` are written once,
+at ingest, so a figure the extraction got wrong used to leave three bad options:
+a **Retry**, which re-reads the same PDF through a `temperature: 0.0` profile
+and returns the same wrong number; an `UPDATE` typed into the database, leaving
+nothing a reader of the exhibit can see; or — the worst, and the tempting one —
+editing **transactions** until the arithmetic closes, which falsifies lines to
+fix a header figure and leaves the statement claiming to reconcile while the
+balance printed on the page disagrees with the record.
+
+- **The flag is the feature**, exactly as with `add_transaction`. Each changed
+  end carries `BALANCE_MANUALLY_ENTERED` with both values, the person, the time
+  and their reason. Nothing verifies the new figure is the one printed on the
+  page, because nothing can — which is precisely why the record names somebody.
+- **It re-reconciles through `_rereconcile`**, so a statement corrected into
+  balance stops claiming it is out of balance, and `review_status` is left
+  alone: clearing an exception is a decision, not a consequence of arithmetic.
+- **THE NEIGHBOURS ARE A FREE CHECK, and the UI does it.** A statement's
+  opening balance is the previous statement's close and its close is the next
+  one's opening, so where the account has adjacent statements the right figure
+  is already on screen. The dialog shows both and offers one click to use them.
+  It never fills them in automatically: the authority is the printed page, and
+  a chain that disagrees does not say *which* of the two statements is wrong.
+  Rejected reads are skipped — a discarded extraction is not evidence of a
+  balance.
+- **The control is the balances themselves** on the statement row in the
+  Accounts tab, because that is where somebody already is when they notice a
+  statement is off by a little.
+- Covered by `tests/test_transaction_correction.py` 12-14.
 
 **A line can be corrected after ingestion, but never quietly.** `correct_transaction()` appends a `MANUAL_CORRECTION` flag per changed field — the field, both values, the staff member's name, the timestamp, and an optional reason — so the original stays recoverable from the record that goes into an exhibit. It also writes an `audit_log` entry (§13). Only the nine fields in `_CORRECTABLE` may be changed; structural columns are not editable, because changing which statement a line belongs to is a re-ingest, not an edit.
 
@@ -2515,6 +2611,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Bates numbers entered by hand | ✅ Built — consecutive across the pages held, the range checked against them, flagged `BATES_MANUALLY_ENTERED` on the statement and every line |
 | Motion-to-compel text | ✅ Built — the compliance gaps as a numbered paragraph, in whole dates, copied to the clipboard |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
+| Correct a balance the import read wrong | ✅ Built — the balances on the statement row in the Accounts tab are the control. Re-reconciles on save and flags `BALANCE_MANUALLY_ENTERED` with both figures and the person. The dialog shows what the adjacent statements say the figure should be, since an opening balance is the previous statement's close |
 | Add a line the import missed | ✅ Built — `MANUAL_ENTRY` names the person, the time and their reason, and the statement re-reconciles on save. It replaces an INSERT typed into the database, which left nothing a reader of the exhibit could see |
 | Add a line the import missed | ✅ Built — `POST /statements/{id}/transactions`, from the statement drill-down. Flagged MANUAL_ENTRY with the person and reason, and the statement re-reconciles. Replaces an `INSERT` by hand, which left no trace on the exhibit |
 | Reject a statement (discards it and its lines) | ✅ Built — deletes; removes an emptied, uncharacterized account too |
@@ -2540,7 +2637,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Secrets from SSM under an IAM instance role | ✅ Built, opt-in — `CYCLONE_SECRETS_SOURCE=ssm`. Path from the EC2 instance tag, so no bootstrap credential and nothing to typo |
 | Supabase legacy key migration | ⏳ Code is ready and format-agnostic; startup warns with days remaining. **The key swap itself is a dashboard + .env change, deadline end of 2026** |
 | LLM cost pricing + Admin > Costs page | ✅ Built — 041, plus 043 for the **Firm** grouping. Dated `service_rates` priced at read time; spend by month × firm, vendor/model, task, matter, staff or source; missing-price to-do list; atomic set-price and audited corrections. Storage/hosting costs and budgets not started |
-| LLM usage ledger (`llm_calls`) | ✅ Built — 039. Every vendor attempt, normalized across vendors, attributed to firm / job / matter / staff / request / lead. Pricing is built (041); **storage and hosting costs, and budgets, are designed in `docs/cost-tracking-design.md` and not started** |
+| LLM usage ledger (`llm_calls`) | ✅ Built — 039, plus 042 (who answered) and **046 (why it stopped — `truncated` / `refused` / `complete`, reconciled across three vendor vocabularies)**. Every vendor attempt, normalized across vendors, attributed to firm / job / matter / staff / request / lead. Pricing is built (041); **storage and hosting costs, and budgets, are designed in `docs/cost-tracking-design.md` and not started** |
 | Per-firm settings in a `firms` table | ❌ Not started — `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT` are classified `PER_FIRM` and still served per process from `/api/config`. The multi-tenant blocker |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
@@ -2704,6 +2801,38 @@ drafts run on every eligible lead either way.
 The toggle is deliberately **not** described in `docs/user-guide/14-lead-routing.md`
 — documenting it would make the guide wrong in the same way the screen is.
 
+### Reading the payee off a check image
+
+**Asked for 2026-10-13, not started.** A check is the only debit that does not
+say where the money went, so the payee printed on the image is the answer to a
+question nothing else in the system can answer.
+
+**Its own module and its own processing step, never the statement prompt.** Tom's
+call and the right one, for reasons that go beyond tidiness:
+
+| | |
+| - | - |
+| **It is a different problem on a different unit.** | Statement extraction reads page TEXT. A check is a picture of a document inside a page, and the payee is handwriting or a laser line in one region of it. Nothing about reading a register helps. |
+| **The economics are inverted, so it must be ON DEMAND.** | A statement is a few calls for hundreds of lines; checks are one call each. A year of statements can carry 200 checks, most of which nobody will ever ask about — bolted onto ingest it would be the most expensive thing in the pipeline, and the spend is now visible on the Costs page. Run it for one statement, or for the checks on a filtered list, when somebody is actually chasing where money went. |
+| **A payee read off an image is a model's reading, and it reaches an exhibit.** | It belongs in `counterparty` with provenance saying so — never silently replacing the printed description, and never setting `category_id`. Same rule as `category_source`, and the same reason extraction never files a line. |
+
+What already exists and would be reused: `check_number` is stored and searchable
+(`checks_only`, or one number), `pdf_service.ask_page` is the narrow
+single-question vision call, flags carry per-field provenance, and
+`correct_transaction` already handles a person overruling the result.
+
+**Measure before designing.** Three empirical questions, all answerable from one
+real production and none worth guessing at:
+
+- Do the firm's productions actually carry check images? Some banks print them
+  in a cluster at the end, some four-up at low resolution, some not at all.
+- Can a check be LOCATED deterministically — by the check number printed beside
+  it — or does finding it need the model too? The former is the Bates argument
+  again: a pattern beats a comprehension task.
+- Does the resolution in a scanned production support reading a handwritten
+  payee at all? If it does not, the feature is for native-PDF productions only,
+  and that is worth knowing on day one rather than after it is built.
+
 ### Paused: Bates numbering on the way in, and client uploads
 
 **Paused 2026-10-06 pending paralegal feedback**, not abandoned. Tom is taking
@@ -2846,6 +2975,8 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Answer a client 403 for a matter that is not theirs | A 403 confirms the matter exists. 404, with wording that does not distinguish the two |
 | Delete a client's tag when staff reject it | The pair is freed and the next click recreates it. Clear it: the row holds the pair, so the re-apply lands there and is refused |
 | Show a client a staff-worded extraction flag | It tells them their bank statement is broken. The portal has its own schema and its own words |
+| Edit transactions until an out-of-balance statement closes | If the BALANCE was misread, that falsifies lines to fix a header figure and the statement then reconciles against a number the page contradicts. Correct the balance (`correct_balances`) |
+| Retry a statement to fix a misread balance | It re-reads the same PDF at `temperature: 0.0` and returns the same figure. Retry is for a read that can come out differently, not a wrong number |
 | Add a missing line with an INSERT into the database | It leaves no trace on the exhibit the figure reaches. `add_transaction` flags it MANUAL_ENTRY with the person and reason, and re-reconciles |
 | Overwrite an extracted value in place | Correct it through `correct_transaction()` — the flag trail is what makes the figure defensible |
 | Convert `Decimal`/`date` to `str` before `repo.update()` | Pass the native type; `json_safe` handles it, and converting early corrupts the returned model |
@@ -2865,6 +2996,12 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Test an Anthropic model family with `"-5" in model` | That matches `claude-haiku-4-5-…` too, and silently drops `temperature` on tasks that ask for 0.0. Use `_anthropic_takes_temperature` |
 | Read a Gemini `504 DEADLINE_EXCEEDED` as a network fault | It is usually our own deadline. Gemini enforces it server-side and reports it in Google's error format |
 | Set one global timeout for every task | A long answer needs a long deadline, and a short one silently selects for the model that quits earliest. Use `timeout_seconds` on the profile |
+| Build an Anthropic or OpenAI client without `max_retries` | Both default to 2 and retry a timeout, per attempt — so a 300s deadline is a 900s one. A measured chunk failed after 901,587 ms and ate 15 of a 23-minute job. `_MAX_RETRIES = 0`; the failover is the retry, and it moves to a *different* vendor |
+| Infer "it ran out of room" from `output_tokens` against the configured ceiling | The vendor says which, and we were discarding it. `stop_reason` (046), plus `stop_reason_class` so one query spans three vocabularies |
+| Assume a Gemini refusal shows up as a finish reason | A blocked PROMPT returns no candidates at all; the reason is on `prompt_feedback.block_reason`. Read it, or the refusal records as nothing having happened |
+| Retry a rejected ledger insert once | PostgREST names ONE missing column per rejection, so a database behind by two migrations writes nothing. Shed the group and loop (`_LATE_COLUMNS`) |
+| Read a timed-out call as costing nothing | It records no usage, so the SDK's hidden retries generated a ~34,000-token answer three times and left one row with NULL tokens. Spend the Costs page cannot see is spend nobody can question |
+| Extract a rewards or points-activity block | It restates purchases already in the register to report their points, so it charges the card twice. 22 such rows were the whole of one statement's 278.62 delta. The Rewards COLUMN is the tell — its sub-headings are a register's own words |
 | Return `""` for a page OCR could not read | Leave the marker. A page known to be missing and a page that was blank are not the same fact |
 | Repair only the nulls when a batch comes back with missing dates | A null marks a degraded call; the dates it did produce are equally suspect. Re-read the whole batch's date column |
 | Match a re-read line by its description or amount | Both repeat constantly on a statement. Match by printed position |

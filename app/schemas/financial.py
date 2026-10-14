@@ -190,6 +190,30 @@ class StatementBatesResult(BaseModel):
     pages_numbered: int = Field(..., description="Pages that received a number")
 
 
+class StatementBalanceRequest(BaseModel):
+    """
+    An opening or closing balance read off the page, replacing a misread one.
+
+    Either end, or both. Omitting one leaves it alone, which is why these are
+    Optional rather than defaulting to the current value: a null here means
+    "do not touch", and the service distinguishes that from a change.
+    """
+
+    beginning_balance: Optional[Decimal] = Field(
+        default=None, description="The opening balance as printed. Omit to leave it alone")
+    ending_balance: Optional[Decimal] = Field(
+        default=None, description="The closing balance as printed. Omit to leave it alone")
+    reason: Optional[str] = Field(
+        default=None, max_length=500,
+        description="Why it is being changed, kept on the flag the correction leaves")
+
+    @model_validator(mode="after")
+    def _one_end_at_least(self) -> "StatementBalanceRequest":
+        if self.beginning_balance is None and self.ending_balance is None:
+            raise ValueError("Give a beginning balance, an ending balance, or both")
+        return self
+
+
 class MotionTextResponse(BaseModel):
     """The missing statements as a paragraph for a motion to compel."""
 

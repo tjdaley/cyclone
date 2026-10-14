@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getMatter, getOpposingParties,
   queueStatement, awaitStatementJob, retryStatement, setStatementBoundary,
+  correctStatementBalances,
   setStatementBates,
   getFinancialAccounts, updateFinancialAccount,
   getAccountStatements, getStatementExceptions, reviewStatement,
@@ -271,6 +272,8 @@ export default function MatterFinancialsPage() {
   /** Open when an account is being added by hand; carries any prefill. */
   /** The statement whose Bates numbers are being typed in. */
   const [batesFor, setBatesFor] = useState<AccountStatement | null>(null)
+  /** The statement whose opening or closing balance is being corrected. */
+  const [balancesFor, setBalancesFor] = useState<AccountStatement | null>(null)
   const [addingAccount, setAddingAccount] = useState<
     null | { institution?: string | null; account_number_last4?: string | null;
              account_number_masked?: string | null }>(null)
@@ -1097,6 +1100,31 @@ export default function MatterFinancialsPage() {
           }} />
       )}
 
+      {balancesFor && (
+        <StatementBalanceDialog
+          statement={balancesFor}
+          /* The neighbours come from the list already on screen — no fetch.
+             Found by period rather than array position, so the hint stays right
+             whatever order the list arrives in, and rejected reads are skipped
+             because a discarded extraction is not evidence of a balance. */
+          prior={statements
+            .filter(x => x.review_status !== 'rejected'
+                      && x.period_end <= balancesFor.period_start && x.id !== balancesFor.id)
+            .sort((a, b) => b.period_end.localeCompare(a.period_end))[0]}
+          next={statements
+            .filter(x => x.review_status !== 'rejected'
+                      && x.period_start >= balancesFor.period_end && x.id !== balancesFor.id)
+            .sort((a, b) => a.period_start.localeCompare(b.period_start))[0]}
+          onClose={() => setBalancesFor(null)}
+          onSaved={async updated => {
+            setStatements(prev => prev.map(x => (x.id === updated.id ? updated : x)))
+            setBalancesFor(null)
+            // The reconciliation moved, so the badge, the exceptions queue and
+            // the account's totals are all stale.
+            await refresh()
+          }} />
+      )}
+
       {batesFor && (
         <BatesDialog
           statement={batesFor}
@@ -1262,9 +1290,20 @@ export default function MatterFinancialsPage() {
                             <option value="opening">first statement †</option>
                             <option value="closing">last statement ‡</option>
                           </select>
-                          <span className="text-xs text-text-secondary tabular-nums">
+                          {/* The balances are the control, because this is where
+                              somebody already looks when a statement is off by a
+                              little — and a misread opening balance has no other
+                              repair: a Retry re-reads the same PDF and returns the
+                              same number. */}
+                          <button type="button"
+                            className="text-xs text-text-secondary tabular-nums underline
+                                       decoration-dotted hover:text-navy"
+                            disabled={busy}
+                            title={busy ? RETRY_WAIT
+                              : 'Correct a balance the import read wrong'}
+                            onClick={() => setBalancesFor(s)}>
                             {money(s.beginning_balance)} → {money(s.ending_balance)}
-                          </span>
+                          </button>
                           <button type="button"
                             className={`text-xs text-red-700 underline ${linkBusy}`}
                             title={busy ? RETRY_WAIT : undefined} disabled={busy}
@@ -1732,6 +1771,167 @@ function MergePanel({ account, accounts, onMerged }: {
  * arithmetic can check the span: being off by one mis-cites every line after
  * the first, silently, which is worse than no citation at all.
  */
+/** A typed figure, forgiving about how it was pasted. "$1,300.03" -> "1300.03". */
+function cleanMoney(text: string): string {
+  return text.replace(/[$,\s]/g, '')
+}
+
+/** Whole dollars and cents, optionally negative. Never parsed through Number(). */
+const MONEY_SHAPE = /^-?\d+(\.\d{1,2})?$/
+
+function sameMoney(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false
+  const [x, y] = [cleanMoney(a), cleanMoney(b)]
+  // Compare as fixed-point text, so "1300.0" and "1300.00" agree without a
+  // float ever existing. Pad the cents rather than parsing.
+  const pad = (v: string) => (v.includes('.') ? v : `${v}.0`).replace(/(\.\d)$/, '$10')
+  return pad(x) === pad(y)
+}
+
+/**
+ * Correct a balance the extraction read wrong.
+ *
+ * **The neighbours are the check, and they are free.** A statement's opening
+ * balance is the previous statement's close, and its close is the next one's
+ * opening — so where the account has adjacent statements the right figure is
+ * already on screen, and a mismatch says which end is suspect without anybody
+ * fetching a PDF. Offered as a hint with one click to use it, never filled in
+ * automatically: the authority is the figure printed on the page, and a chain
+ * that disagrees does not say WHICH of the two statements is wrong.
+ */
+function StatementBalanceDialog({ statement, prior, next, onSaved, onClose }: {
+  statement: AccountStatement
+  prior?: AccountStatement
+  next?: AccountStatement
+  onSaved: (updated: AccountStatement) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [beginning, setBeginning] = useState(statement.beginning_balance ?? '')
+  const [ending, setEnding] = useState(statement.ending_balance ?? '')
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const beginningChanged = !sameMoney(beginning, statement.beginning_balance)
+  const endingChanged = !sameMoney(ending, statement.ending_balance)
+  const typed = [beginning, ending].filter(v => v.trim())
+  const malformed = typed.some(v => !MONEY_SHAPE.test(cleanMoney(v)))
+  const nothingToDo = !beginningChanged && !endingChanged
+
+  async function save() {
+    setBusy(true); setError(null)
+    try {
+      await onSaved(await correctStatementBalances(statement.id, {
+        // Only the end that moved. Omitting one leaves it alone, which is what
+        // keeps a flag off a figure nobody touched.
+        ...(beginningChanged ? { beginning_balance: cleanMoney(beginning) } : {}),
+        ...(endingChanged ? { ending_balance: cleanMoney(ending) } : {}),
+        ...(reason.trim() ? { reason: reason.trim() } : {}),
+      }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the balances')
+      setBusy(false)
+    }
+  }
+
+  /** What the statement either side of this one says this figure should be. */
+  function Chain({ neighbour, expected, current, onUse, label }: {
+    neighbour?: AccountStatement
+    expected: string | null
+    current: string
+    onUse: () => void
+    label: string
+  }) {
+    if (!neighbour || expected === null) {
+      return (
+        <p className="text-xs text-text-secondary mt-1">
+          No {label} statement is held, so there is nothing to check this against.
+        </p>
+      )
+    }
+    const agrees = sameMoney(current, expected)
+    return (
+      <p className={`text-xs mt-1 ${agrees ? 'text-text-secondary' : 'text-amber-700'}`}>
+        {agrees ? '✓ ' : '≠ '}
+        The {label} statement ({period(neighbour)}) {label === 'previous' ? 'closed' : 'opened'} at{' '}
+        <span className="font-mono tabular-nums">{money(expected)}</span>
+        {!agrees && (
+          <>
+            {' '}
+            <button type="button" className="text-navy underline" onClick={onUse}>use it</button>
+          </>
+        )}
+      </p>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4"
+      role="dialog" aria-modal="true" aria-label="Correct the balances"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="card p-5 w-full max-w-lg my-8 bg-white">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="font-semibold text-navy">Balances for {period(statement)}</h2>
+          <button type="button" className="text-sm text-text-secondary hover:text-navy"
+            onClick={onClose}>Close</button>
+        </div>
+        <p className="text-xs text-text-secondary mb-4">
+          Copy the figures off the statement. Changing one re-checks the arithmetic against the
+          lines on it, so a statement corrected into balance stops reporting as unreconciled.
+          Both the old and new figures are recorded against your name.
+        </p>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="bal-beginning">Opening balance</label>
+            <input id="bal-beginning" className="input mt-1 font-mono tabular-nums"
+              value={beginning} placeholder="0.00"
+              onChange={e => setBeginning(e.target.value)} />
+            <Chain neighbour={prior} expected={prior?.ending_balance ?? null}
+              current={beginning} label="previous"
+              onUse={() => setBeginning(prior?.ending_balance ?? '')} />
+          </div>
+          <div>
+            <label className="label" htmlFor="bal-ending">Closing balance</label>
+            <input id="bal-ending" className="input mt-1 font-mono tabular-nums"
+              value={ending} placeholder="0.00"
+              onChange={e => setEnding(e.target.value)} />
+            <Chain neighbour={next} expected={next?.beginning_balance ?? null}
+              current={ending} label="next"
+              onUse={() => setEnding(next?.beginning_balance ?? '')} />
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <label className="label" htmlFor="bal-reason">Reason</label>
+          <input id="bal-reason" className="input mt-1" value={reason}
+            placeholder="Read off page 1; the import picked up the previous period's close"
+            onChange={e => setReason(e.target.value)} />
+        </div>
+
+        {malformed && (
+          <p className="text-sm text-amber-700 mt-3">
+            A balance must be a figure like 1300.03 or -245.00.
+          </p>
+        )}
+        {error && <p className="text-sm text-red-700 mt-3">{error}</p>}
+
+        <div className="flex items-center justify-end gap-3 mt-5">
+          <button type="button" className="btn-secondary" disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary"
+            disabled={busy || malformed || nothingToDo}
+            title={nothingToDo ? 'Neither figure has changed' : undefined}
+            onClick={() => void save()}>
+            {busy ? 'Saving…' : 'Save balances'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function BatesDialog({ statement, onSaved, onClose }: {
   statement: AccountStatement
   onSaved: (updated: AccountStatement) => void | Promise<void>

@@ -140,8 +140,8 @@ read as a transaction register, a statement imported onto the wrong matter.
 printed.** Cyclone tells you the exact difference and has added nothing to
 force it to balance.
 
-There are exactly **two** reasons this happens, and they have different repairs.
-Work out which one you have before doing anything else.
+There are **three** reasons this happens, and they have different repairs. Work
+out which one you have before doing anything else.
 
 ### Cause 1 — The import failed *(much the most common)*
 
@@ -168,7 +168,28 @@ Splitting is the fix, not retrying the same enormous file. **Retry** is worth
 one attempt on a document that is already a single statement; on a file holding
 a year, it will get lost the same way.
 
-### Cause 2 — The document itself is defective
+### Cause 2 — One of the balances was misread
+
+The transactions are right and a **header figure** is wrong. The signs:
+
+- The line count looks right for the period, and **INCOMPLETE_EXTRACTION is
+  absent**.
+- The difference does not match any line, or any page's worth of activity.
+- **The opening balance does not equal the previous statement's closing
+  balance.** That is the strongest signal, and the dialog below checks it for
+  you.
+- A common shape: the import picked up the *previous* period's closing figure
+  from the top of page 1.
+
+**The repair:** read the balance off the page and
+[correct it](07-viewing-statements.md#correcting-a-balance-the-import-read-wrong)
+— click the balance on the statement row. The statement re-reconciles when you
+save, and the correction is recorded with your name on it.
+
+**Retry does not fix this.** It re-reads the same PDF and returns the same
+number.
+
+### Cause 3 — The document itself is defective
 
 The reading is faithful. The statement is the problem: a **missing page**, or a
 multi-statement scan with **missing or badly out-of-order pages**. The signs:
@@ -188,7 +209,7 @@ multi-statement scan with **missing or badly out-of-order pages**. The signs:
 A missing page is also a **discovery finding**. Tell the attorney regardless of
 whether you manage to get a replacement.
 
-### The rare third outcome — the attorney decides to accept
+### The last outcome — the attorney decides to accept
 
 Sometimes no better statement can be had. In that case the attorney may decide
 it is worth accepting the unreconciled statement to capture what we can from it.
@@ -223,6 +244,7 @@ Every flag you can meet, what it means, and what to do about it.
 | Flag | What it means | What to do |
 | ---- | ------------- | ---------- |
 | **UNRECONCILED** | Opening + transactions does not equal the printed closing balance. The exact difference is given. Nothing was invented to close the gap. | **See [An unreconciled statement: what to do](#an-unreconciled-statement-what-to-do).** Either the import failed (split the PDF and re-import) or the document is defective (get a better copy). **Never accept it without attorney approval.** |
+| **BALANCE_MANUALLY_ENTERED** *(grey)* | Somebody corrected a balance by hand. Both figures, their name, the time and their reason are recorded. | Informational. It is how a misread header figure gets fixed — see [Chapter 7](07-viewing-statements.md#correcting-a-balance-the-import-read-wrong) |
 | **BALANCE_MISSING** | The statement did not print both a beginning and an ending balance, so there was nothing to check against. | Look at the source. Some statement formats genuinely do not print both — but first make sure this is not a page that failed to read. A statement with no self-check has an **unverified** transaction list, so treat accepting it the same way as an unreconciled one: raise it with the attorney rather than deciding alone. |
 
 ### The extraction may be incomplete — the serious ones
@@ -270,6 +292,20 @@ that a register which *looks* wrong can be told from one that is.
 > the type on the Accounts tab
 > ([Chapter 6](06-merging-accounts.md#the-account-types-and-the-four-that-are-not-obvious)).
 > The type also decides how the FIS treats that account's spending.
+
+> **A card statement that is unreconciled by exactly the value of its rewards
+> block was double-counting purchases.** An Amazon card prints *"SHOP WITH
+> POINTS ACTIVITY"*; American Express prints *"MEMBERSHIP REWARDS"*. Those
+> blocks **restate purchases already listed** in the account activity, to report
+> the points earned or redeemed on them — and their sub-headings are the words a
+> real register uses, *"PURCHASES AND REDEMPTIONS"*, *"RETURNS AND OTHER
+> CREDITS"*, so the block read as a second register. On one statement that added
+> 22 rows, and their total was exactly the amount the statement was out by.
+>
+> It is fixed: those blocks are no longer extracted. **An older card import
+> showing that shape should be re-read with Retry**, not corrected line by line
+> — the extra rows are real purchases counted twice, and a doubled debit
+> reconciles to a wrong number rather than an obviously wrong one.
 
 ### One statement may have been read as two
 
@@ -385,7 +421,7 @@ one you clicked.
 | Situation | Do this |
 | --------- | ------- |
 | It reconciles, and the flag is explaining something informational | **Accept** |
-| **It does not reconcile** | **Do not accept.** [Work out which of the two causes it is](#an-unreconciled-statement-what-to-do), repair it, and escalate if it cannot be repaired |
+| **It does not reconcile** | **Do not accept.** [Work out which of the three causes it is](#an-unreconciled-statement-what-to-do), repair it, and escalate if it cannot be repaired |
 | The read is short on a single-statement PDF | **Retry**, once |
 | The read is short on a long or multi-statement PDF | **Reject**, split into one statement per file, upload them together |
 | It is not a real statement, or it duplicates one | **Reject and delete** |

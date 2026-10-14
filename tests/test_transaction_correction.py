@@ -258,6 +258,66 @@ try:
 except ValueError as e:
     check("refused", str(e), "Statement not found")
 
+# ── 12. A balance the extraction read wrong ──────────────────────────────
+#
+# Written once at ingest and never afterwards, so the only repairs were a Retry
+# that re-reads the same PDF at temperature 0 and returns the same number, or an
+# UPDATE by hand that leaves nothing on the exhibit. The third temptation is the
+# worst: editing TRANSACTIONS until the arithmetic closes falsifies lines to fix
+# a header figure.
+print("12. a misread opening balance")
+# Lines total -300.00. Printed close 0.03. The extraction read the opening as
+# 300.03 when the page says 1,300.03, so it is out by exactly 1,000.
+t, s = wire([transaction(1, amount="-300.00")],
+            [statement(beginning="300.03", ending="1000.03", flags=[
+                {"code": "UNRECONCILED", "severity": "warn", "field_path":
+                 "balances.ending_balance", "note": "stale"}])])
+st = statement_service.correct_balances(
+    None, 10, Decimal("1300.03"), None, staff_id=3, staff_name="Tom Daley",
+    reason="read off page 1")
+
+check("the balance is corrected", st["beginning_balance"], Decimal("1300.03"))
+check("the other end is left alone", st["ending_balance"], Decimal("1000.03"))
+# The point of allowing the edit: the statement was never wrong, the reading was.
+check("and it now reconciles", st["reconciled"], True)
+check("against the printed close", st["computed_ending_balance"], Decimal("1000.03"))
+codes = [f["code"] for f in st["flags"]]
+check("the stale UNRECONCILED is replaced, not stacked", codes, ["BALANCE_MANUALLY_ENTERED"])
+flag = st["flags"][0]
+check("both values are recoverable", (flag["from"], flag["to"]), ("300.03", "1300.03"))
+check("attributed", (flag["by"], flag["by_staff_id"]), ("Tom Daley", 3))
+check("it reads as a sentence", flag["note"],
+      "beginning balance set to 1300.03 by Tom Daley (read off page 1). "
+      "Extraction read 300.03.")
+check("severity is info -- it is a record, not a problem", flag["severity"], "info")
+# Clearing the exception stays a decision, exactly as _rereconcile has it.
+check("review_status is untouched", "review_status" in st, False)
+
+print("13. both ends at once, and a figure that did not move")
+t, s = wire([transaction(1, amount="-300.00")], [statement(beginning="300.03", ending="0.03")])
+st = statement_service.correct_balances(
+    None, 10, Decimal("1300.03"), Decimal("1000.03"), 3, "Tom Daley")
+check("two flags, one per end", len(st["flags"]), 2)
+check("naming each field",
+      [f["field"] for f in st["flags"]], ["beginning_balance", "ending_balance"])
+
+t, s = wire([transaction(1)], [statement(beginning="300.03", ending="0.03")])
+try:
+    # Decimal("300.03") == Decimal("300.030"), so re-typing the same figure in a
+    # different shape is correctly not a change.
+    statement_service.correct_balances(None, 10, Decimal("300.030"), None, 3, "Tom")
+    check("a no-op is refused", False, True)
+except ValueError as e:
+    check("a no-op is refused", "Nothing to change" in str(e), True)
+
+print("14. a statement that does not exist")
+t, s = wire([], [statement()])
+try:
+    statement_service.correct_balances(None, 999, Decimal("1.00"), None, 3, "Tom")
+    check("refused", False, True)
+except ValueError as e:
+    check("refused", str(e), "Statement 999 not found")
+
 print()
 print("FAILURES: %d" % len(FAILURES))
 for f in FAILURES:

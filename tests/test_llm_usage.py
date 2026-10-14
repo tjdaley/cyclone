@@ -370,6 +370,72 @@ check("an SDK whose usage moved still reports who answered",
       (noted["served_model"], noted["counts"]["output_tokens"]), ("gpt-5-2025-08-07", None))
 
 print("")
+print("Why it stopped -- three vocabularies, one question (046)")
+# "Short extraction: out of room, or did it decide it was done?" wants opposite
+# fixes, and output_tokens against a max_tokens living in a JSON file inside
+# the image can only ever imply the answer. Every vendor states it.
+check("Anthropic says end_turn",
+      llm_usage.stop_of("anthropic", NS(stop_reason="end_turn")), "end_turn")
+check("OpenAI says it on the choice, not the response",
+      llm_usage.stop_of("openai", NS(choices=[NS(finish_reason="length")])), "length")
+check("Gemini reports an ENUM, not a string",
+      llm_usage.stop_of("gemini", NS(candidates=[NS(finish_reason=NS(name="MAX_TOKENS"))])),
+      "max_tokens")
+# The refusal this firm actually meets: Gemini blocks the PROMPT, so there are
+# no candidates at all and the reason is somewhere else entirely. Without this
+# branch it would record as nothing having happened.
+check("a blocked Gemini prompt has no candidates, and still says why",
+      llm_usage.stop_of("gemini", NS(candidates=[],
+                                     prompt_feedback=NS(block_reason=NS(name="SAFETY")))),
+      "safety")
+check("no response, no reason", llm_usage.stop_of("anthropic", None), None)
+check("an empty choices list does not raise",
+      llm_usage.stop_of("openai", NS(choices=[])), None)
+
+check("three spellings of 'it ran out of room' reconcile",
+      [llm_usage._stop_class(w) for w in ("max_tokens", "length", "max_tokens")],
+      ["truncated", "truncated", "truncated"])
+check("and three of 'the filters stopped it'",
+      [llm_usage._stop_class(w) for w in ("refusal", "content_filter", "safety")],
+      ["refused", "refused", "refused"])
+check("finishing is finishing, whoever says it",
+      [llm_usage._stop_class(w) for w in ("end_turn", "stop", "stop_sequence")],
+      ["complete", "complete", "complete"])
+# A word no vendor documents yet is 'other', never guessed into a class that
+# would make a report confidently wrong. The verbatim word is stored beside it,
+# so it can be reclassified over history rather than only going forward.
+check("a word nobody has seen before is 'other', not a guess",
+      llm_usage._stop_class("quantum_collapse"), "other")
+check("and nothing reported stays None", llm_usage._stop_class(None), None)
+
+llm_usage.begin_attempt()
+llm_usage.note_response("anthropic", NS(model="claude-opus-5", id="msg_1",
+                                        stop_reason="max_tokens", usage=None))
+noted = llm_usage._NOTED.get()
+check("note_response carries both the word and the class",
+      (noted["stop_reason"], noted["stop_reason_class"]), ("max_tokens", "truncated"))
+
+# Reading the stop reason must not be able to cost us the usage, or the fix
+# would be worse than the gap -- same rule as the served model above.
+
+
+class StopExplodes:
+    model = "claude-opus-5"
+    id = "msg_2"
+    usage = NS(input_tokens=10, output_tokens=20)
+
+    @property
+    def stop_reason(self):
+        raise AttributeError("SDK changed shape")
+
+
+llm_usage.begin_attempt()
+llm_usage.note_response("anthropic", StopExplodes())
+noted = llm_usage._NOTED.get()
+check("an SDK that moved the stop reason still reports the tokens",
+      (noted["stop_reason"], noted["counts"]["output_tokens"]), (None, 20))
+
+print("")
 print("The database writer: firm_id omitted, and a missing table says so once")
 inserted: list = []
 
@@ -377,6 +443,7 @@ inserted: list = []
 class FakeRepo:
     fail_with = None
     before_042 = False
+    before_046 = False
 
     def __init__(self, manager):
         pass
@@ -384,9 +451,15 @@ class FakeRepo:
     def insert(self, data):
         if FakeRepo.fail_with:
             raise RuntimeError(FakeRepo.fail_with)
+        # PostgREST names exactly ONE missing column per rejection, however many
+        # the row carries that the table has not got. That is why the writer
+        # loops instead of retrying once.
         if FakeRepo.before_042 and "served_model" in data:
             raise RuntimeError("{'code': 'PGRST204', 'message': \"Could not find the "
                                "'served_model' column of 'llm_calls' in the schema cache\"}")
+        if FakeRepo.before_046 and "stop_reason" in data:
+            raise RuntimeError("{'code': 'PGRST204', 'message': \"Could not find the "
+                               "'stop_reason' column of 'llm_calls' in the schema cache\"}")
         inserted.append(data)
 
 
@@ -435,6 +508,46 @@ try:
           [sorted(set(r) & {"served_model", "vendor_response_id"}) for r in inserted], [[], []])
     check("keeping the tokens", [r["output_tokens"] for r in inserted], [10, 10])
     check("and the writer is not disabled", (old_table._disabled, old_table._failures), (False, 0))
+
+    # A database behind by TWO migrations. The first rejection names
+    # served_model and the second names stop_reason, so a writer that retried
+    # only once would write nothing at all here -- which is the whole reason
+    # _insert is a loop.
+    FakeRepo.before_046 = True
+    inserted.clear()
+    full = a_call().model_copy(update={"served_model": "gpt-5-2025-08-07",
+                                       "vendor_response_id": "chatcmpl-1",
+                                       "stop_reason": "length",
+                                       "stop_reason_class": "truncated"})
+    behind_two = llm_usage._DatabaseWriter()
+    behind_two.submit(full)
+    behind_two.flush(timeout=5)
+    check("a database behind by two migrations still gets its row", len(inserted), 1)
+    check("without either group of columns",
+          sorted(set(inserted[0]) & {"served_model", "vendor_response_id",
+                                     "stop_reason", "stop_reason_class"}), [])
+    check("and the tokens survive both sheds", inserted[0]["output_tokens"], 10)
+    check("the writer stays healthy",
+          (behind_two._disabled, behind_two._failures), (False, 0))
+
+    # Having shed them once, it must not pay the two rejections again per row.
+    inserted.clear()
+    behind_two.submit(full)
+    behind_two.flush(timeout=5)
+    check("later rows go straight out, already shed", len(inserted), 1)
+    check("nothing was counted as a failure", behind_two._failures, 0)
+
+    # A rejection that is NOT a late column must still surface as a failure,
+    # or a real schema problem would be silently shed forever.
+    FakeRepo.before_042 = FakeRepo.before_046 = False
+    FakeRepo.fail_with = ("{'code': 'PGRST204', 'message': \"Could not find the "
+                          "'something_else' column of 'llm_calls' in the schema cache\"}")
+    unknown = llm_usage._DatabaseWriter()
+    unknown.submit(a_call())
+    unknown.flush(timeout=5)
+    check("an unknown missing column is a failure, not a shed",
+          (unknown._failures, unknown._shed), (1, set()))
+    FakeRepo.fail_with = None
 finally:
     db_handler.SupabaseManager = saved_manager
     if saved_repo_module is None:

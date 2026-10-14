@@ -296,6 +296,45 @@ and it leaves nothing on the page a reader can see.
 
 ---
 
+## Correcting a balance the import read wrong
+
+The opening and closing balances on a statement row are **clickable**, shown
+with a dotted underline. Click either one to correct both.
+
+1. Open the source PDF and read the balance off the page.
+2. Click the balance on the statement row.
+3. Type the figure as printed, into **Opening balance** or **Closing balance**.
+4. Type your reason.
+5. Click **Save**.
+
+The statement re-reconciles at once.
+
+**A misread balance has no other repair, which is why this exists.** A **Retry**
+re-reads the same PDF and returns the same number. Everything else leaves the
+statement permanently out of balance, or invites somebody to adjust a
+*transaction* to close a gap the header caused — and then the arithmetic ties
+while the page disagrees with the record.
+
+### The dialog offers the neighbouring figures
+
+A statement's opening balance should equal the previous statement's closing
+balance. Where Cyclone holds the neighbour, the dialog says what that figure is
+and offers **use it**.
+
+**It is a hint, never a default.** Nothing is filled in for you: the number on
+the page is the evidence, and the chain is only a way of telling you which page
+to look at.
+
+> **The correction is recorded as `BALANCE_MANUALLY_ENTERED`** — both figures,
+> your name, the time and your reason — for the same reason a corrected line
+> and an added line are. A balance anchors the whole reconciliation, so a figure
+> that reached an exhibit should be able to say where it came from.
+>
+> **It does not clear the exceptions queue.** Accepting a statement stays a
+> decision somebody makes, not a consequence of the arithmetic working out.
+
+---
+
 ## Removing a line, and putting it back
 
 In the same dialog: **Remove this line**, then confirm.

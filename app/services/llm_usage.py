@@ -69,6 +69,27 @@ support can look up.
 
 Read separately from usage, so an SDK that moved its usage object still reports
 who answered, and the other way round.
+
+WHY IT STOPPED IS A FACT, NOT AN INFERENCE
+────────────────────────────────────────────────────────────────────────────
+"The extraction came back short — did it run out of room, or decide it was
+done?" wants opposite fixes: a bigger ceiling, or smaller chunks. ``output_tokens``
+against a ``max_tokens`` that lives in a JSON file inside the image can only
+ever imply the answer; every vendor states it outright, in its own vocabulary
+(``stop_reason`` on Anthropic, ``choices[0].finish_reason`` on OpenAI-compatible
+replies, ``candidates[0].finish_reason`` on Gemini — or ``prompt_feedback.block_reason``
+when Gemini blocks a prompt outright and returns no candidates at all).
+
+Both are stored (046): the vendor's own word verbatim, for the same reason
+``usage_raw`` is kept, and ``stop_reason_class`` reconciling three vocabularies
+into ``complete`` / ``truncated`` / ``refused`` / ``other`` — because a query
+for "what truncated?" should not require knowing all three spellings. An
+unrecognized word classes as ``other`` rather than being guessed at.
+
+**``refused`` closes a blind spot rather than adding a nicety.** Gemini's
+filters decline material describing crimes against minors, which in family law
+is routine evidence, and that refusal is invisible today: the failover just
+serves the next model (CLAUDE.md §11). This is where it becomes countable.
 """
 import atexit
 import json
@@ -76,7 +97,7 @@ import queue
 import threading
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from util import usage_scope
 from util.loggerfactory import LoggerFactory
@@ -244,6 +265,80 @@ def served_of(vendor: str, response: Any) -> tuple[Optional[str], Optional[str]]
             _identity(getattr(response, "id", None)))
 
 
+#: Each vendor's word for "I stopped because I ran out of room", and for "the
+#: filters stopped me". Compared lowercased, so Gemini's SHOUTING enum matches.
+#: Anything unlisted classes as 'other' RATHER than being guessed at -- the
+#: verbatim word is stored beside the class, so a value a vendor adds later can
+#: be reclassified over history instead of only going forward.
+_TRUNCATED_WORDS = frozenset({"max_tokens", "length", "model_length", "max_output_tokens"})
+_REFUSED_WORDS = frozenset({
+    "refusal", "content_filter", "safety", "prohibited_content", "blocklist", "spii",
+    "recitation", "image_safety",
+})
+#: Said by every vendor to mean "it finished". Gemini's is STOP; Anthropic also
+#: ends on a stop sequence or a tool call, both of which are the model choosing
+#: to stop rather than being cut off.
+_COMPLETE_WORDS = frozenset({"end_turn", "stop", "stop_sequence", "tool_use", "tool_calls",
+                             "function_call", "pause_turn"})
+
+
+def _stop_class(reason: Optional[str]) -> Optional[str]:
+    """``stop_reason`` reconciled to complete | truncated | refused | other."""
+    if reason is None:
+        return None
+    word = reason.lower()
+    if word in _TRUNCATED_WORDS:
+        return "truncated"
+    if word in _REFUSED_WORDS:
+        return "refused"
+    if word in _COMPLETE_WORDS:
+        return "complete"
+    return "other"
+
+
+def _enum_name(value: Any) -> Optional[str]:
+    """A finish reason as text. Gemini reports an enum member, the others a string."""
+    if value is None:
+        return None
+    return _identity(getattr(value, "name", None) or str(value))
+
+
+def stop_of(vendor: str, response: Any) -> Optional[str]:
+    """
+    Why the vendor stopped generating, in its own word.
+
+    The answer to "did it run out of room, or decide it was done?", which
+    ``output_tokens`` can only ever imply -- and the only place a Gemini safety
+    refusal becomes visible, since the failover otherwise just serves the next
+    model and nothing says why (CLAUDE.md §11).
+
+    :return: The vendor's word, lowercased, or None where not reported.
+    """
+    if response is None:
+        return None
+    if vendor == "gemini":
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            name = _enum_name(getattr(candidates[0], "finish_reason", None))
+            if name:
+                return name.lower()
+        # No candidates at all is the shape a BLOCKED PROMPT takes -- the
+        # refusal this firm actually meets, and it is reported somewhere else
+        # entirely. Without this branch it would record as nothing happening.
+        blocked = _enum_name(getattr(getattr(response, "prompt_feedback", None),
+                                     "block_reason", None))
+        return blocked.lower() if blocked else None
+    if vendor == "anthropic":
+        name = _identity(getattr(response, "stop_reason", None))
+        return name.lower() if name else None
+    # OpenAI, Groq, DeepSeek, and anything else OpenAI-compatible.
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return None
+    name = _identity(getattr(choices[0], "finish_reason", None))
+    return name.lower() if name else None
+
+
 # ── The side channel from a vendor call back to the failover loop ────────────
 #
 # The `_call_*` functions return text, and every caller and test depends on that
@@ -259,6 +354,8 @@ def _nothing_noted() -> dict[str, Any]:
         "raw": None,
         "served_model": None,
         "vendor_response_id": None,
+        "stop_reason": None,
+        "stop_reason_class": None,
     }
 
 
@@ -285,6 +382,21 @@ def note_response(vendor: str, response: Any) -> None:
         LOGGER.warning("llm_usage: could not read the served model from a %s response (%s)",
                        vendor, type(e).__name__)
     try:
+        noted["stop_reason"] = stop_of(vendor, response)
+        noted["stop_reason_class"] = _stop_class(noted["stop_reason"])
+        # Said out loud, because both of these are silent today: a truncated
+        # reply reaches the caller as valid JSON that merely stops, and a
+        # refusal reaches it as an empty answer that fails over to the next
+        # vendor. Rare by nature, so a line each is cheap. The stop reason is a
+        # vendor token, never content, so §6 is satisfied.
+        if noted["stop_reason_class"] in ("truncated", "refused"):
+            LOGGER.warning("llm_usage: %s/%s stopped as %s (%s)",
+                           vendor, noted["served_model"] or "?",
+                           noted["stop_reason"], noted["stop_reason_class"])
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("llm_usage: could not read the stop reason from a %s response (%s)",
+                       vendor, type(e).__name__)
+    try:
         usage = usage_of(vendor, response)
         noted["counts"], noted["raw"] = normalize(vendor, usage), _plain(usage)
     except Exception as e:  # noqa: BLE001
@@ -295,17 +407,39 @@ def note_response(vendor: str, response: Any) -> None:
 
 # ── Recording ────────────────────────────────────────────────────────────────
 
-_COLUMNS_042 = ("served_model", "vendor_response_id")
+class _LateColumns(NamedTuple):
+    """Columns a migration adds, and what a database still missing them loses."""
+
+    columns: tuple[str, ...]
+    migration: str
+    consequence: str
 
 
-def _drop_042_columns(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in row.items() if k not in _COLUMNS_042}
+#: Groups added after the ledger shipped. A node running new code against an
+#: older database would otherwise have EVERY row rejected for one unknown
+#: column -- so the row is written without that group instead. Losing who
+#: answered, or why it stopped, is bad; losing the tokens as well is worse.
+_LATE_COLUMNS = (
+    _LateColumns(
+        ("served_model", "vendor_response_id"), "042_served_model.sql",
+        "usage is recorded WITHOUT the model the vendor actually served, and is priced "
+        "on the model requested"),
+    _LateColumns(
+        ("stop_reason", "stop_reason_class"), "046_stop_reason.sql",
+        "usage is recorded WITHOUT why the vendor stopped, so a truncated reply and a "
+        "refusal cannot be told apart from a complete one"),
+)
 
 
-def _is_missing_042_column(error: BaseException) -> bool:
-    """PostgREST refusing a row for a column 042 adds (PGRST204)."""
+def _missing_group(error: BaseException) -> Optional[_LateColumns]:
+    """The group a PostgREST rejection (PGRST204) names a column from, if any."""
     text = str(error)
-    return "PGRST204" in text and any(column in text for column in _COLUMNS_042)
+    if "PGRST204" not in text:
+        return None
+    for group in _LATE_COLUMNS:
+        if any(column in text for column in group.columns):
+            return group
+    return None
 
 
 class _DatabaseWriter:
@@ -321,10 +455,9 @@ class _DatabaseWriter:
         self._disabled = False
         self._dropped = 0
         self._failures = 0
-        # Set when the table predates 042. Rows are then written without the
-        # served-model columns rather than not written at all: losing who
-        # answered is bad, losing the tokens as well would be worse.
-        self._without_042 = False
+        # Columns this database turned out not to have. Grows at most once per
+        # group in _LATE_COLUMNS, for the life of the process.
+        self._shed: set[str] = set()
 
     def submit(self, call: Any) -> None:
         if self._disabled:
@@ -366,21 +499,7 @@ class _DatabaseWriter:
                 # exclude_none: every nullable column defaults to NULL anyway,
                 # and firm_id must be OMITTED rather than sent as null so the
                 # column's default (the one firm) applies.
-                row = call.model_dump(exclude_none=True)
-                if self._without_042:
-                    row = _drop_042_columns(row)
-                try:
-                    repo.insert(row)
-                except Exception as e:  # noqa: BLE001
-                    if self._without_042 or not _is_missing_042_column(e):
-                        raise
-                    self._without_042 = True
-                    LOGGER.error(
-                        "llm_usage: llm_calls has no served_model column. Run "
-                        "db/migrations/042_served_model.sql, then restart api and worker. "
-                        "Until this process restarts, usage is recorded WITHOUT the model "
-                        "the vendor actually served, and is priced on the model requested.")
-                    repo.insert(_drop_042_columns(row))
+                self._insert(repo, call.model_dump(exclude_none=True))
                 if self._failures:
                     LOGGER.info("llm_usage: ledger writes recovered after %d failure(s)",
                                 self._failures)
@@ -403,6 +522,30 @@ class _DatabaseWriter:
                                    "consecutive failure(s)", type(e).__name__, self._failures)
             finally:
                 self._queue.task_done()
+
+    def _insert(self, repo: Any, row: dict[str, Any]) -> None:
+        """
+        Insert a row, shedding columns this database's migrations have not added.
+
+        **A loop rather than one retry, because PostgREST names only ONE missing
+        column per rejection** -- a database behind by two migrations needs two
+        passes, and a single retry would write nothing at all on the second.
+        Each turn either returns, re-raises something else, or grows ``_shed``,
+        which is bounded by ``_LATE_COLUMNS``, so it always terminates.
+        """
+        while True:
+            try:
+                repo.insert({k: v for k, v in row.items() if k not in self._shed})
+                return
+            except Exception as e:  # noqa: BLE001
+                group = _missing_group(e)
+                if group is None or self._shed.issuperset(group.columns):
+                    raise
+                self._shed.update(group.columns)
+                LOGGER.error(
+                    "llm_usage: llm_calls has no %s column. Run db/migrations/%s, then "
+                    "restart api and worker. Until this process restarts, %s.",
+                    group.columns[0], group.migration, group.consequence)
 
     def flush(self, timeout: Optional[float] = None) -> bool:
         """Wait for queued rows to be written. True if the queue emptied in time."""
@@ -476,6 +619,8 @@ def record_attempt(
             # and the prompt is somebody's bank statement.
             error_class=type(error).__name__ if error is not None else None,
             duration_ms=duration_ms,
+            stop_reason=noted["stop_reason"],
+            stop_reason_class=noted["stop_reason_class"],
             usage_raw=noted["raw"],
             **noted["counts"],
         )

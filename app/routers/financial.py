@@ -44,6 +44,7 @@ from schemas.financial import (
     FinancialAccountCreateRequest,
     InventoryReport,
     MotionTextResponse,
+    StatementBalanceRequest,
     StatementBatesRequest,
     StatementBatesResult,
     CreditorResponse,
@@ -618,6 +619,54 @@ def export_compliance_matrix(
     if exhibit.warnings:
         headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
     return Response(content=content, media_type=media_type, headers=headers)
+
+
+@router.patch("/statements/{statement_id}/balances", response_model=StatementResponse)
+def correct_statement_balances(
+    statement_id: int,
+    body: StatementBalanceRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementResponse:
+    """
+    Correct an opening or closing balance the extraction read wrong.
+
+    The statement is re-reconciled on save, so a corrected balance clears the
+    stale ``UNRECONCILED`` flag instead of leaving it to contradict the figures
+    beside it. ``review_status`` is left alone: clearing an exception is a
+    decision, not a consequence of arithmetic.
+
+    Each changed end carries ``BALANCE_MANUALLY_ENTERED`` naming both values and
+    the person. Nothing can verify the new figure is the one printed on the
+    page, which is exactly why the record says who read it.
+    """
+    staff, name = _staff_and_name(request, manager)
+    before = FinancialAccountStatementRepository(manager).select_one(
+        condition={"id": statement_id})
+    try:
+        statement = statement_service.correct_balances(
+            manager, statement_id, body.beginning_balance, body.ending_balance,
+            staff.id, name, body.reason)
+    except ValueError as e:
+        message = str(e)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message) from e
+        raise HTTPException(status_code=422, detail=message) from e
+
+    AuditLogger(manager).log(
+        action="statement_balances_corrected",
+        entity_type="financial_account_statements",
+        entity_id=str(statement_id),
+        supabase_uid=request.state.supabase_uid,
+        before_json=None if before is None else {
+            "beginning_balance": str(before.beginning_balance),
+            "ending_balance": str(before.ending_balance)},
+        after_json={"beginning_balance": str(statement.beginning_balance),
+                    "ending_balance": str(statement.ending_balance),
+                    "reason": body.reason},
+    )
+    return _statement_response(statement)
 
 
 @router.patch("/statements/{statement_id}/boundary", response_model=StatementResponse)

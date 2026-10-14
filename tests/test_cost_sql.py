@@ -114,6 +114,18 @@ try:
     migration_043 = open(os.path.join(MIGRATIONS, "043_cost_report_by_firm.sql"), encoding="utf-8").read()
     check("043 applies on top, and can be run a second time",
           [psql(migration_043).returncode for _ in range(2)], [0, 0])
+    migration_046 = open(os.path.join(MIGRATIONS, "046_stop_reason.sql"), encoding="utf-8").read()
+    check("046 applies on top, and can be run a second time",
+          [psql(migration_046).returncode for _ in range(2)], [0, 0])
+    check("and llm_calls carries both stop-reason columns",
+          rows("select column_name from information_schema.columns "
+               "where table_name = 'llm_calls' and column_name like 'stop_reason%' "
+               "order by column_name"), [["stop_reason"], ["stop_reason_class"]])
+    # 046 touches no view, so unlike 042 it creates no ordering hazard with 041
+    # -- which is checked immediately below and would fail if it had.
+    check("and the priced view still prices on the served model",
+          rows("select count(*) from information_schema.columns "
+               "where table_name = 'llm_call_costs' and column_name = 'billed_model'"), [["1"]])
     # Deliberate: 041's CREATE OR REPLACE cannot reshape 042's views, and if it
     # could it would silently put back pricing on the REQUESTED model. It runs
     # in a transaction, so the refusal changes nothing.
