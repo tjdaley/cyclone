@@ -4,6 +4,7 @@ import {
 } from '../../lib/api'
 import ExportButtons from '../../components/ExportButtons'
 import PayeeRulingManager from './PayeeRulingManager'
+import AccountAddDialog from './AccountAddDialog'
 import { money, formatDate } from '../../lib/money'
 import type {
   UndisclosedAccount, ReferencedInstitution, Creditor, ValuePlatform,
@@ -61,17 +62,41 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
   const [ruling, setRuling] = useState<string | null>(null)
   const [showQueue, setShowQueue] = useState(false)
   const [exhibitName, setExhibitName] = useState('Accounts Referenced But Not Produced')
+  /** The row being turned into an account, with what we know of it prefilled. */
+  const [adding, setAdding] = useState<
+    null | { institution?: string | null; account_number_last4?: string | null;
+             account_number_masked?: string | null }>(null)
+  /** Rows that resemble an account already on the matter. Shown, never filed. */
+  const [probable, setProbable] = useState<
+    { what: string; match: string; kind: string }[]>([])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const report = await getUndisclosedAccounts(matterId)
-      setRows(report.accounts)
-      setInstitutions(report.institutions)
-      setCreditors(report.creditors)
+      // SPLIT, NOT FILTERED. A row whose institution closely resembles an
+      // account already on the matter is probably one of ours — "BofA" against
+      // "Bank of America, N.A." — and the report was being read as excitable
+      // because of it. But a near match is not proof, so these are moved to
+      // their own group rather than dropped: the exhibit leaves them out, and
+      // the screen still shows them with the account they are probably about.
+      setRows(report.accounts.filter(r => !r.possible_match))
+      setInstitutions(report.institutions.filter(r => !r.possible_match))
+      setCreditors(report.creditors.filter(r => !r.possible_match))
       setCandidates(report.candidates)
-      setPlatforms(report.platforms)
+      setPlatforms(report.platforms.filter(r => !r.possible_match))
+      setProbable([
+        ...report.accounts.filter(r => r.possible_match).map(r => ({
+          what: `${r.institution ?? 'Unknown institution'} ····${r.last4}`,
+          match: r.possible_match!, kind: 'account referenced' })),
+        ...report.institutions.filter(r => r.possible_match).map(r => ({
+          what: r.institution, match: r.possible_match!, kind: 'institution named by a wire' })),
+        ...report.creditors.filter(r => r.possible_match).map(r => ({
+          what: r.creditor_name ?? r.payee, match: r.possible_match!, kind: 'creditor paid' })),
+        ...report.platforms.filter(r => r.possible_match).map(r => ({
+          what: r.platform, match: r.possible_match!, kind: 'platform holding value' })),
+      ])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not scan the transactions')
     } finally {
@@ -195,6 +220,27 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
                         <div className="text-xs text-text-secondary font-mono mt-0.5">
                           as printed: {row.reference}
                         </div>
+                        {/* THE ONLY WAY TO TAKE A ROW OFF THIS LIST. It is
+                            rebuilt from the transactions every run, so there is
+                            nothing to tick — and that is right, because a list
+                            somebody can silence is a list that goes stale.
+                            Adding the account resolves it either way: as a
+                            third party's, so the scan stops reporting a $5
+                            repayment to a sibling; or as the estate's, which
+                            puts it on the compliance grid with nothing produced
+                            against it. */}
+                        <button type="button"
+                          className="text-xs text-navy underline mt-1"
+                          onClick={e => {
+                            e.stopPropagation()
+                            setAdding({
+                              institution: row.institution,
+                              account_number_last4: row.last4,
+                              account_number_masked: row.reference,
+                            })
+                          }}>
+                          Add to the account list…
+                        </button>
                         {open && row.examples.length > 0 && (
                           <ul className="mt-2 space-y-1">
                             {row.examples.map((example, i) => (
@@ -451,6 +497,52 @@ export default function UndisclosedAccountsPanel({ matterId }: { matterId: numbe
                 account nobody produced. A negative figure is the opposite finding — the
                 platform was funded from somewhere these records do not contain.
               </p>
+            </div>
+          )}
+
+          {adding && (
+            <AccountAddDialog
+              matterId={matterId}
+              prefill={adding}
+              onClose={() => setAdding(null)}
+              onAdded={async () => {
+                // The row disappears on the next scan because the account is
+                // now held and matches by last four — no local bookkeeping.
+                setAdding(null)
+                await load()
+              }} />
+          )}
+
+          {/* PROBABLY ALREADY PRODUCED — shown, never filed.
+              The report was being read as excitable because a name written two
+              ways made one account look like two findings. These are the near
+              matches: close enough to check before filing, nowhere near enough
+              to put in a document asserting they were not produced. */}
+          {probable.length > 0 && (
+            <div className="mt-6 rounded-md border border-border bg-off-white p-4">
+              <h3 className="text-sm font-medium text-navy">
+                Probably already produced
+                <span className="ml-2 text-xs font-normal text-text-secondary">
+                  {probable.length} set aside, and left out of the exhibit
+                </span>
+              </h3>
+              <p className="text-xs text-text-secondary mt-1">
+                The institution name resembles an account already on this matter closely
+                enough that these may be the same thing. Check them before relying on the
+                list above; if one really is a separate account, it belongs in the exhibit
+                and the account names need reconciling.
+              </p>
+              <ul className="mt-2 space-y-1">
+                {probable.map((row, i) => (
+                  <li key={i} className="text-sm flex flex-wrap items-baseline gap-x-2">
+                    <span className="font-medium text-text-primary">{row.what}</span>
+                    <span className="text-xs text-text-secondary">({row.kind})</span>
+                    <span className="text-xs text-text-secondary">
+                      probably: <span className="text-text-primary">{row.match}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 

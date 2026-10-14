@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from db.models.financial import TransactionTagLink
+from db.models.financial import TagSource, TransactionTagLink
 from db.repositories.financial import (
     FinancialAccountRepository,
     FinancialAccountStatementRepository,
@@ -216,14 +216,20 @@ class TransactionSearchService:
             offset=offset,
         )
 
-        tags_by_transaction = link_repo.for_transactions([r.id for r in rows])
+        # Links rather than ids, so a staff screen can see WHICH tags the client
+        # applied. An exhibit built on a tag should never quietly rest on a
+        # client's guess, and the only way to avoid that is to be able to see it.
+        links_by_transaction = link_repo.links_for([r.id for r in rows])
         account_by_id = {a.id: a for a in accounts}
         items: list[dict[str, Any]] = []
         for row in rows:
             account = account_by_id.get(row.financial_account_id)
+            links = links_by_transaction.get(row.id, [])
             items.append({
                 **row.model_dump(mode="json"),
-                "tag_ids": tags_by_transaction.get(row.id, []),
+                "tag_ids": [link.tag_id for link in links],
+                "client_tag_ids": [
+                    link.tag_id for link in links if link.source == TagSource.client],
                 "institution": account.institution if account else None,
                 "account_last4": account.account_number_last4 if account else None,
             })
@@ -659,18 +665,41 @@ class TransactionSearchService:
         verified = self._verify_on_matter(manager, matter_id, transaction_ids)
 
         changed = 0
+        now = datetime.now(timezone.utc).isoformat()
         for transaction_id in verified:
             existing = link_repo.find_link(transaction_id, tag_id)
             if remove:
-                if existing is not None:
+                if existing is None or existing.cleared_at is not None:
+                    continue
+                if existing.source == TagSource.client:
+                    # CLEARING, NOT DELETING. A client's tag that staff remove
+                    # must stay removed: the row holds the pair, so the client's
+                    # next attempt lands on it and is refused (044). Deleting
+                    # would free the pair and the next click would recreate it.
+                    link_repo.update(existing.id, {
+                        "cleared_at": now, "cleared_by_staff_id": staff_id})
+                else:
+                    # Staff removing their own tag is an ordinary correction,
+                    # not a suppression of somebody else's assertion.
                     link_repo.delete(existing.id)
-                    changed += 1
+                changed += 1
             elif existing is None:
                 link_repo.insert(TransactionTagLink(
                     transaction_id=transaction_id,
                     tag_id=tag_id,
+                    source=TagSource.staff,
                     tagged_by_staff_id=staff_id,
                 ).model_dump())
+                changed += 1
+            elif existing.cleared_at is not None:
+                # Staff CAN put back what staff cleared — the asymmetry with the
+                # client is the whole point — and it becomes a staff tag,
+                # because applying it is now their judgment.
+                link_repo.update(existing.id, {
+                    "cleared_at": None, "cleared_by_staff_id": None,
+                    "source": TagSource.staff.value,
+                    "tagged_by_staff_id": staff_id, "tagged_by_client_id": None,
+                })
                 changed += 1
 
         LOGGER.info(

@@ -313,3 +313,30 @@ def detect(pages: dict[int, str], prefix_hint: Optional[str] = None) -> Optional
         len(series.gaps), series.confidence,
     )
     return series
+
+
+def parse_stamp(text: str) -> Optional[tuple[str, str, int, int]]:
+    """
+    Read one Bates stamp a person typed, as prefix, separator, width and value.
+
+    Used by the manual-entry path, where somebody is copying a stamp off a page
+    the detector could not read. The same pattern detection uses, so a hand-typed
+    "KF 000101" is parsed exactly as a detected one would be — the alternative is
+    two notions of what a stamp looks like, which drift.
+
+    :return: ``(prefix, separator, digits, value)``, or None when the text is not
+        a stamp. ``digits`` is the zero-padded width as typed, so the numbers
+        that follow keep the same shape.
+    :rtype: Optional[tuple[str, str, int, int]]
+    """
+    found = _CANDIDATE.search((text or "").strip())
+    if found is None:
+        return None
+    prefix = found.group(1) or ""
+    digits = found.group(2)
+    # Whatever sat between them, taken from the text rather than guessed: a
+    # production writes "KF 000101", "KF-000101" and "KF000101", and reprinting
+    # it the wrong way makes a citation nobody can search for.
+    whole = found.group(0)
+    separator = whole[len(prefix):len(whole) - len(digits)]
+    return prefix, separator, len(digits), int(digits)

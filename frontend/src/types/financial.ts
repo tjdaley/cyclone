@@ -24,6 +24,13 @@ export type AccountType =
 /** Characterization for the inventory. Argued, never extracted. */
 export type PropertyCharacter =
   | 'community' | 'separate_petitioner' | 'separate_respondent' | 'mixed' | 'disputed'
+  /**
+   * The marital estate has no interest in this account at all — a third
+   * party's, named by the production in passing (045). NOT separate property,
+   * which is a party's own and still gets inventoried. Takes the account off
+   * the undisclosed list, and out of the compliance grid and the inventory.
+   */
+  | 'no_marital_interest'
 
 /**
  * Whether a statement is an account's first, its last, or neither.
@@ -97,6 +104,34 @@ export interface FinancialAccount {
   /** The account this one succeeds - a reissued card, a bank migration, a rollover. */
   antecedent_account_id: number | null
   is_closed: boolean
+}
+
+/** An account added by hand: a scrap of paper, or a row off the undisclosed list. */
+export interface FinancialAccountCreatePayload {
+  institution: string
+  account_type: AccountType
+  account_number_last4?: string | null
+  account_number_masked?: string | null
+  name_on_account?: string | null
+  ownership?: AccountOwnership
+  property_character?: PropertyCharacter | null
+  production_responsibility?: ProductionResponsibility
+  opposing_party_id?: number | null
+  purpose?: string | null
+  notes?: string | null
+}
+
+/** The missing statements, as a motion to compel says them. */
+export interface MotionText {
+  /** Empty when nothing is missing, so the caller can say so. */
+  text: string
+  accounts: number
+  gaps: number
+}
+
+export interface StatementBatesResult {
+  statement: AccountStatement
+  pages_numbered: number
 }
 
 export interface FinancialAccountUpdatePayload {
@@ -285,6 +320,8 @@ export interface TransactionTag {
   color: string | null
   display_order: number
   is_active: boolean
+  /** Offered to clients in the portal. Opt-in: the firm's own list carries strategy. */
+  client_visible?: boolean
   /** Lines carrying this tag — the size of the exhibit it would produce. */
   usage_count: number | null
 }
@@ -295,6 +332,7 @@ export interface TransactionTagPayload {
   color?: string | null
   display_order?: number
   is_active?: boolean
+  client_visible?: boolean
 }
 
 // ── Search ───────────────────────────────────────────────────────────────
@@ -334,6 +372,8 @@ export interface TransactionSearchFilter {
 /** A transaction plus the context a result row displays. */
 export interface TransactionSearchRow extends AccountTransaction {
   tag_ids: number[]
+  /** Of those, the ones the client applied. An exhibit should never rest on a guess unseen. */
+  client_tag_ids?: number[]
   institution: string | null
   account_last4: string | null
 }
@@ -470,6 +510,12 @@ export interface AccountDeletePreview {
  * comes with `institution_inferred` rather than standing as fact.
  */
 export interface UndisclosedAccount {
+  /**
+   * An account on this matter whose institution is close enough that this may
+   * already be produced. Never suppressed on a near match — the row is shown
+   * apart and left out of the exhibit.
+   */
+  possible_match?: string | null
   /** Last four digits — the identity, and how two spellings merge into one. */
   last4: string
   /** The longest form of the number seen, for quoting back to its line. */
@@ -517,6 +563,12 @@ export interface DownloadedFile {
  * INSTITUTION and never the sending account — there is no number to key on.
  */
 export interface ReferencedInstitution {
+  /**
+   * An account on this matter whose institution is close enough that this may
+   * already be produced. Never suppressed on a near match — the row is shown
+   * apart and left out of the exhibit.
+   */
+  possible_match?: string | null
   institution: string
   /** Its routing number. Checksummed, so a reliable identity where a name is not. */
   aba: string | null
@@ -542,6 +594,12 @@ export interface ReferencedInstitution {
  * City of Lewisville" arrive here looking identical.
  */
 export interface Creditor {
+  /**
+   * An account on this matter whose institution is close enough that this may
+   * already be produced. Never suppressed on a near match — the row is shown
+   * apart and left out of the exhibit.
+   */
+  possible_match?: string | null
   payee: string
   /** What to call it on a motion; the scraped payee is a fragment. */
   creditor_name: string | null
@@ -574,6 +632,12 @@ export interface Creditor {
  * every matter, so they are seeded firm-wide and never triaged.
  */
 export interface ValuePlatform {
+  /**
+   * An account on this matter whose institution is close enough that this may
+   * already be produced. Never suppressed on a near match — the row is shown
+   * apart and left out of the exhibit.
+   */
+  possible_match?: string | null
   platform: string
   /** The ruling pattern that matched, so the UI can offer to change it. */
   pattern: string
@@ -685,6 +749,45 @@ export interface ComplianceScope {
   since: string | null
   through: string | null
   bounded: boolean
+}
+
+/** One account on the inventory, with the balance its last statement printed. */
+export interface InventoryRow {
+  account_id: number
+  institution: string
+  account_number_last4: string | null
+  account_type: AccountType
+  /** P, R, J, 3P or ? — from ownership and the matter's alignment. C/O when none is recorded. */
+  held_by: string
+  /** Period end of the statement the balance came from. */
+  as_of: string | null
+  /**
+   * Exact decimal string. **A liability is negative here** — it reduces the
+   * estate — while the statement itself prints a positive amount owed. Null
+   * when no statement is on file, which is never the same as zero.
+   */
+  balance: string | null
+  bates: string | null
+  statement_id: number | null
+  is_closed: boolean
+}
+
+export interface InventoryTotals {
+  assets: string
+  liabilities: string
+  net: string
+  accounts: number
+  /** Accounts with no statement: listed, never totalled. */
+  without_balance: number
+}
+
+export interface InventoryReport {
+  assets: InventoryRow[]
+  liabilities: InventoryRow[]
+  totals: InventoryTotals
+  /** Letter and what it means, for the Held by column. */
+  legend: [string, string][]
+  warnings: string[]
 }
 
 export interface ComplianceMatrix {

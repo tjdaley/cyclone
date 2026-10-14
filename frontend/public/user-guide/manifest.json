@@ -123,6 +123,13 @@
           "number": "15",
           "title": "AI costs and prices",
           "summary": "What the AI work costs, who it was spent on, and how a vendor's price gets entered"
+        },
+        {
+          "slug": "16-client-portal",
+          "file": "16-client-portal.md",
+          "number": "16",
+          "title": "Letting a client in",
+          "summary": "Switching the portal on, publishing tags, and reviewing what a client marked"
         }
       ]
     }

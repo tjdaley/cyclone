@@ -36,6 +36,7 @@ cyclone/
 │   │   ├── schema_check.py        # Startup diff of live columns vs models — see §15
 │   │   ├── config_spec.py         # What each setting IS: fleet / secret / per-firm / per-node
 │   │   ├── amount_filter.py       # A typed amount range; the sign picks the side — see §11
+│   │   ├── institution_match.py   # Two spellings of one bank; suppress on same, demote on similar
 │   │   ├── config_fingerprint.py  # The fleet hash — see §5a
 │   │   ├── secret_source.py       # Secrets from SSM under an instance role — see §5a
 │   │   ├── usage_scope.py         # Who LLM spend is for (job/request/crm) — see §11
@@ -70,6 +71,8 @@ cyclone/
 │   │   ├── job_service.py         # Queue/run background work — see §11a
 │   │   ├── lead_service.py        # CRM leads; promotion to client + matter
 │   │   ├── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
+│   │   ├── client_portal_service.py # What a client may see, and the one thing they may do — see §11b
+│   │   ├── inventory_service.py   # Account balances as an inventory: assets, liabilities, totals
 │   │   └── audit_logger.py        # AuditLogger.log() — never re-raises on failure
 │   └── schemas/                   # Pydantic request/response schemas (one per domain)
 ├── frontend/                      # React + Vite + TypeScript + Tailwind CSS
@@ -153,6 +156,8 @@ cyclone/
 │       ├── 041_service_rates.sql        # dated prices; llm_call_costs view; report + set-price functions
 │       ├── 042_served_model.sql         # served_model + vendor_response_id; price on the model that ANSWERED
 │       ├── 043_cost_report_by_firm.sql  # llm_cost_report grouping by firm — co-tenancy groundwork
+│       ├── 044_client_portal_tagging.sql # client tags, cleared tags, client-visible tags, the hearing lock
+│       ├── 045_no_marital_interest.sql  # a fifth property character: the estate holds nothing here
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -865,6 +870,32 @@ Covered by `tests/test_long_statement.py` 9b.
 
 **Check the extraction against what the statement says about itself.** The account summary states its own answer — "24 Deposits/Credits 202,100.41", "262 Checks/Debits 195,600.04" — and `_completeness_findings` compares both count and total per side, raising `INCOMPLETE_EXTRACTION` (warn). It reports a side only when the extraction falls **short** of what is printed, never when it exceeds it: a statement may split its debits across several named buckets — Bank of Texas prints "2 Checks & Withdrawals 159.11" and "Service Fees 2.00" separately — so extracting all three debits correctly reads as two too many against a single bucket. A shortfall has no innocent explanation; an excess usually does, and over-counting is caught by reconciliation instead. Reconciliation alone does catch a short read, but only as one unexplained delta; this says *which side* fell short and by how much, which is the difference between "something is wrong" and "the debits stopped after fifteen of two hundred sixty-two". Covered by `tests/test_long_statement.py`.
 
+**PAST A SIZE, AN UPLOAD IS REFUSED — AND THE REFUSAL COMES BEFORE ANYTHING IS
+STORED.** `_MAX_UPLOAD_PAGES` (50) and `_MAX_UPLOAD_STATEMENTS` (8), either one
+sufficient, checked by `refuse_oversized_upload` in the upload route **before**
+`enqueue_statement_ingest`, so a refused document leaves no object in storage,
+no job row and no half-imported statements. The retry path checks it too, before
+it deletes anything — a document accepted before the limit existed is still in
+storage, and re-reading one would run the unworkable import *after* discarding
+what is already held.
+
+The survey below was not enough, and how it failed is the point: a **700-page
+PDF holding 122 statements** was uploaded, the survey said so — "48 first pages
+in the first 250" — and the import went ahead anyway, because advice is advice.
+It was a total loss. **A warning is the right answer to a document that is
+probably wrong and the wrong answer to one that cannot work**: at that size
+every index window is a call, the walk is more, and one bad seam mis-files
+months against the wrong account. The statement count is a **lower bound** (the
+survey reads at most `_SURVEY_CAP` pages), which is all a refusal needs —
+exceeding is already proved. A PDF that cannot be surveyed is **not** refused:
+a gate that fires when it cannot see would reject a document for being
+unreadable by the one check that never reads it properly. Both limits are module
+constants rather than settings, deliberately — a limit somebody can raise under
+pressure is a limit that gets raised at the moment it is doing its job. Splitting
+is not a workaround: the pool reads a stack of monthly files several at a time,
+so the split version finishes sooner as well as more accurately. Covered by
+`tests/test_upload_survey.py`.
+
 **An upload is surveyed before it is trusted, and the survey is advice.**
 `survey_upload` reads the page count and counts pages whose text restarts at
 "Page 1" — statements paginate themselves, so a document holding twenty-four
@@ -1171,6 +1202,37 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
   specific pattern that reaches it. `Acct No. 86110018909` matches both the
   explicit-account pattern and "a label, then a number"; counting both doubles
   the money the account appears to have moved.
+- **TWO SPELLINGS OF ONE BANK ARE NOT TWO FINDINGS** (`util/institution_match.py`).
+  The report was being read as excitable because "BofA" and "Bank of America,
+  N.A." are the same institution and nothing here could see it. What it replaced
+  was substring containment on a squashed name, which was wrong in **both**
+  directions at once: too strict for `BOFA` against `BANKOFAMERICA`, and too
+  loose in a way nobody would guess — `"CHASE" in "PURCHASE"`, so a produced
+  Chase card quietly answered for any creditor whose name contained the word.
+  Tokens fix both, because a word is matched as a word.
+  - **The distinctive token is the whole idea.** Bank names are mostly
+    furniture: "First National Bank of Texas" and "First National Bank of
+    Omaha" share four words of six, and what separates them is TEXAS and OMAHA.
+    Comparison runs on what is left after the furniture, and falls back to the
+    full token set when a name is furniture all the way down.
+  - **`same()` may suppress; `similar()` may only DEMOTE.** The two errors are
+    not symmetric: reporting an account somebody already produced is visible and
+    annoying, while suppressing a genuinely undisclosed one is silent and far
+    worse. So a near match never removes a row — it moves it to *Probably
+    already produced*, which names the account it is likely about, stays on the
+    screen, and is left out of the exhibit with the count stated in the
+    Selection block.
+  - **A brand word is an alias only when it is the WHOLE name.** `CHASE` means
+    JPMorgan Chase on its own and nothing of the kind inside "Chevy Chase
+    Trust"; expanding it there turned a different bank into a match. Whole-name
+    aliases and anywhere-aliases are therefore separate lists, both short — a
+    wrong alias suppresses evidence firm-wide and silently.
+  - **An account we hold whose number nobody could read can match no
+    reference**, so every mention of it read as undisclosed. Those accounts are
+    now carried into the scan and a reference at the same institution is demoted
+    rather than reported. It is not suppressed: a reference really may be to a
+    different account at the same bank.
+  - Covered by `tests/test_institution_match.py`.
 - **The institution is an inference and says so.** A name in the description is
   read off the page; without one, the transfer is assumed to stay inside the
   bank whose statement it was printed on, flagged `institution_inferred`, and
@@ -1388,6 +1450,94 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
 
 Covered by `tests/test_account_discovery.py`, `tests/test_undisclosed_exhibit.py`
 and `tests/test_platform_seeds.py`.
+
+### Inventory Service (`inventory_service.py`)
+
+Every account on the matter with the ending balance of its most recent
+statement, split into assets and liabilities and totalled — the one-page answer
+to *"what is in this estate?"*. **Not the Inventory & Appraisement**, which is a
+sworn form with its own structure and is still unbuilt (§16).
+
+- **A liability prints NEGATIVE, and only here.** A card statement's ending
+  balance is what the institution printed — a positive amount owed — because
+  every account type must satisfy `beginning + sum == ending`. An inventory asks
+  what the account contributes to the estate, so the sign is flipped on the way
+  out and the stored figure is untouched. The same inversion `household_amount()`
+  makes for the FIS, for the same reason; these are the only two places anything
+  does it.
+- **Each row speaks as of its own date.** There is no "current balance" in this
+  system and there should not be: every figure traces to a statement somebody
+  can pull, so the row carries that statement's period end and its Bates stamp,
+  and two accounts routinely speak as of different days. That is the truth, and
+  it is why the column exists rather than one "as of" in the heading.
+- **An account with no statement is LISTED, without a balance and outside the
+  total**, with the count reported beside it. Omitting it would make the
+  schedule look complete while being short — and an account nobody has produced
+  a statement for is the row most worth seeing. A balance of zero there would be
+  an assertion the record cannot support.
+- **A rejected extraction is not a balance.** The latest statement is chosen
+  from what survives review.
+- **The party letter is derived, never guessed.** `ownership` says whose the
+  account is; `matters.client_alignment` says which side our client is, and the
+  two give P, R, J or 3P. With no alignment recorded the column reads C and O
+  and the exhibit carries a warning — "P" would assert something about a case
+  nobody has told the system the shape of.
+- Portrait, not landscape: six columns fit, and a schedule that fits is read
+  beside other filings rather than turned sideways.
+- Covered by `tests/test_inventory.py`.
+
+### Adding records by hand — accounts, Bates, and the motion
+
+Three gaps where the automatic path cannot reach a real case.
+
+**AN ACCOUNT ADDED BY HAND IS HOW A ROW LEAVES THE UNDISCLOSED LIST.** That
+report is rebuilt from the transactions on every run, which is right and is
+exactly why nothing can be ticked off it: a $5 repayment to a sibling puts that
+sibling's account on the list forever. The answer is not a second list of
+accounts to ignore, kept outside the system — it is to put the account where
+accounts live, with `property_character = no_marital_interest` (045), so the
+scan matches it like any other held account and the judgment is a record
+somebody made.
+- **The same door is the more valuable one**: an account the estate *does* have
+  an interest in, with no statements against it, which is precisely what the
+  compliance grid and a motion to compel are built from. An unprocessable scrap
+  — a receipt from a car floorboard — becomes a row that gets chased.
+- `no_marital_interest` is **not** separate property: separate property is a
+  party's own and still gets inventoried, which is why the two `separate_*`
+  values exist. This is a third party's account the production named in
+  passing, so it leaves the compliance grid (nothing to compel) and the
+  inventory (no interest to list), and both say how many they left out.
+- A duplicate is **refused with a 409**, not created. Two rows for one account
+  is the mess the merge tooling exists to clean up, and it starts here.
+
+**BATES NUMBERS CAN BE TYPED IN, AND THE ARITHMETIC IS THE CHECK**
+(`set_bates`). Detection finds no series on a production occasionally — a stamp
+the text layer renders as something else — and retrying cannot help, because the
+document reads the same way every time.
+- **The run is consecutive across the PAGES IN HAND, not across page numbers.**
+  A partial production arrives as physical pages 1, 2 and 4, and its stamps run
+  over those three sheets: the missing sheet took its number with it.
+- **Both ends are asked for.** If the range does not span exactly the pages
+  carrying transactions, nothing is written and the refusal names both counts.
+  Being off by one mis-cites every line after the first, silently — worse than
+  no citation at all.
+- Every line and the statement get `BATES_MANUALLY_ENTERED` with the person and
+  the range, and the stale `BATES_UNSTAMPED` / `BATES_UNVERIFIED` flags are
+  replaced rather than stacked. A detected stamp was read off the document; a
+  typed one is somebody's reading of it, and an exhibit has to say which.
+- `bates_service.parse_stamp` reads a typed stamp with the **same pattern**
+  detection uses, so "KF 000101" is understood identically either way and the
+  separator is reprinted as the production writes it.
+
+**THE MOTION TEXT IS THE SAME REPORT IN A PLEADING'S WORDS** (`motion_text`).
+The grid is the attachment; this is the body. Both come from one report, so
+they cannot disagree after another month is produced. Whole dates ("1 February
+2026 through 3 March 2026"), no day counts, and accounts with nothing missing
+are left out — a numbered list naming an account with nothing missing invites
+exactly one question. Empty text when nothing is missing, so the caller says so
+rather than pasting a heading with no list under it.
+
+Covered by `tests/test_manual_records.py`.
 
 ### Compliance Service (`compliance_service.py`)
 
@@ -1925,6 +2075,61 @@ money in.
 
 ---
 
+## 11b. The Client Portal (`client_portal_service.py`, `routers/portal.py`)
+
+**The client is the first caller who is not on the firm's side of the table.**
+Every access decision before this one was made between staff, all of whom may
+see a matter's records; a wrong filter there showed a paralegal something they
+could have opened anyway. Here it crosses a party boundary — and
+`SupabaseManager` holds the service-role key and bypasses RLS (§7), so the
+database will not catch the mistake.
+
+- **Every portal endpoint resolves its scope through `client_portal_service`,
+  and nothing else.** The client id comes from the caller's `user_roles` rows,
+  never from a path or a body: a client id in a request *is* a request to read
+  somebody else's case. One function to get right, the way `_verify_on_matter`
+  is the one for staff.
+- **`PortalDenied` answers 404, not 403.** A 403 on a matter id confirms the
+  matter exists, which is an inventory of the firm's cases available to anyone
+  with an account and a loop.
+- **A client sees the whole matter** — both sides' accounts — which is Tom's
+  call. Three things still do not reach the portal, and none is about trust:
+  the undisclosed-account and creditor/custodian **triage queues** (unreviewed
+  candidates, and the exhibit itself says a candidate is not a finding),
+  **extraction provenance**, and **statement flags as staff read them**.
+  "Extraction very likely stopped early" is written for a paralegal; the portal
+  reports `complete` instead. Hence `schemas/portal.py` is its own shape rather
+  than the staff schemas with fields removed — one surface written for two
+  audiences ends up written for neither.
+- **Tagging is the one write**, bounded four ways: the matter allows it
+  (`client_tagging_enabled`), the tag was published (`client_visible`, opt-IN
+  because the firm's list carries litigation strategy), the line is on their
+  matter, and **a cleared tag can never be re-applied by the client**.
+- **CLEARING IS A SUPPRESSION, NOT A DELETE**, and that is what makes the
+  asymmetry expressible at all. A delete frees the `(transaction, tag)` pair and
+  the next click recreates it; the row stays instead, carrying who cleared it,
+  so the client's next attempt lands on it and is refused while staff can
+  restore it. Restoring makes it a **staff** tag, because applying it is their
+  judgment at that point. Same rule as `not_creditor` and the transaction soft
+  delete: suppression is always somebody's recorded decision.
+- **A client tag is useful and it is a guess**, and the two must never be
+  indistinguishable — tags drive Rule 1006 exhibits. `source` says which without
+  a join, search results carry `client_tag_ids`, and `ClientTagReviewPanel` is
+  where staff tell them apart.
+- **The hearing-prep lock is per matter.** Tags reach exhibits, so the set has
+  to stop moving before anybody argues from it. The client is *told* it is
+  paused rather than finding dead controls — the same reasoning as the greyed
+  cleared tag, and as *"a disabled button looks exactly like one nobody
+  pressed"*.
+- **`client_tag_counts` is a coaching signal**, not bookkeeping: a client
+  cleared forty times is mis-tagging systematically, and nobody would otherwise
+  see it.
+- Covered by `tests/test_client_portal.py`. 044 was applied to real Postgres and
+  its three constraints verified to reject a link with two actors, none, or a
+  clearing with nobody attached.
+
+---
+
 ## 11a. Background Jobs (`job_service.py`, `crm_worker.py`, `jobs` table)
 
 **Anything that can take more than a few seconds must not hold an HTTP request open.** Production sits behind haproxy, whose `timeout server` cuts the connection long before nginx's 300s. The client gets a 504 with *no error in the API log*, because nothing failed — the request was still working. Reading a pleading is one LLM vision call per image-only page plus two more over the text; on a scanned document that is minutes.
@@ -2060,11 +2265,20 @@ TypeScript types mirror backend Pydantic schemas and live in `frontend/src/types
 
 API functions in `api.ts` return typed promises (`Promise<Matter[]>`, not `Promise<unknown[]>`). Call sites don't need `as Type[]` casts.
 
-### The user guide is published, not duplicated
+### The guides are published, not duplicated
 
-`docs/user-guide/` is the only place the guide is written. `scripts/sync_user_guide.py`
-copies it to `frontend/public/user-guide/` with a `manifest.json` built from the
-guide's **own index** (`README.md`), and `/guide` renders it.
+**Two guides, one script.** `docs/user-guide/` is the staff guide, copied to
+`frontend/public/user-guide/` with a `manifest.json` built from its **own index**
+(`README.md`) and rendered at `/guide`. `docs/client-guide/` is one page for a
+client with portal access, copied to `frontend/public/client-guide/` and
+rendered inside the portal as its *How this works* tab
+(`/portal/:matterId/guide`). Both are `scripts/sync_user_guide.py`, and
+`tests/test_user_guide_sync.py` guards both.
+
+**The client guide is flat and has no manifest** — one page needs no table of
+contents, and inventing one would be a second thing to keep in step. `wanted()`
+is what decides which shape a guide has, so the writer and the staleness check
+cannot disagree about it.
 
 - **The copy exists because the frontend image is built with `context: ./frontend`**,
   so nothing above that directory is reachable when the bundle is built. It is
@@ -2081,6 +2295,9 @@ guide's **own index** (`README.md`), and `/guide` renders it.
 - **`/guide` is public and cannot usefully be gated.** The markdown ships as
   static assets beside the bundle, so nginx serves it to anyone with the URL
   whatever the route does. Nothing client- or matter-specific may go in it.
+  **The same is true of the client guide**, which is why it is written for
+  *any* client rather than addressed to one: a page that named a matter, a
+  party or an account would be readable by anybody.
 
 ### Supabase JS Client
 
@@ -2294,6 +2511,9 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Account-number detection by pattern | ✅ Built — the digit run on every page; fills a null read, flags a conflict |
 | Repairing accounts split by a null account number | ❌ Not started — derive from stored `raw_text`, then merge into the real account |
 | Account merge (two rows, one real account) | ✅ Built — previewed, with blocking and forceable conflicts |
+| Add an account by hand | ✅ Built — 045. From the Accounts tab or from a row on the undisclosed list, which is the only way a row leaves that list. `no_marital_interest` keeps it off the compliance grid and the inventory; anything else puts it on the grid with nothing produced against it |
+| Bates numbers entered by hand | ✅ Built — consecutive across the pages held, the range checked against them, flagged `BATES_MANUALLY_ENTERED` on the statement and every line |
+| Motion-to-compel text | ✅ Built — the compliance gaps as a numbered paragraph, in whole dates, copied to the clipboard |
 | Transaction correction with audit trail | ✅ Built — per-field MANUAL_CORRECTION flags; amounts re-reconcile |
 | Add a line the import missed | ✅ Built — `MANUAL_ENTRY` names the person, the time and their reason, and the statement re-reconciles on save. It replaces an INSERT typed into the database, which left nothing a reader of the exhibit could see |
 | Add a line the import missed | ✅ Built — `POST /statements/{id}/transactions`, from the statement drill-down. Flagged MANUAL_ENTRY with the person and reason, and the statement re-reconciles. Replaces an `INSERT` by hand, which left no trace on the exhibit |
@@ -2312,7 +2532,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Export on the undisclosed-accounts report | ✅ Built — its own account-shaped columns; the dagger travels with its footnote |
 | OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
 | Large-transaction query (dollar threshold) | ✅ Built — an amount range on the Transactions tab. **Unsigned searches by MAGNITUDE and matches both directions**, which is what pairs a transfer out of one produced account with the same figure arriving in another; a typed `-` or `+` restricts to one side. Both boxes are magnitudes, so the smaller figure goes first either way |
-| Inventory &amp; Appraisement | ❌ Not started — ask Tom for the firm's I&amp;A form first |
+| Account inventory (balances) | ✅ Built — assets and liabilities with each account's latest statement balance, who holds it, the as-of date and the Bates stamp, totalled and exportable in all four formats |
+| Inventory &amp; Appraisement | ❌ Not started — the sworn form, which is a different and larger thing than the account inventory above. Ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Config drift detection across the fleet | ✅ Built — every node publishes a `fleet_hash` on `GET /api/config`; `scripts/check-fleet.sh` diffs them with no SSH and no credential |
 | Config as a versioned build artifact | ✅ Built — `config/fleet.env` + `config/environments/` committed, layered under the node's `.env` by compose |
@@ -2329,7 +2550,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Phase 2 conflict checking (pg_trgm) | ⏳ SQL ready, Python wiring uses substring match only |
 | Re-extract / delete a pleading | ❌ Not started — `raw_text` is stored, so re-extraction needs no re-upload |
 | Moving the intake PDF onto the matter at commit | ❌ Not started — lands at `intake/{job_id}.pdf`; `StorageService.move()` exists |
-| Client Portal (separate from staff) | ❌ Not started — `client` role exists but redirects to `/access-denied`. Intended functions are listed below |
+| Client Portal (separate from staff) | ✅ **Built** — 044. Read-only accounts, statements, transactions and the compliance matrix (the client's own side), plus tagging. Its own shell, its own API prefix, its own wording. Uploads are deliberately NOT supported; see §16a |
+| — Client tags transactions | ✅ Built — from a tag set the firm publishes. Staff clear what is wrong and the client cannot put it back; the lock stops tagging for hearing prep |
 | — Client re-categorizes their own transactions | ❌ Not started. **Depends on auditing category changes, which does not exist yet** (see below). Staff then review "changes since <date>" — the point is not convenience, it is catching a client who spreads gambling across a dozen categories or parks a disclosable transfer under an off-FIS bucket like Interaccount Transfers |
 | Audit trail for category changes | ⏳ **Half built.** 032 adds `category_source`, `category_rule_id`, and set/reviewed by-whom-and-when, and the rule engine writes them. `set_category` (the manual path) still writes nothing — that is the remaining half, and the one the client portal needs. Was: `set_category` writes `category_id` and nothing else — no flag, no `audit_log` row, no who/when/from/to. `correct_transaction` does all three for a field edit, and a category change is the bigger act: it moves money between lines of a sworn document. Needed before any client touches classification, and worth having for staff regardless |
 | Detail schedule behind the FIS (by category, with provenance) | ✅ Built — backend and export; UI not yet |
@@ -2482,6 +2704,20 @@ drafts run on every eligible lead either way.
 The toggle is deliberately **not** described in `docs/user-guide/14-lead-routing.md`
 — documenting it would make the guide wrong in the same way the screen is.
 
+### Paused: Bates numbering on the way in, and client uploads
+
+**Paused 2026-10-06 pending paralegal feedback**, not abandoned. Tom is taking
+the Bates question to the people who stamp documents for a living before
+anything is built.
+
+| | |
+| - | - |
+| **Productions, and where a Bates number comes from** | The design reached: Cyclone defines the production order, **applies** the stamps itself (PyMuPDF can merge, stamp and bookmark — verified), records a page→number map, and hands back the last number so the paralegal continues into tax returns and photographs. That removes the coordination problem entirely for documents Cyclone holds, because nothing is stamped outside it. Bookmarks double as the manifest: Acrobat splits a merged PDF by **top-level** bookmarks, so one per statement, and titles become filenames (sanitise `&`, `/`, `:`). Open: whether to emit a merged PDF or a zip of individually-stamped files (once Cyclone stamps, the single file is no longer required); a draft → finalised → voided lifecycle, since stamping consumes numbers; and whether the "show statement" button should prefer the produced copy, which is the document everyone is looking at in a deposition. `matters.last_bates_number` returns as a **default** for the next production, never an authority. |
+| **Why an internal control series was rejected** | A `C000001`-style number applied at upload is not a number anybody outside can look up, so exhibits built on it cite nothing. The number that matters is the one on the produced page. |
+| **Typography constrains the format.** | Measured: the compliance exhibit fits twelve nine-character Bates numbers plus a year column in exactly 648pt — landscape letter at half-inch margins, with nothing to spare. A `YYYYMMDD-000001` format is ~60% wider and will not fit that grid at any margin. |
+| **Client uploads into Cyclone** | Not supported, deliberately, and not the plan. |
+| **The upload monitor** | A watcher on the firm's client-upload folders (Egnyte today; Dropbox, Google Drive, S3 later), triaging statements from everything else and queueing the statements. Designed, not built. Shape: a **connection** per provider account (app key fleet-wide in SSM, OAuth token per connection, encrypted with `pgcrypto`) and a **folder path per matter** — credentials are not per matter, only the path is. Key on **content hash, not path**: files get renamed and moved between folders. A shared link plus password is not an automation surface — it is a web flow that breaks on their release schedule, and it is an unscoped bearer credential. S3 is the easiest provider to add, not the hardest: on EC2 the instance role is the credential and there is no stored secret. Triage cheaply first (page count, text layer, "statement period"/"beginning balance"/account-number markers) and only ask a model about the ambiguous ones — a watcher pointed at somebody's Downloads folder is a cost line. |
+
 ### Co-tenancy — a second firm on the same hardware
 
 Open question, nothing decided: `docs/co-tenancy-options.md` lays out shared
@@ -2562,7 +2798,7 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Write business logic in route handlers | Write it in a service class |
 | Query Supabase tables from React components | Go through `src/lib/api.ts` → FastAPI |
 | Redefine types in page components | Import from `frontend/src/types/` |
-| Edit `frontend/public/user-guide/*.md` | Edit `docs/user-guide/` and run `scripts/sync_user_guide.py`. The published copy is generated, and the test fails when it drifts |
+| Edit `frontend/public/user-guide/*.md` or `frontend/public/client-guide/*.md` | Edit `docs/user-guide/` or `docs/client-guide/` and run `scripts/sync_user_guide.py`. Both published copies are generated, and the test fails when either drifts |
 | Put anything client- or matter-specific in the user guide | `/guide` is public and its markdown is a static asset. Route-level gating would be theatre |
 | Cast `as Matter[]` on api.ts call results | Use the typed return signatures in `api.ts` |
 | Use `orm_mode = True` | Use `ConfigDict(from_attributes=True)` |
@@ -2606,6 +2842,10 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Soft-delete a statement or an account | The PDF in Storage is the undo. Soft state there infects account lists, queues, search scoping, and gap detection for no gain |
 | Leave a rejected extraction in the table "filtered out" | Delete it. Invisible-but-present means nobody can act on it and the empty account never goes away |
 | Delete an account that carries a characterization | `_reason_to_keep()` spares it. Ownership, character, purpose, and notes are attorney work, not import output |
+| Trust a client id that arrived in a request | It is a request to read somebody else's case. Resolve it from `user_roles` (`require_client`) |
+| Answer a client 403 for a matter that is not theirs | A 403 confirms the matter exists. 404, with wording that does not distinguish the two |
+| Delete a client's tag when staff reject it | The pair is freed and the next click recreates it. Clear it: the row holds the pair, so the re-apply lands there and is refused |
+| Show a client a staff-worded extraction flag | It tells them their bank statement is broken. The portal has its own schema and its own words |
 | Add a missing line with an INSERT into the database | It leaves no trace on the exhibit the figure reaches. `add_transaction` flags it MANUAL_ENTRY with the person and reason, and re-reconciles |
 | Overwrite an extracted value in place | Correct it through `correct_transaction()` — the flag trail is what makes the figure defensible |
 | Convert `Decimal`/`date` to `str` before `repo.update()` | Pass the native type; `json_safe` handles it, and converting early corrupts the returned model |
@@ -2662,6 +2902,9 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Add `other` to `_CASH_FLOW_ACCOUNTS` to avoid a migration | `other` is the catch-all. A mistyped bank account would then silently stop having its transactions extracted |
 | Add an `AccountType` without a compliance label | `_TYPE_LABEL.get(t, "Other")` mislabels it on an exhibit handed to opposing counsel. `crypto` printed as "Other" from 036 to 038 |
 | Put unrealized market change in FIS income | Not net resources under Tex. Fam. Code 154.062(b), and one month's swing becomes months of "income" nobody received |
+| Show a card balance as a positive on an inventory | It is money owed: it reduces the estate. Flip the sign for display and leave the stored figure as the institution printed it |
+| Put a zero on an inventory row with no statement | Nobody knows what that account holds. Leave it blank, keep it out of the total, and say how many there are |
+| Print P or R without a recorded client alignment | The letter is a claim about which side somebody is on. C and O, with a warning |
 | Sum raw amounts on the FIS without checking the account type | A card purchase is positive by the printed convention. Debit and credit spending then cancel out. `household_amount()` |
 | Average a quarterly or annual bill over the report window | It buys coverage past the window, so the figure moves every time the report runs. Trailing twelve months over twelve |
 | Divide by "months that had activity" | An annual premium would read as its full amount per month. Always the window's months |
@@ -2700,8 +2943,13 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Hide accounts nobody has assigned from both reports | They would never be chased. Count them and say so |
 | Name a look-back column for who asked | The date opposing counsel propounded binds OUR client. Name it for who produces |
 | Report an unbounded gap as if a motion could use it | "Anything before 4 Dec 2019" has one end. A look-back gives it two |
+| Keep a list of accounts to ignore outside the system | The undisclosed report is rebuilt every run and cannot be ticked off. Add the account with `no_marital_interest` — the judgment then has a record |
+| Number a partial production by page number | Stamps run consecutively over the sheets in hand; the missing sheet took its number with it. Number in page ORDER, and check the range spans the pages |
 | Infer that a statement is an account's first | An opening balance of zero is not proof — accounts are swept to zero routinely. A person marks it |
 | Let a boundary marker suppress a gap between two statements | The account demonstrably existed on both sides. Markers suppress the outer holes only |
+| Compare two institution names by substring | `"CHASE" in "PURCHASE"` suppressed real creditors, and `BOFA` matched nothing. Compare tokens (`util/institution_match.py`) |
+| Suppress a finding on a NEAR institution match | Hiding a genuinely undisclosed account is silent and worse than reporting one already produced. Demote it: shown on screen, named, kept out of the exhibit |
+| Expand a brand word to its full name anywhere it appears | "Chevy Chase Trust" is not Chase. A brand is an alias only as the whole name; abbreviations expand anywhere |
 | Read a transfer's direction from the words "to" and "from" | One description carries both. The sign of the amount says which way the money went |
 | Match a ruling only against the description | The triage button stores the SCRAPED payee, and the scrape drops noise from the middle. `PASSPORTSERVICES 8005551212 CHECK` becomes a pattern that cannot match its own line |
 | Report a duplicate-key ruling as a failure | The ruling is stored; that is what the user wanted. It means they clicked twice because the row had not moved |
@@ -2734,7 +2982,9 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Log an LLM response to diagnose a parse failure | It is a transaction register. Log the error offset and the length; the text is in the provenance |
 | Treat a malformed JSON reply as a vendor failure | The vendor answered. `llm_service` never retries a candidate, so the caller that needed JSON asks again |
 | Match a restarted page number as `PAGE\s1` | It matches inside "Page 10", "Page 19" and "Page 142". One long statement then reads as a dozen |
-| Block an upload that looks like several statements | A combined statement is ordinary input. Warn, name the count, and say to split it if the result is wrong |
+| Block an upload that looks like several statements | A combined statement is ordinary input. Warn, name the count, and say to split it if the result is wrong — **up to the hard limits**, past which it is refused outright |
+| Let a 700-page production through with a warning | It cannot work, and advice does not stop it. 50 pages or 8 statements is a refusal (`refuse_oversized_upload`) |
+| Check a size limit after queueing the job | The refusal then leaves an object in storage and a job row behind. Check before anything is written |
 | Let a pre-flight warning raise | The job is queued before the survey runs. A failed warning must not read as a failed upload |
 | Bind `pdf_service` at import in `statement_service` | Every use there resolves at call time; the suites replace the singleton on its own module and would not be seen |
 | Assume a new account starts on a fresh page | A combined statement runs registers together. One page can close one account, hold a whole second, and open a third |

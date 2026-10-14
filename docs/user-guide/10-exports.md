@@ -114,6 +114,12 @@ Every exhibit carries it:
 > every date, amount, and description against the original documents before this
 > exhibit is shown to anyone or offered in court.*
 
+**Read the last sentence and mean it, and note how little it now costs.** Every
+row on the Transactions tab carries a document icon that opens its statement
+**at the page that line is printed on**
+([Chapter 5](05-import-problems.md#show-the-source-statement)) — so checking a
+figure against the production is a click, not a hunt through sixty pages.
+
 **Read the last sentence and mean it.** A wrong date inside a statement period
 reconciles cleanly and reaches an exhibit unflagged. That is measured, not
 hypothetical. The notice is in the file, not just on the screen, because on

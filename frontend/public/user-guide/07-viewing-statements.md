@@ -66,6 +66,28 @@ it can be uploaded again.
 
 ---
 
+## Typing in Bates numbers
+
+Where detection found no stamp, the statement row offers **Add Bates numbers**.
+
+1. Open the source PDF beside you.
+2. Copy the stamp from the **first** page, exactly as printed.
+3. Copy the stamp from the **last** page.
+4. Click **Save**.
+
+The numbers in between are filled across the pages held.
+
+| | |
+| - | - |
+| **A partial production still runs consecutively** | Physical pages 1, 2 and 4 carry three consecutive stamps. The missing sheet took its number with it |
+| **Both ends are required, and the span is checked** | If the range does not match the pages held, **nothing is saved** and the message gives both counts. Off by one would mis-cite every line after the first |
+
+**Every line is marked as numbered by hand, and so is the statement.** A
+detected stamp was read off the document; a typed one is somebody's reading of
+it, and an exhibit should be able to tell them apart.
+
+---
+
 ## The transaction list
 
 | Column | Notes |
@@ -159,6 +181,31 @@ extracted would be silently absorbed into "market change" and the statement
 would be stamped reconciled. Where the statement prints no such figure, the line
 is omitted, the statement does not tie, and it says so — **a statement that will
 not reconcile is a statement a person looks at, which is the right outcome.**
+
+---
+
+## The Inventory tab
+
+**Financials** → **Inventory**. Every account on the matter with the closing
+balance of its most recent statement, in two tables — **Assets** and
+**Liabilities** — each totalled, with a **Net** beneath.
+
+Columns: institution, account, held by, as of, balance, and Bates. **The Bates
+cell opens the statement the figure came from.**
+
+Four things to know before you rely on it:
+
+| | |
+| - | - |
+| **Liabilities show as negative** | The card statement says you owe $1,045.45; the inventory shows −$1,045.45, because it reduces the estate. Both are right, and they answer different questions |
+| **Every row has its own "as of" date** | There is no live balance here. Each figure is the closing balance of a real statement, which is what makes it citable — so two accounts usually speak as of different days |
+| **"no statement" is not zero** | An account with nothing on file is listed with no balance and left out of the total. The count sits beneath the table. **Those rows are the ones to chase**, and the [Compliance tab](11-discovery-tracking.md) says which months are missing |
+| **Held by is P, R or J** | Taken from the account's ownership and the matter's client alignment. If the column reads **C and O**, the matter has no alignment recorded — set it on the matter detail page ([Chapter 3](03-matters.md)) |
+
+> ⚠ **This is not the Inventory and Appraisement.** The I&A is a sworn form, and
+> it is not built. This tab is a schedule of account balances — useful for a
+> settlement conference or a temporary-orders hearing, and not the thing you
+> file.
 
 ---
 

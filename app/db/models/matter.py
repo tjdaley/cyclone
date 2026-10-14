@@ -222,6 +222,12 @@ class Matter(BaseModel):
         description="When True, all TIME billing entries on this matter are automatically set to $0.00. "
                     "Expense and flat-fee entries are unaffected.",
     )
+    client_tagging_enabled: bool = Field(
+        default=False,
+        description="Whether the client may tag transactions in the portal (044). Off by default, "
+                    "and turned off again for hearing prep: tags go into exhibits, so the set has "
+                    "to stop moving. Staff tagging is unaffected — the lock is about the client",
+    )
     fee_agreement_signed_date: Optional[date] = Field(
         default=None,
         description="Date the fee agreement was signed by the client",

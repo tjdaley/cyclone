@@ -181,6 +181,16 @@ list, and the verification notice.
 argument. A report that hid them to look tidier would be arguing the other
 side's case.
 
+### Text for a motion to compel
+
+Beneath the grid: **Text for a motion to compel**. It writes the paragraph and
+the numbered list for you — each account, and the periods nobody produced, in
+whole dates — ready to paste. Then **Copy**.
+
+- Accounts with nothing missing are left out.
+- If nothing is missing at all, it says so rather than producing an empty
+  heading.
+
 ---
 
 ## Accounts referenced but never produced
@@ -192,7 +202,8 @@ accounts, and the statement you *do* have prints the number of the one you do
 not — `Transfer from XXX4070`, `INTERNET XFER FROM CHKG 8098386837`. Matching
 those against the accounts on the matter leaves the ones nobody produced.
 
-It reports four kinds of evidence, each in its own section:
+It reports four kinds of evidence, each in its own section — plus a fifth block
+of rows it has [set aside](#the-probably-already-produced-group):
 
 | Section | What it found |
 | ------- | ------------- |
@@ -219,6 +230,47 @@ Where the matter already holds an account at that platform, the row says so —
 **A platform disappears from the report only when every kind has been
 produced**, because a produced PayPal *balance* answers the deposit half and
 says nothing whatever about PayPal Credit.
+
+### The "Probably already produced" group
+
+A fifth block appears when an institution name closely resembles an account the
+matter already holds. `BofA` and `Bank of America, N.A.` are the same bank, and
+comparing the names as raw text reported one as undisclosed. Names are now
+compared **as words**, with the furniture — *Bank*, *N.A.*, *Credit Union*,
+*Financial* — set aside, so what is left is what identifies the institution.
+
+| | |
+| - | - |
+| What it holds | Rows that are probably about an account already on the matter, each named with the account it probably is |
+| In the exhibit? | **No.** The Selection block states how many were set aside, so a filed document never reads as the complete list when it is not |
+| What to do | **Check them.** If one really is a separate account, it belongs back in the exhibit, and the two account names need reconciling — [merging](06-merging-accounts.md) is how |
+
+**A close match demotes a row; it never deletes one.** Reporting an account that
+turns out to have been produced is a visible nuisance. Hiding one that was never
+produced is silent, and far worse.
+
+> **An account on the matter whose number could not be read** used to make every
+> reference to it look undisclosed, because there was nothing to match on. Those
+> land in this group too.
+
+### Add the account, to get a row off the list
+
+**Add to the account list…** on a row, or **Add an account** on the Accounts tab.
+
+**This list is rebuilt from the transactions every time it runs, so there is
+nothing to tick off.** A $5 repayment to a relative stays on it forever.
+**Adding the account is what resolves the row**, and the **character** you
+record says why:
+
+| Character | What follows |
+| --------- | ------------ |
+| **No marital property interest** | A third party's account the production named in passing. It stays on the matter so the references stop being reported, and it is **left out of the compliance grid and the inventory** — there is nothing to compel and nothing to divide |
+| **Anything else** | The account joins the compliance grid with **nothing produced against it**, which is exactly what a motion to compel is built from |
+
+This replaces a list of "don't worry about that one" accounts kept in somebody's
+head or a spreadsheet. It is also how an account from something unprocessable —
+a receipt found in a vehicle — gets onto the matter at all. **A duplicate is
+refused**, and the message names the account that already exists.
 
 ### Reading it carefully
 

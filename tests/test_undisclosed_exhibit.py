@@ -203,8 +203,13 @@ check("total sent, as currency", summary["Total sent to them"], "$25,000.00")
 selection = dict(exhibit.selection)
 check_true("states what it was compared against",
            "1 account" in selection["Compared against"])
-check("states the matching rule", selection["Matched on"],
-      "The last four digits of the account number")
+# The rule now has two halves, and the document says both: the digits identify
+# an account, and the institution name is compared AS WORDS -- so "BofA" and
+# "Bank of America, N.A." are one bank rather than two findings.
+check_true("states the matching rule",
+           selection["Matched on"].startswith("The last four digits of the account number"))
+check_true("including that names are compared as words",
+           "BofA" in selection["Matched on"])
 check_true("states how direction was decided", "sign of each amount" in selection["Direction"])
 
 print("\nRendering")

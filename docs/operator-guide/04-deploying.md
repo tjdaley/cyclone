@@ -84,9 +84,9 @@ this project.
 by hand, and **release notes must name the migration files** so they can be
 applied before the containers come up.
 
-**This release: `038` through `043`, in order.** All six are safe to run before
-the deploy, and that is the right order — a migration run late costs data that
-was never recorded.
+**This release: `038` through `045`, in order.** All eight are safe to run
+before the deploy, and that is the right order — a migration run late costs data
+that was never recorded.
 
 | File | What it does | Run it late and… |
 | ---- | ------------ | ---------------- |
@@ -96,6 +96,8 @@ was never recorded.
 | `041_service_rates.sql` | The price table, pricing views and report function | The Costs page has no prices to show |
 | `042_served_model.sql` | Records which model actually answered, and prices on that | Rows written meanwhile are priced on the *requested* model, permanently |
 | `043_cost_report_by_firm.sql` | Adds **Firm** to the Costs page's groupings | That grouping is missing |
+| `044_client_portal_tagging.sql` | Client tags, cleared tags, client-visible tags, and the per-matter tagging lock. Seeds seven client-facing waste tags | The client portal's tagging cannot be switched on. Applied and re-applied against real Postgres 16 |
+| `045_no_marital_interest.sql` | A fifth account characterization: *no marital property interest* | Choosing it is refused with a constraint sentence ([Chapter 5](05-startup-log.md#a-write-the-database-refused)) |
 
 Two things about this set that are not in the files:
 
@@ -120,6 +122,21 @@ It is also the failure that hides best: compose substitutes an empty string for
 a missing variable, the build succeeds with a warning nobody reads, and **every
 route serves a blank white page** — there is no login screen to fail at. See
 [Chapter 1](01-configuration.md#where-each-value-has-to-live).
+
+---
+
+## The client portal changes who can reach the application
+
+This release lets a **client** sign in. Two things an operator should know:
+
+- **A client sees the whole matter**, including the other side's produced
+  accounts. That is intended, and it is the first question anybody asks.
+- **It is off per matter until somebody turns it on**, and the client needs the
+  `client` role and a client record before that. Deploying the code alone
+  exposes nothing.
+
+Nothing about hosting, secrets or the fleet changes: the portal is served by the
+same image, on the same routes, behind the same authentication.
 
 ---
 

@@ -29,6 +29,7 @@ from typing import Any, Optional
 from db.models.financial import (
     AccountType,
     ProductionResponsibility,
+    PropertyCharacter,
     StatementBoundary,
     StatementReviewStatus,
 )
@@ -167,7 +168,14 @@ class ComplianceService:
             "scope": {"side": side, "since": None, "through": None, "bounded": False},
         }
 
-        accounts = FinancialAccountRepository(manager).get_by_matter(matter_id)
+        accounts = [
+            a for a in FinancialAccountRepository(manager).get_by_matter(matter_id)
+            # NOTHING TO COMPEL. An account somebody characterized as outside
+            # the marital estate is on the list so the undisclosed scan stops
+            # reporting it (045); putting it in a motion would ask a court to
+            # order production of a third party's bank statements.
+            if getattr(a, "property_character", None) != PropertyCharacter.no_marital_interest
+        ]
         if not accounts:
             return empty
 
@@ -612,6 +620,92 @@ class ComplianceService:
         if not parts:
             return "Complete — every day of the period requested is accounted for."
         return "; ".join(parts) + "."
+
+
+    # ── The motion ────────────────────────────────────────────────────────
+
+    def motion_text(
+        self,
+        manager: DatabaseManager,
+        matter_id: int,
+        side: Optional[str] = None,
+        today: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """
+        The missing statements as a paragraph to paste into a motion to compel.
+
+        **The grid is the exhibit; this is the body of the pleading.** They are
+        the same facts and neither replaces the other: a judge reads the
+        sentence, the grid is what counsel hands across the table. Generating
+        the sentence from the same report is what stops the two disagreeing
+        after somebody produces another month.
+
+        Written in DAYS, like the gap report it comes from. A motion asks for
+        "1 February 2020 through 3 March 2020"; "no March statement" is not
+        something anybody can be ordered to produce.
+
+        Accounts whose production is complete are left out — a numbered list
+        naming an account with nothing missing invites exactly one question.
+
+        :return: ``{"text": str, "accounts": int, "gaps": int}``. Empty text
+            when nothing is missing, so the caller can say so rather than
+            pasting a heading with no list under it.
+        :rtype: dict[str, Any]
+        """
+        report = self.matrix(manager, matter_id, side=side, today=today)
+        lines: list[str] = []
+        counted = 0
+        gaps = 0
+
+        for account in report["accounts"]:
+            missing = self._missing_phrases(account)
+            if not missing:
+                continue
+            counted += 1
+            gaps += len(account["gaps"]) + bool(account["nothing_before"]) + bool(
+                account["nothing_after"])
+            lines.append("%d. %s: %s" % (counted, account["label"], "; ".join(missing)))
+
+        if not lines:
+            return {"text": "", "accounts": 0, "gaps": 0}
+
+        heading = "The following account statements have not been produced:"
+        return {
+            "text": heading + "\n\n" + "\n".join(lines),
+            "accounts": counted,
+            "gaps": gaps,
+        }
+
+    @staticmethod
+    def _missing_phrases(account: dict[str, Any]) -> list[str]:
+        """
+        What is missing for one account, each phrase as a motion would say it.
+
+        Separate from ``_coverage_sentence`` because that one explains a report
+        to the person running it — "Complete", day counts in brackets — and this
+        one is filed. A pleading does not say "(31 days)".
+        """
+        if account["statements"] == 0:
+            return ["no statements have been produced for this account"]
+
+        parts: list[str] = []
+        if account["nothing_before"]:
+            parts.append("all statements before %s" % _spoken(account["nothing_before"]))
+        parts.extend(
+            "%s through %s" % (_spoken(gap["start"]), _spoken(gap["end"]))
+            for gap in account["gaps"]
+        )
+        if account["nothing_after"]:
+            parts.append("all statements after %s" % _spoken(account["nothing_after"]))
+        return parts
+
+
+def _spoken(value: Any) -> str:
+    """A date as a pleading writes it: 1 February 2020."""
+    if value is None:
+        return ""
+    parsed = value if isinstance(value, date) else date.fromisoformat(str(value))
+    return "%d %s %d" % (parsed.day, parsed.strftime("%B"), parsed.year)
 
 
 compliance_service = ComplianceService()

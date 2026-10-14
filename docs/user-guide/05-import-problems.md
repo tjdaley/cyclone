@@ -60,6 +60,12 @@ If the PDF cannot be shown you get one of three specific answers — never
 stored, purged, or storage unavailable — because each calls for a different
 next move.
 
+> **Every row on the Transactions tab now carries the same document icon**, in
+> its Bates/page cell, and it opens the statement **at the page that line is
+> printed on**. The button on a statement row opens at the statement's first
+> transaction page. On a sixty-page production that is the difference between
+> checking a figure and hunting for it.
+
 ### Accept
 
 Keeps the statement exactly as it is. Use it when you have looked at the source
@@ -92,6 +98,13 @@ truncated pass.
 > will be discarded. If the source PDF can no longer be retrieved, **nothing is
 > deleted** — Cyclone checks it can get the file back before destroying
 > anything.
+
+**Retry refuses an oversized document**, before anything is deleted — the same
+50-page and 8-statement limits an upload has
+([Chapter 4](04-importing-statements.md#dropping-the-files)). A large file
+imported before those limits existed therefore cannot be re-read: what is
+already held stays untouched, and the way forward is to split the PDF and import
+the pieces.
 
 **What you will see while it runs:**
 
@@ -240,6 +253,23 @@ that a register which *looks* wrong can be told from one that is.
 > row teaches you that none of them mean anything, which is the one thing the
 > flag reference cannot afford. **A statement imported before this release keeps
 > the flags it was given** — see [below](#a-statement-imported-before-this-release-keeps-its-old-flags).
+
+> **A card statement that carries INCOMPLETE_EXTRACTION *and* reconciles is
+> showing a flag that was wrong when it was written.** A card summary prints
+> "Purchases $244.11", and on a card a purchase is **positive** — it raises what
+> is owed — so the check read that total as the statement's money-*out* side and
+> reported the statement short by its own purchases. It is fixed. A statement
+> that ties and claims to be short is claiming something impossible, which is
+> the tell.
+>
+> Flags are written at import and never recomputed, so **older card imports
+> still carry it**. Accept one that reconciles, or clear it with **Retry**.
+>
+> **The fix keys on the account's type.** A card filed as *Checking* or *Other*
+> still gets the bank reading and will keep producing the false flag — so check
+> the type on the Accounts tab
+> ([Chapter 6](06-merging-accounts.md#the-account-types-and-the-four-that-are-not-obvious)).
+> The type also decides how the FIS treats that account's spending.
 
 ### One statement may have been read as two
 

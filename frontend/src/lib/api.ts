@@ -23,11 +23,15 @@ import type {
   TransactionSearchFilter, TransactionSearchResult, BulkResult,
   AccountMergePreview, AccountMergeResult,
   TransactionAddPayload,
+  PortalMatter, PortalAccount, PortalStatement, PortalTag,
+  PortalTransactionPage, PortalTransactionFilter, PortalTagResult,
+  ClientTagReview,
   TransactionCorrectionPayload, TransactionCorrectionResult,
   StatementReviewResult, StatementRejectResult, AccountDeletePreview,
   UndisclosedReport, ExportFormat, DownloadedFile,
   PayeeClassification, PayeeClassificationPayload, StatementRetryResult,
   ComplianceMatrix, StatementBoundary,
+  InventoryReport, FinancialAccountCreatePayload, MotionText, StatementBatesResult,
   FisRequest, FisStatement, FisSetting, FisSettingPayload, FisSchedule,
 } from '../types'
 
@@ -981,6 +985,67 @@ export async function getComplianceMatrix(
  * `side` names which of the two obligations the exhibit measures. A document
  * filed with a court almost always wants one named.
  */
+/**
+ * What each account was worth, and who holds it.
+ *
+ * Assets and liabilities with the ending balance of each account's most recent
+ * statement. A liability comes back negative — it reduces the estate — while
+ * the statement itself prints a positive amount owed.
+ */
+export async function getInventory(matterId: number): Promise<InventoryReport> {
+  return apiFetch<InventoryReport>(`/api/v1/matters/${matterId}/inventory`)
+}
+
+export async function exportInventory(
+  matterId: number,
+  format: ExportFormat,
+  exhibitName: string,
+): Promise<DownloadedFile> {
+  return apiDownload(
+    `/api/v1/matters/${matterId}/inventory/export`,
+    { format, exhibit_name: exhibitName },
+  )
+}
+
+/**
+ * Add an account by hand.
+ *
+ * For a scrap of paper naming an account nothing can be ingested for, and for
+ * taking a row off the undisclosed list: that report is rebuilt from the
+ * transactions every run, so adding the account is what resolves it. A 409
+ * means the matter already has this one.
+ */
+export async function createFinancialAccount(
+  matterId: number,
+  payload: FinancialAccountCreatePayload,
+): Promise<FinancialAccount> {
+  return apiFetch<FinancialAccount>(`/api/v1/matters/${matterId}/financial-accounts`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** Number a statement's pages by hand, when detection found no series. */
+export async function setStatementBates(
+  statementId: number,
+  first: string,
+  last?: string,
+): Promise<StatementBatesResult> {
+  return apiFetch<StatementBatesResult>(`/api/v1/statements/${statementId}/bates`, {
+    method: 'POST',
+    body: JSON.stringify({ first, last: last || null }),
+  })
+}
+
+/** The gaps as a paragraph for a motion to compel. */
+export async function getMotionText(
+  matterId: number,
+  side?: 'client' | 'opposing',
+): Promise<MotionText> {
+  const query = side ? `?side=${side}` : ''
+  return apiFetch<MotionText>(`/api/v1/matters/${matterId}/compliance/motion-text${query}`)
+}
+
 export async function exportComplianceMatrix(
   matterId: number,
   format: ExportFormat,
@@ -1573,4 +1638,98 @@ export async function getCostReport(
 
 export async function getUnpricedMeters(): Promise<UnpricedMeter[]> {
   return apiFetch<UnpricedMeter[]>('/api/v1/costs/unpriced')
+}
+
+// ── Client portal ────────────────────────────────────────────────────────────
+//
+// A separate prefix, not the staff routes with a filter. The server resolves
+// which matters the caller may see from their own user_roles rows — a client id
+// is never sent, because sending one would be a request to read somebody else's
+// case.
+
+export async function getPortalMatters(): Promise<PortalMatter[]> {
+  return apiFetch<PortalMatter[]>('/api/v1/portal/matters')
+}
+
+export async function getPortalAccounts(matterId: number): Promise<PortalAccount[]> {
+  return apiFetch<PortalAccount[]>(`/api/v1/portal/matters/${matterId}/accounts`)
+}
+
+export async function getPortalStatements(accountId: number): Promise<PortalStatement[]> {
+  return apiFetch<PortalStatement[]>(`/api/v1/portal/accounts/${accountId}/statements`)
+}
+
+export async function getPortalTags(matterId: number): Promise<PortalTag[]> {
+  return apiFetch<PortalTag[]>(`/api/v1/portal/matters/${matterId}/tags`)
+}
+
+export async function getPortalCompliance(
+  matterId: number, side: 'client' | 'opposing' = 'client',
+): Promise<ComplianceMatrix> {
+  return apiFetch<ComplianceMatrix>(
+    `/api/v1/portal/matters/${matterId}/compliance?side=${side}`)
+}
+
+export async function getPortalTransactions(
+  matterId: number, filter: PortalTransactionFilter = {},
+): Promise<PortalTransactionPage> {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(filter)) {
+    if (value !== null && value !== undefined && value !== '' && value !== false) {
+      query.set(key, String(value))
+    }
+  }
+  const suffix = query.toString() ? `?${query}` : ''
+  return apiFetch<PortalTransactionPage>(
+    `/api/v1/portal/matters/${matterId}/transactions${suffix}`)
+}
+
+/** Apply one of the firm's client tags. A 409 means paused, or already cleared. */
+export async function applyPortalTag(
+  transactionId: number, tagId: number,
+): Promise<PortalTagResult> {
+  return apiFetch<PortalTagResult>(`/api/v1/portal/transactions/${transactionId}/tags`, {
+    method: 'POST',
+    body: JSON.stringify({ tag_id: tagId }),
+  })
+}
+
+/** Take back one of their own tags. Never one the firm applied. */
+export async function removePortalTag(
+  transactionId: number, tagId: number,
+): Promise<PortalTagResult> {
+  return apiFetch<PortalTagResult>(
+    `/api/v1/portal/transactions/${transactionId}/tags/${tagId}`, { method: 'DELETE' })
+}
+
+/** Open a statement's source PDF from the portal, scoped the same way. */
+export async function openPortalStatementPdf(statementId: number): Promise<void> {
+  const tab = window.open('', '_blank')
+  try {
+    const { url } = await apiFetch<{ url: string }>(
+      `/api/v1/portal/statements/${statementId}/pdf-url`)
+    if (tab) tab.location.href = url
+    else window.location.href = url
+  } catch (e) {
+    tab?.close()
+    throw e
+  }
+}
+
+// ── Client tags, as staff review them ────────────────────────────────────────
+
+export async function getClientTags(
+  matterId: number, includeCleared = false,
+): Promise<ClientTagReview[]> {
+  return apiFetch<ClientTagReview[]>(
+    `/api/v1/matters/${matterId}/client-tags?include_cleared=${includeCleared}`)
+}
+
+/** Remove a client's tag. They cannot put it back; staff can. */
+export async function clearClientTag(linkId: number): Promise<ClientTagReview> {
+  return apiFetch<ClientTagReview>(`/api/v1/client-tags/${linkId}/clear`, { method: 'POST' })
+}
+
+export async function restoreClientTag(linkId: number): Promise<ClientTagReview> {
+  return apiFetch<ClientTagReview>(`/api/v1/client-tags/${linkId}/restore`, { method: 'POST' })
 }

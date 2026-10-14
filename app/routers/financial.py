@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import Response
 
 from db.models.financial import (
+    FinancialAccount,
     PayeeClassification,
     StatementReviewStatus,
     TransactionCategory,
@@ -29,6 +30,7 @@ from db.repositories.financial import (
 from db.repositories.matter import MatterRepository
 from db.repositories.staff import StaffRepository
 from dependencies import get_db_manager, require_role
+from schemas.portal import ClientTagReview
 from schemas.financial import (
     AccountDeletePreview,
     AccountMergePreview,
@@ -39,6 +41,11 @@ from schemas.financial import (
     BulkTagRequest,
     ComplianceExportRequest,
     ComplianceMatrix,
+    FinancialAccountCreateRequest,
+    InventoryReport,
+    MotionTextResponse,
+    StatementBatesRequest,
+    StatementBatesResult,
     CreditorResponse,
     ValuePlatformResponse,
     ExhibitExportRequest,
@@ -74,7 +81,9 @@ from schemas.financial import (
     UndisclosedReport,
 )
 from services.account_discovery_service import account_discovery_service
+from services.client_portal_service import client_portal_service
 from services.compliance_service import compliance_service
+from services.inventory_service import inventory_service
 from services.audit_logger import AuditLogger
 from services import exhibit_service
 from services.job_service import job_service
@@ -159,6 +168,21 @@ def upload_statement(
     pdf_bytes = file.file.read()
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty")
+
+    # REFUSED BEFORE ANYTHING IS STORED. The survey used to run after queueing,
+    # because it only produced advice; a limit has to run first, or a refused
+    # upload leaves an object in storage and a job row behind. A 700-page PDF of
+    # 122 statements is what this exists to stop — the survey warned about it,
+    # the import went ahead because a warning is advice, and the result was a
+    # total loss. Nothing is written on this path: no object, no job, no
+    # half-imported statements.
+    too_big = statement_service.refuse_oversized_upload(pdf_bytes)
+    if too_big:
+        LOGGER.warning("financial.upload_statement: refused matter=%s file=%s",
+                       matter_id, (file.filename or "")[:80])
+        # 413, not 422: the request was understood and the document is too large
+        # for this operation, which is exactly what the status says.
+        raise HTTPException(status_code=413, detail=too_big)
 
     try:
         job = job_service.enqueue_statement_ingest(
@@ -317,6 +341,195 @@ def export_undisclosed_accounts(
     if exhibit.warnings:
         headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
 
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
+@router.post("/matters/{matter_id}/financial-accounts", response_model=FinancialAccountResponse,
+             status_code=201)
+def create_account(
+    matter_id: int,
+    body: FinancialAccountCreateRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> FinancialAccountResponse:
+    """
+    Add an account by hand.
+
+    For an account nothing can be ingested for — a receipt naming one, or a row
+    on the undisclosed list that needs resolving. The undisclosed report is
+    rebuilt from the transactions on every run, so nothing can be ticked off it;
+    adding the account is what takes it off, and the character recorded says
+    why. `no_marital_interest` means a third party's account the production
+    named in passing. Anything else puts it on the compliance grid with no
+    statements against it, which is what a motion to compel is built from.
+
+    A duplicate of an account already on the matter is refused rather than
+    created: two rows for one account is the mess the merge tooling exists to
+    clean up, and it starts here.
+    """
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    repo = FinancialAccountRepository(manager)
+    last4 = (body.account_number_last4 or "").strip() or None
+    if last4:
+        existing = repo.find_match(matter_id, body.institution, last4)
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="This matter already has a %s account ending %s. Edit that one, or "
+                       "merge if it is a duplicate." % (existing.institution, last4),
+            )
+
+    record = FinancialAccount(
+        matter_id=matter_id,
+        institution=body.institution.strip(),
+        account_type=body.account_type,
+        account_number_last4=last4,
+        account_number_masked=(body.account_number_masked or "").strip() or None,
+        name_on_account=(body.name_on_account or "").strip() or None,
+        ownership=body.ownership,
+        property_character=body.property_character,
+        production_responsibility=body.production_responsibility,
+        opposing_party_id=body.opposing_party_id,
+        purpose=(body.purpose or "").strip() or None,
+        notes=(body.notes or "").strip() or None,
+    )
+    created = repo.insert(record.model_dump())
+    AuditLogger(manager).log(
+        action="financial_account_created",
+        entity_type="financial_accounts",
+        entity_id=str(created.id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"matter_id": matter_id, "institution": created.institution,
+                    "property_character": getattr(body.property_character, "value", None)},
+    )
+    LOGGER.info("financial.create_account: matter=%s account=%s", matter_id, created.id)
+    return FinancialAccountResponse(**created.model_dump())
+
+
+@router.post("/statements/{statement_id}/bates", response_model=StatementBatesResult)
+def set_statement_bates(
+    statement_id: int,
+    body: StatementBatesRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> StatementBatesResult:
+    """
+    Number a statement's pages by hand, when detection found no series.
+
+    The numbers run consecutively across the pages in hand — a partial
+    production of physical pages 1, 2 and 4 carries three consecutive stamps —
+    and the range must span exactly those pages or nothing is written.
+
+    Every line and the statement are flagged BATES_MANUALLY_ENTERED: a detected
+    stamp was read off the document, a typed one is somebody's reading of it,
+    and an exhibit has to be able to say which.
+    """
+    staff, name = _staff_and_name(request, manager)
+    try:
+        statement, pages = statement_service.set_bates(
+            manager, statement_id, body.first, body.last, staff.id, name)
+    except ValueError as e:
+        message = str(e)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message) from e
+        raise HTTPException(status_code=422, detail=message) from e
+
+    AuditLogger(manager).log(
+        action="statement_bates_entered",
+        entity_type="financial_account_statements",
+        entity_id=str(statement_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"first": body.first, "last": body.last, "pages": pages},
+    )
+    return StatementBatesResult(
+        statement=_statement_response(statement), pages_numbered=pages)
+
+
+@router.get("/matters/{matter_id}/compliance/motion-text", response_model=MotionTextResponse)
+def compliance_motion_text(
+    matter_id: int,
+    side: Optional[str] = Query(default=None, pattern="^(client|opposing)$"),
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> MotionTextResponse:
+    """
+    The missing statements as a paragraph to paste into a motion to compel.
+
+    The same report as the grid, said in the words a pleading uses: whole dates
+    rather than months, and no day counts. The grid is what counsel hands
+    across the table; this is the body of the motion, and generating both from
+    one report is what stops them disagreeing after another month arrives.
+    """
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    return MotionTextResponse(**compliance_service.motion_text(manager, matter_id, side=side))
+
+
+@router.get("/matters/{matter_id}/inventory", response_model=InventoryReport)
+def get_inventory(
+    matter_id: int,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> InventoryReport:
+    """
+    What each account was worth, and who holds it.
+
+    Every account on the matter with the ending balance of its most recent
+    statement, split into assets and liabilities and totalled.
+
+    Three things to know about the figures:
+
+    * **A liability is negative here.** The statement prints a positive balance
+      owed; an inventory asks what the account contributes to the estate, and a
+      card balance contributes minus. The stored figure is untouched.
+    * **Each row speaks as of its own date** — there is no "current balance" in
+      this system, and there should not be: every figure traces to a statement
+      somebody can pull.
+    * **An account with no statement is listed without a balance** and excluded
+      from the total, with the count reported. Omitting it would make the
+      schedule look complete while being short.
+    """
+    matter = MatterRepository(manager).select_one(condition={"id": matter_id})
+    if matter is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    return InventoryReport(**inventory_service.inventory(manager, matter_id, matter=matter))
+
+
+@router.post("/matters/{matter_id}/inventory/export")
+def export_inventory(
+    matter_id: int,
+    body: ExhibitExportRequest,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> Response:
+    """The inventory as a document — two ruled tables and their totals."""
+    matter = MatterRepository(manager).select_one(condition={"id": matter_id})
+    if matter is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+
+    try:
+        exhibit = inventory_service.build_exhibit(
+            manager, matter, body.exhibit_name.strip() or "Account Inventory",
+        )
+        content, media_type, filename = exhibit_service.render(exhibit, body.format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a renderer failure must not read as an empty export
+        LOGGER.error("financial.export_inventory: matter=%s format=%s failed: %s",
+                     matter_id, body.format, str(e))
+        raise HTTPException(status_code=500, detail="Could not build the export") from e
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="%s"' % filename,
+        "X-Exhibit-Rows": str(len(exhibit.rows)),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Exhibit-Rows, X-Exhibit-Warnings",
+    }
+    if exhibit.warnings:
+        headers["X-Exhibit-Warnings"] = quote(" | ".join(exhibit.warnings))
     return Response(content=content, media_type=media_type, headers=headers)
 
 
@@ -1340,6 +1553,98 @@ def search_transactions(
         offset=body.offset,
     )
     return TransactionSearchResponse(**result)
+
+
+@router.get("/matters/{matter_id}/client-tags", response_model=list[ClientTagReview])
+def list_client_tags(
+    matter_id: int,
+    include_cleared: bool = Query(default=False),
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> list[ClientTagReview]:
+    """
+    What the client has tagged on this matter, for review.
+
+    A client tag is useful and it is a guess, so it is never indistinguishable
+    from an attorney's: this is the screen where the two are told apart.
+    """
+    return [ClientTagReview(**row)
+            for row in client_portal_service.review_list(
+                manager, matter_id, include_cleared=include_cleared)]
+
+
+@router.post("/client-tags/{link_id}/clear", response_model=ClientTagReview)
+def clear_client_tag(
+    link_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> ClientTagReview:
+    """
+    Take a client's tag off a line, permanently as far as the client is concerned.
+
+    A suppression, not a delete: the row stays so the client's next attempt
+    lands on it and is refused. Staff can put it back; the client cannot.
+    """
+    staff, _name = _staff_and_name(request, manager)
+    try:
+        link = client_portal_service.clear_tag(manager, link_id, staff.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="client_tag_cleared",
+        entity_type="financial_account_transaction_tags",
+        entity_id=str(link_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"transaction_id": link.transaction_id, "tag_id": link.tag_id},
+    )
+    return _client_tag_row(manager, link)
+
+
+@router.post("/client-tags/{link_id}/restore", response_model=ClientTagReview)
+def restore_client_tag(
+    link_id: int,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> ClientTagReview:
+    """Put back a cleared tag — as a STAFF tag, because applying it is now their call."""
+    staff, _name = _staff_and_name(request, manager)
+    try:
+        link = client_portal_service.restore_tag(manager, link_id, staff.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="client_tag_restored",
+        entity_type="financial_account_transaction_tags",
+        entity_id=str(link_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"transaction_id": link.transaction_id, "tag_id": link.tag_id},
+    )
+    return _client_tag_row(manager, link)
+
+
+def _client_tag_row(manager: Any, link: Any) -> ClientTagReview:
+    """One review row, re-read so the response reflects what was written."""
+    transaction = FinancialAccountTransactionRepository(manager).select_one(
+        condition={"id": link.transaction_id})
+    account = FinancialAccountRepository(manager).select_one(
+        condition={"id": transaction.financial_account_id}) if transaction else None
+    tag = TransactionTagRepository(manager).select_one(condition={"id": link.tag_id})
+    return ClientTagReview(
+        link_id=link.id,
+        transaction_id=link.transaction_id,
+        tag_id=link.tag_id,
+        tag_label=tag.label if tag else "#%d" % link.tag_id,
+        matter_id=account.matter_id if account else 0,
+        transaction_date=transaction.transaction_date if transaction else None,
+        description=transaction.description if transaction else "",
+        amount=transaction.amount if transaction else 0,
+        institution=account.institution if account else None,
+        account_last4=account.account_number_last4 if account else None,
+        tagged_at=link.created_at,
+        cleared_at=link.cleared_at,
+    )
 
 
 @router.post("/matters/{matter_id}/transactions/review", response_model=BulkResultResponse)

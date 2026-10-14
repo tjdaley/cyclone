@@ -56,6 +56,11 @@ class MatterUpdateRequest(BaseModel):
     client_alignment: Optional[ClientAlignment] = None
     client_produces_since: Optional[date] = None
     opposing_produces_since: Optional[date] = None
+    client_tagging_enabled: Optional[bool] = Field(
+        default=None,
+        description="Whether the client may tag transactions in the portal. Turned off for "
+                    "hearing prep: tags go into exhibits, so the set has to stop moving",
+    )
 
 
 class MatterResponse(BaseModel):

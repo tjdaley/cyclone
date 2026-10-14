@@ -1,5 +1,5 @@
 """
-scripts/sync_user_guide.py - Publish docs/user-guide into the frontend bundle.
+scripts/sync_user_guide.py - Publish the guides into the frontend bundle.
 
 WHY A COPY EXISTS AT ALL
 ────────────────────────────────────────────────────────────────────────────
@@ -30,6 +30,16 @@ repository is the one a reader sees on GitHub.
 A chapter file that the index does not link to still ships, under "More" — a
 new chapter somebody forgot to index is a thing to notice, not to hide.
 
+TWO GUIDES, ONE SCRIPT
+────────────────────────────────────────────────────────────────────────────
+`docs/user-guide/` is the staff guide, with an index and a manifest. The client
+guide is one page for a different reader — a client given portal access — and it
+is published the same way for the same reason: the portal is served from the
+same bundle, so a page it links to has to be inside `frontend/public/`.
+
+It is **flat and has no manifest**. One page needs no table of contents, and
+inventing one would be a second thing to keep in step.
+
     python scripts/sync_user_guide.py            # write
     python scripts/sync_user_guide.py --check    # exit 1 if stale, write nothing
 """
@@ -47,6 +57,11 @@ DEST = Path("frontend/public/user-guide")
 INDEX = "README.md"
 
 MANIFEST = "manifest.json"
+
+#: The client guide: one page, no index, no manifest. Published because the
+#: portal links to it, and the portal is served from the same bundle.
+CLIENT_SOURCE = Path("docs/client-guide")
+CLIENT_DEST = Path("frontend/public/client-guide")
 
 #: `## Part 2 — Setting up work`
 _PART = re.compile(r"^##\s+(.+?)\s*$")
@@ -146,6 +161,29 @@ def desired_files(source: Path) -> dict[str, str]:
     return files
 
 
+def flat_files(source: Path) -> dict[str, str]:
+    """
+    Every markdown file in a guide that has no index.
+
+    :param source: A guide directory.
+    :return: Filename to exact contents.
+    :rtype: dict[str, str]
+    """
+    return {p.name: p.read_text(encoding="utf-8") for p in sorted(source.glob("*.md"))}
+
+
+def wanted(source: Path) -> dict[str, str]:
+    """
+    What a guide should publish, whichever kind of guide it is.
+
+    The staff guide carries a manifest built from its index; a flat guide is
+    its files and nothing else. One function so ``differences`` and the writer
+    cannot disagree about which.
+    """
+    return desired_files(source) if (source / INDEX).exists() and any(
+        p.name != INDEX for p in source.glob("*.md")) else flat_files(source)
+
+
 def differences(source: Path, dest: Path) -> list[str]:
     """
     What is stale, in the words the person running ``--check`` needs.
@@ -153,7 +191,7 @@ def differences(source: Path, dest: Path) -> list[str]:
     :return: One sentence per problem; empty when the copy is current.
     :rtype: list[str]
     """
-    want = desired_files(source)
+    want = wanted(source)
     problems: list[str] = []
     for name, content in want.items():
         published = dest / name
@@ -174,33 +212,44 @@ def main() -> int:
     args = parser.parse_args()
 
     root = repo_root()
-    source, dest = root / SOURCE, root / DEST
+    # The staff guide first, because it is the one that must exist.
+    pairs = [(root / SOURCE, DEST), (root / CLIENT_SOURCE, CLIENT_DEST)]
 
-    if not source.is_dir():
-        print("No guide at %s" % source, file=sys.stderr)
+    if not (root / SOURCE).is_dir():
+        print("No guide at %s" % (root / SOURCE), file=sys.stderr)
         return 2
 
     if args.check:
-        problems = differences(source, dest)
+        problems: list[str] = []
+        for source, label in pairs:
+            if not source.is_dir():
+                continue
+            problems += ["%s: %s" % (label, p) for p in differences(source, root / label)]
         for problem in problems:
             print(problem, file=sys.stderr)
         if problems:
             print("\nRun: python scripts/sync_user_guide.py", file=sys.stderr)
             return 1
-        print("%s is current (%d files)" % (DEST, len(desired_files(source))))
+        for source, label in pairs:
+            if source.is_dir():
+                print("%s is current (%d files)" % (label, len(wanted(source))))
         return 0
 
-    dest.mkdir(parents=True, exist_ok=True)
-    want = desired_files(source)
-    for name, content in want.items():
-        (dest / name).write_text(content, encoding="utf-8", newline="\n")
-    # A chapter deleted from the guide has to leave the site too, or it stays
-    # reachable by URL long after anybody can find the file it came from.
-    for published in sorted(dest.glob("*")):
-        if published.is_file() and published.name not in want:
-            published.unlink()
-            print("removed %s" % published.name)
-    print("published %d files to %s" % (len(want), DEST))
+    for source, label in pairs:
+        if not source.is_dir():
+            continue
+        dest = root / label
+        dest.mkdir(parents=True, exist_ok=True)
+        want = wanted(source)
+        for name, content in want.items():
+            (dest / name).write_text(content, encoding="utf-8", newline="\n")
+        # A page deleted from a guide has to leave the site too, or it stays
+        # reachable by URL long after anybody can find the file it came from.
+        for published in sorted(dest.glob("*")):
+            if published.is_file() and published.name not in want:
+                published.unlink()
+                print("removed %s" % published.name)
+        print("published %d files to %s" % (len(want), label))
     return 0
 
 

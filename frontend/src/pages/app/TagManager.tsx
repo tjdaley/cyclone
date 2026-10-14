@@ -66,6 +66,7 @@ export default function TagManager({ matterId, tags, onChanged, onError }: {
         description: (patch.description ?? tag.description) || null,
         color: patch.color ?? tag.color,
         is_active: patch.is_active ?? tag.is_active,
+        client_visible: patch.client_visible ?? tag.client_visible ?? false,
       })
       setEditing(null)
       await onChanged()
@@ -139,6 +140,10 @@ export default function TagManager({ matterId, tags, onChanged, onError }: {
                   </span>
                   {!tag.is_active && (
                     <span className="text-xs text-text-secondary italic">retired</span>
+                  )}
+                  {tag.client_visible && (
+                    <span className="text-xs rounded-full bg-sky-50 text-sky-800 px-2 py-0.5"
+                      title="Offered to the client in their portal">client</span>
                   )}
                   <span className="text-xs text-text-secondary flex-1 min-w-[8rem]">
                     {tag.description || <span className="italic opacity-60">no description</span>}
@@ -226,6 +231,7 @@ function TagEditor({ tag, busy, onSave, onCancel }: {
   const [description, setDescription] = useState(tag.description ?? '')
   const [color, setColor] = useState(tag.color ?? 'gray')
   const [active, setActive] = useState(tag.is_active)
+  const [clientVisible, setClientVisible] = useState(tag.client_visible ?? false)
 
   return (
     <div className="border border-navy/30 bg-white rounded p-3 space-y-2">
@@ -246,6 +252,15 @@ function TagEditor({ tag, busy, onSave, onCancel }: {
           <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
           Active
         </label>
+        {/* OPT-IN, and it has to stay that way: this list carries the firm's
+            theory of the case, and a tag reaches the client's portal only
+            because somebody decided it should. */}
+        <label className="text-xs text-text-secondary flex items-center gap-1.5"
+          title="Offer this tag to the client in their portal. They can apply and remove it; your staff can clear a tag the client got wrong, and the client cannot put it back.">
+          <input type="checkbox" checked={clientVisible}
+            onChange={e => setClientVisible(e.target.checked)} />
+          Offer to clients
+        </label>
         <span className="text-xs text-text-secondary">
           {/* Retiring is the safe alternative to deleting: the lines keep the tag
               and any exhibit built from it still resolves. */}
@@ -259,6 +274,7 @@ function TagEditor({ tag, busy, onSave, onCancel }: {
             disabled={busy || !label.trim()}
             onClick={() => void onSave({
               label, description: description.trim() || null, color, is_active: active,
+              client_visible: clientVisible,
             })}>
             {busy ? 'Saving…' : 'Save'}
           </button>

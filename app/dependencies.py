@@ -120,3 +120,47 @@ def require_role(allowed_roles: list[str]) -> Callable[..., None]:
         request.state.roles = user_roles
 
     return _check
+
+
+def require_client(
+    request: Request,
+    manager: SupabaseManager = Depends(get_db_manager),
+) -> int:
+    """
+    The client id behind this request, for the portal.
+
+    **This is the only way a portal endpoint learns who it is serving.** The id
+    comes from the caller's ``user_roles`` rows, never from the request — a
+    client_id in a path or a body would be a request to read somebody else's
+    matters, and honouring it would be the whole failure.
+
+    Staff are refused here even though they may see more elsewhere. The portal
+    is a different surface with different wording and a different audience, and
+    a staff member who wants a matter's records has the staff app; letting them
+    in through this door would mean every portal response had to be correct for
+    two audiences at once.
+
+    :return: The client id.
+    :rtype: int
+    :raises HTTPException: 401 unauthenticated, 403 when the account is not a
+        client or carries no client record.
+    """
+    uid = getattr(request.state, "supabase_uid", None)
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    records = UserRoleRepository(manager).get_by_uid(uid)
+    if not records:
+        raise HTTPException(status_code=403, detail="No role assigned to this account")
+
+    roles = sorted({r.role.value for r in records})
+    client_id = next((r.client_id for r in records if r.client_id is not None), None)
+    if "client" not in roles or client_id is None:
+        LOGGER.warning("require_client: refused uid=%s roles=%s client_id=%s",
+                       uid, roles, client_id)
+        raise HTTPException(status_code=403, detail="This area is for client accounts")
+
+    request.state.role = primary_role(roles)
+    request.state.roles = roles
+    request.state.client_id = client_id
+    return client_id

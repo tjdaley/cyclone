@@ -8,7 +8,7 @@
 
 **Matters** → click the matter → **Financials →** (top right).
 
-The Financials page has five tabs, and they are the shape of the whole job:
+The Financials page has six tabs, and they are the shape of the whole job:
 
 | Tab | What it is for |
 | --- | -------------- |
@@ -16,6 +16,7 @@ The Financials page has five tabs, and they are the shape of the whole job:
 | **Accounts** | The accounts the imports created, and your judgments about them |
 | **Compliance** | What has and has not been produced |
 | **Transactions** | Searching, categorizing, tagging, exporting |
+| **Inventory** | Every account's latest balance, totalled — see [Chapter 7](07-viewing-statements.md#the-inventory-tab) |
 | **FIS** | The Financial Information Statement |
 
 Two of the tabs carry an amber count when something needs you:
@@ -36,13 +37,32 @@ twelve monthly PDFs dropped together finish far sooner than the same twelve
 months combined into one large file — and much sooner than dropping them one at
 a time.
 
-> **Do not merge a year of statements into one PDF to "make it easier".** It is
-> slower, and it is the single most common cause of a failed import: on a very
-> long document the reader loses its place partway through, and the statement
-> comes out short and unreconciled. Individual monthly files are the best input
-> this software can be given — and if a client or opposing counsel produces one
-> enormous file, splitting it before you upload will save you doing it
-> afterwards.
+> ### ⛔ A very large PDF is refused
+>
+> **Two limits, and an upload that breaks either is rejected outright:**
+>
+> | Limit | |
+> | ----- | - |
+> | **50 pages** | A single statement is rarely longer |
+> | **8 statements in one file** | Counted from the pagination the statements print |
+>
+> **Nothing is kept when an upload is refused** — no document in storage, no
+> job, no partial import. The message says which limit it was and what to do.
+>
+> **Split the PDF into one file per statement, and drop the whole stack at
+> once.** That is faster as well as more accurate: the files are read several at
+> a time, so twelve monthly PDFs finish sooner than the same twelve months
+> combined into one.
+>
+> **Why this is now a refusal and not a warning.** A 700-page PDF holding 122
+> statements was uploaded. The warning fired, the import ran anyway — because
+> the warning was only advice — and the result was a total loss. Below these
+> limits the advisory warning still behaves as described
+> [further down](#if-you-are-told-the-pdf-looks-like-several-statements).
+>
+> **Retry runs the same check**, before anything is deleted. So a large document
+> imported before this release cannot be re-read either: the statements already
+> held are left untouched, and splitting the file is the way forward.
 >
 > **A long document that is not read all the way through now says so**, on every
 > statement it produced, as **PAGES_NOT_INDEXED**

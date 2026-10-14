@@ -34,6 +34,7 @@ from db.repositories.financial import (
     TransactionCategoryRepository,
 )
 from db_handler import DatabaseManager
+from util import institution_match
 from services.category_rule_service import matches, prepare
 from services.exhibit_service import Column, Exhibit, Row, caption_lines, money
 from util.loggerfactory import LoggerFactory
@@ -634,6 +635,13 @@ class AccountDiscoveryService:
         # of these is not a discovery — including the statement's own account,
         # which names itself constantly.
         known = {a.account_number_last4 for a in accounts if a.account_number_last4}
+        # ACCOUNTS WE HOLD WHOSE NUMBER NOBODY COULD READ. They can match no
+        # reference, because there is nothing to match on — so every mention of
+        # them reads as an undisclosed account, which is the false positive this
+        # report is worst at. They are not suppressed (a reference really might
+        # be to a different account at the same bank); the entry says which held
+        # account it is probably about, and the exhibit leaves it out.
+        numberless = [a for a in accounts if not a.account_number_last4 and a.institution]
 
         rejected = statement_repo.rejected_ids(matter_id)
         scope = sorted(by_id)
@@ -657,7 +665,7 @@ class AccountDiscoveryService:
                         continue
                     seen_rows.add(row.id)
                     scanned += 1
-                    self._collect(row, by_id, known, found)
+                    self._collect(row, by_id, known, found, numberless)
                 offset += len(rows)
                 if offset >= total:
                     break
@@ -678,6 +686,7 @@ class AccountDiscoveryService:
         by_id: dict[int, Any],
         known: set,
         found: "OrderedDict[str, dict[str, Any]]",
+        numberless: Optional[list] = None,
     ) -> None:
         """Fold one transaction's references into the running tally."""
         source = by_id.get(row.financial_account_id)
@@ -685,6 +694,8 @@ class AccountDiscoveryService:
             last4 = _last4(number)
             if not last4 or last4 in known:
                 continue
+            named = label or (source.institution if source else None)
+            probable = institution_match.first_similar(named, numberless or [])
 
             entry = found.get(last4)
             if entry is None:
@@ -695,8 +706,16 @@ class AccountDiscoveryService:
                     # assumption is that a transfer stays inside the bank whose
                     # statement it is printed on — usually right, sometimes not,
                     # and always marked so nobody mistakes it for the document.
-                    "institution": label or (source.institution if source else None),
+                    "institution": named,
                     "institution_inferred": label is None,
+                    # An account on this matter at the same institution whose
+                    # own number could not be read — so this reference may be
+                    # to a statement already produced.
+                    "possible_match": (
+                        "%s%s" % (probable.institution,
+                                  " (no account number recorded)" if probable else "")
+                        if probable is not None else None
+                    ),
                     "mentions": 0,
                     "money_in": ZERO,
                     "money_out": ZERO,
@@ -774,7 +793,9 @@ class AccountDiscoveryService:
             return []
 
         by_id = {a.id: a for a in accounts}
-        held = {_squash(a.institution) for a in accounts if a.institution}
+        # The names as written. The matcher tokenises them; a squashed
+        # "BANKOFAMERICA" is a single token and would match nothing.
+        held = [a.institution for a in accounts if a.institution]
         rejected = statement_repo.rejected_ids(matter_id)
         scope = sorted(by_id)
 
@@ -823,20 +844,27 @@ class AccountDiscoveryService:
 
         name = details["institution"]
         # An institution the matter already holds an account at is not a
-        # discovery. Compared on squashed names because "UBS" and "UBS AG
-        # Stamford Branch" are the same bank written two ways.
-        squashed = _squash(name)
-        if any(known in squashed or squashed in known for known in held if known):
+        # discovery. Matched on TOKENS, not on substrings: "UBS" and "UBS AG
+        # Stamford Branch" are one bank, and the containment test this replaced
+        # could neither see that "BofA" is "Bank of America" nor stop "CHASE"
+        # matching inside "PURCHASE".
+        if institution_match.first_match(name, held) is not None:
             return
+        # Close, but not certain. NEVER suppressed on a near match -- hiding a
+        # genuinely undisclosed account is the worse failure of the two -- so
+        # the row survives, carrying the name it probably belongs to. The screen
+        # shows it apart; the exhibit leaves it out.
+        probable = institution_match.first_similar(name, held)
 
         # The routing number is the identity when there is one: two statements
         # may write the bank's name differently, but the ABA is the same nine
         # checksummed digits either way.
-        key = details["aba"] or squashed
+        key = details["aba"] or _squash(name)
         entry = found.get(key)
         if entry is None:
             entry = {
                 "institution": name,
+                "possible_match": probable,
                 "aba": details["aba"],
                 "wires": 0,
                 "money_in": ZERO,
@@ -955,10 +983,12 @@ class AccountDiscoveryService:
 
         # Only a produced CREDIT account explains a creditor payment. A produced
         # Chase checking account says nothing about a Chase card.
-        held = {
-            _squash(a.institution) for a in accounts
+        # Only a produced CREDIT account explains a creditor payment, so the
+        # names compared are the liability accounts' alone.
+        held = [
+            a.institution for a in accounts
             if a.institution and a.account_type in _LIABILITY_ACCOUNTS
-        }
+        ]
         rejected = statement_repo.rejected_ids(matter_id)
         liability = set(TransactionCategoryRepository(manager).liability_ids())
         rulings = self._rulings(manager, matter_id)
@@ -1009,9 +1039,11 @@ class AccountDiscoveryService:
         creditors: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
         for entry in found.values():
-            squashed = _squash(entry["creditor_name"] or entry["payee"])
-            if squashed and any(k in squashed or squashed in k for k in held if k):
+            name = entry["creditor_name"] or entry["payee"]
+            if institution_match.first_match(name, held) is not None:
                 continue  # an account at this creditor was produced
+            # Near enough to be worth saying so, not near enough to drop.
+            entry["possible_match"] = institution_match.first_similar(name, held)
             (creditors if entry["reason"] != "unreviewed" else candidates).append(entry)
 
         platforms = self._unproduced_platforms(platform_rows, accounts)
@@ -1047,14 +1079,23 @@ class AccountDiscoveryService:
         """
         platforms: list[dict[str, Any]] = []
         for entry in collected.values():
-            names = [n for n in (_squash(entry["platform"]), _squash(entry["pattern"])) if n]
+            names = [n for n in (entry["platform"], entry["pattern"]) if n]
             produced = {
                 a.account_type for a in accounts
                 if a.institution and any(
-                    name in _squash(a.institution) or _squash(a.institution) in name
-                    for name in names
+                    institution_match.same(name, a.institution) for name in names
                 )
             }
+            # A platform whose name merely resembles one of the matter's
+            # accounts is still reported -- per KIND, a produced account may
+            # answer none of what this platform holds -- but it says which
+            # account it might be, so the reader is not asked to spot it.
+            probable = next(
+                (a.institution for a in accounts if a.institution
+                 and any(institution_match.similar(name, a.institution) for name in names)),
+                None,
+            )
+            entry["possible_match"] = probable
             entry["produced_types"] = sorted(getattr(t, "value", str(t)) for t in produced)
             entry["missing"] = [
                 kind for kind in entry["holds"]
@@ -1286,13 +1327,30 @@ class AccountDiscoveryService:
         explanation stayed behind on the screen is worse than no mark — the
         reader sees a qualification and cannot tell what is being qualified.
         """
-        found = self.undisclosed(manager, matter.id)
-        wired = self.referenced_institutions(manager, matter.id)
+        # ROWS THAT MIGHT ALREADY BE PRODUCED DO NOT GO IN THE DOCUMENT.
+        #
+        # A near match on an institution name is enough to say "look at this
+        # before you file it" and nowhere near enough to put in front of a
+        # court: the whole document asserts that these were NOT produced. They
+        # stay on the screen, where somebody can resolve them, and the count of
+        # what was set aside is stated in the Selection block so the exhibit
+        # never reads as the complete list when it is not.
+        def filed(entries):
+            return [e for e in entries if not e.get("possible_match")]
+
+        all_found = self.undisclosed(manager, matter.id)
+        all_wired = self.referenced_institutions(manager, matter.id)
+        found, wired = filed(all_found), filed(all_wired)
         # Findings only. The candidate list is payees nobody has ruled on, which
         # is a work queue and not evidence — putting it in a document filed with
         # a court would assert of the City of Lewisville exactly what it asserts
         # of American Express.
-        owed, _candidates, platforms = self.counterparties(manager, matter.id)
+        all_owed, _candidates, all_platforms = self.counterparties(manager, matter.id)
+        owed, platforms = filed(all_owed), filed(all_platforms)
+        set_aside = (
+            (len(all_found) - len(found)) + (len(all_wired) - len(wired))
+            + (len(all_owed) - len(owed)) + (len(all_platforms) - len(platforms))
+        )
         caption, warnings = caption_lines(matter, exhibit_name)
 
         rows = list(
@@ -1450,7 +1508,9 @@ class AccountDiscoveryService:
                 ("Source", "Transfer descriptions on the statements produced in this matter"),
                 ("Compared against", "The %d account%s currently on this matter"
                                      % (len(accounts), "" if len(accounts) == 1 else "s")),
-                ("Matched on", "The last four digits of the account number"),
+                ("Matched on", "The last four digits of the account number, and the "
+                               "institution name compared as words rather than as text — "
+                               "\"BofA\" and \"Bank of America, N.A.\" are one bank"),
                 ("Direction", "Taken from the sign of each amount, not from the words "
                               "\"to\" and \"from\" — a description often carries both"),
                 ("Wires", "Read for the sending institution and its routing number"),
@@ -1466,7 +1526,15 @@ class AccountDiscoveryService:
                 ("Institutions listed", str(len(wired))),
                 ("Creditors listed", str(len(owed))),
                 ("Platforms listed", str(len(platforms))),
-            ),
+            ) + ((
+                # Stated on the document, not just on the screen. A reader has
+                # to be able to tell this from the complete list, and the firm
+                # has to be able to say what it left out and why.
+                ("Set aside", "%d further reference%s resembled an account already on this "
+                              "matter closely enough that it may already be produced. Those "
+                              "are held back for review rather than listed here"
+                              % (set_aside, "" if set_aside == 1 else "s")),
+            ) if set_aside else ()),
             summary=(
                 ("Accounts referenced but not produced", str(len(found))),
                 ("Institutions referenced but not produced", str(len(wired))),

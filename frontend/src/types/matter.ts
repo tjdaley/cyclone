@@ -66,6 +66,13 @@ export interface Matter {
    */
   client_produces_since: string | null
   opposing_produces_since: string | null
+  /**
+   * Whether the client may tag transactions in their portal.
+   *
+   * Off during hearing prep: tags reach exhibits, so the set has to stop moving
+   * before anybody argues from it. Staff tagging is unaffected.
+   */
+  client_tagging_enabled?: boolean
 }
 
 /**

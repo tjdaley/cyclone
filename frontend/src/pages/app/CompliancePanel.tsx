@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getComplianceMatrix, exportComplianceMatrix } from '../../lib/api'
+import { useState as useMotionState } from 'react'
+import { getMotionText } from '../../lib/api'
 import ExportButtons from '../../components/ExportButtons'
 import { formatDate } from '../../lib/money'
 import StatementPdfButton from '../../components/StatementPdfButton'
@@ -225,6 +227,12 @@ export default function CompliancePanel({ matterId }: { matterId: number }) {
         </div>
       ))}
 
+      {/* THE BODY OF THE MOTION, where the grid is its attachment. Same facts,
+          different document: a judge reads the sentence, counsel hands over the
+          grid. Both come from one report, so they cannot disagree after another
+          month is produced. */}
+      <MotionTextButton matterId={matterId} side={side} />
+
       {/* The attachment to a motion to compel. Landscape in every format that
           has an orientation — fourteen columns in portrait wrap the Bates
           numbers, and a grid nobody can scan is no grid. */}
@@ -366,6 +374,66 @@ function Coverage({ account }: { account: ComplianceAccount }) {
           </li>
         )}
       </ul>
+    </div>
+  )
+}
+
+/**
+ * Copy the missing statements as a paragraph for a motion to compel.
+ *
+ * Deliberately not an export: this is text somebody pastes into a pleading they
+ * are already writing, so the useful shape is the clipboard, not a file in the
+ * downloads folder. It is shown before copying because a sentence going into a
+ * filing should be read first.
+ */
+function MotionTextButton({ matterId, side }: {
+  matterId: number
+  side?: 'client' | 'opposing'
+}) {
+  const [text, setText] = useMotionState<string | null>(null)
+  const [note, setNote] = useMotionState<string | null>(null)
+  const [busy, setBusy] = useMotionState(false)
+
+  async function build() {
+    setBusy(true); setNote(null)
+    try {
+      const result = await getMotionText(matterId, side)
+      if (!result.text) {
+        // Not an error, and not an empty box either: nothing is missing, which
+        // is the answer.
+        setText(null)
+        setNote('Nothing is missing on this report — there is nothing to compel.')
+      } else {
+        setText(result.text)
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Could not build the text')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="pt-2">
+      <button type="button" className="text-sm text-navy underline" disabled={busy}
+        onClick={() => void build()}>
+        {busy ? 'Building…' : 'Text for a motion to compel'}
+      </button>
+      {note && <p className="text-xs text-text-secondary mt-1">{note}</p>}
+      {text && (
+        <div className="mt-2">
+          <textarea className="input w-full font-mono text-xs" rows={Math.min(14, text.split('\n').length + 1)}
+            readOnly value={text} onFocus={e => e.currentTarget.select()} />
+          <div className="flex items-center gap-3 mt-1">
+            <button type="button" className="text-xs text-navy underline"
+              onClick={() => void navigator.clipboard?.writeText(text)
+                .then(() => setNote('Copied.'))
+                .catch(() => setNote('Select the text and copy it — the browser refused.'))}>
+              Copy
+            </button>
+            <button type="button" className="text-xs text-text-secondary underline"
+              onClick={() => { setText(null); setNote(null) }}>Hide</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

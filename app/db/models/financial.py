@@ -67,6 +67,12 @@ class PropertyCharacter(str, Enum):
     separate_respondent = "separate_respondent"
     mixed = "mixed"
     disputed = "disputed"
+    #: The marital estate has no interest in this account at all -- a third
+    #: party's, named by the production in passing (045). NOT separate property,
+    #: which is a party's own and still gets inventoried. Two reports read it:
+    #: the compliance grid leaves it out (nothing to compel) and so does the
+    #: inventory (no interest to list).
+    no_marital_interest = "no_marital_interest"
 
 
 class AccountOwnership(str, Enum):
@@ -450,6 +456,11 @@ class TransactionTag(BaseModel):
     color: Optional[str] = Field(default=None, description="Presentation token, e.g. 'amber'")
     display_order: int = Field(default=0, description="Sort key within its layer")
     is_active: bool = Field(default=True, description="Retire without removing it from tagged lines")
+    client_visible: bool = Field(
+        default=False,
+        description="Offered to the client in the portal. Opt-IN (044): the firm's list carries "
+                    "litigation strategy, and defaulting to visible would publish it",
+    )
 
 
 class TransactionTagInDB(TransactionTag):
@@ -459,16 +470,42 @@ class TransactionTagInDB(TransactionTag):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TagSource(str, Enum):
+    """Who applied a tag. The two are never interchangeable — see 044."""
+
+    staff = "staff"
+    client = "client"
+
+
 class TransactionTagLink(BaseModel):
     """
     One tag applied to one transaction.
 
-    ``tagged_by_staff_id`` is not bookkeeping: tagging is an attorney judgment
-    that gets cross-examined, so the record says who made it.
+    The actor is not bookkeeping: a STAFF tag is an attorney judgment that gets
+    cross-examined, so the record says who made it. A CLIENT tag (044) is
+    something else — useful, and a guess — and the two must never be
+    indistinguishable, because tags drive Rule 1006 exhibits.
+
+    **Clearing is a suppression, not a delete.** Staff clear a client's wrong
+    tag and the client cannot put it back; the row stays, carrying who cleared
+    it, and the ``(transaction, tag)`` unique constraint is what makes the
+    client's next attempt land on the cleared row rather than create a new one.
     """
     transaction_id: int = Field(..., description="FK to financial_account_transactions")
     tag_id: int = Field(..., description="FK to transaction_tags")
-    tagged_by_staff_id: int = Field(..., description="Staff member who applied the tag")
+    source: TagSource = Field(
+        default=TagSource.staff, description="Whether staff or the client applied it")
+    tagged_by_staff_id: Optional[int] = Field(
+        default=None, description="Staff member who applied it; null on a client tag")
+    tagged_by_client_id: Optional[int] = Field(
+        default=None, description="Client who applied it; null on a staff tag")
+    cleared_at: Optional[datetime] = Field(
+        default=None,
+        description="When staff cleared it. A cleared link counts as no tag anywhere — not in "
+                    "search, not in an exhibit — and the client cannot re-apply it",
+    )
+    cleared_by_staff_id: Optional[int] = Field(
+        default=None, description="Staff member who cleared it. Set with cleared_at or not at all")
 
 
 class TransactionTagLinkInDB(TransactionTagLink):

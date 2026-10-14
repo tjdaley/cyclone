@@ -11,15 +11,23 @@
 | **attorney** | Lawyers |
 | **paralegal** | Paralegals and legal assistants |
 | **admin** | Whoever administers Cyclone for the firm |
-| **client** | Reserved for the client portal, **which is not built yet** |
+| **client** | A client of the firm, given a read-only view of their own matter — see [Chapter 16](16-client-portal.md) |
 
 **A person can hold more than one.** Each ticked role is a separate record, so
 someone can be an attorney *and* an admin, and holds the combined access of
 both. Access is granted if **any** role held allows the action.
 
-> **`client` does not currently work.** A user holding only the client role can
-> sign in and will be sent to an "access denied" page. The client portal is
-> planned, not built.
+> **A client lands in the portal, not in Cyclone.** Somebody holding only the
+> `client` role signs in and is taken to their own three pages — accounts,
+> statements held, transactions — with their own menu and wording.
+>
+> **Somebody who holds `client` *and* a staff role is treated as staff here.**
+> That is deliberate: an attorney who is also a client of the firm should not be
+> dropped into a client's view of their own divorce. If they need the portal
+> view, give them a second account.
+>
+> `/access-denied` now means what it says — a signed-in account with no role at
+> all.
 
 ---
 
@@ -64,6 +72,8 @@ Everything below assumes the person has signed in successfully.
 | Delete a matter or a client | — | — | ✅ |
 | Create staff, grant and revoke roles | — | — | ✅ |
 | Read AI spend, and enter or correct a price ([Chapter 15](15-costs.md)) | — | — | ✅ |
+| Let a client tag transactions on a matter ([Chapter 16](16-client-portal.md)) | ✅ | — | ✅ |
+| Offer a tag to clients, and clear or restore a client's tag | ✅ | ✅ | ✅ |
 | Knowledge base articles | — | — | ✅ |
 | Read the audit log | — | — | ✅ |
 

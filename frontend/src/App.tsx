@@ -1,6 +1,12 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
+import ClientRoute from './components/ClientRoute'
+import ClientShell from './pages/portal/ClientShell'
+import PortalTransactionsPage from './pages/portal/PortalTransactionsPage'
+import PortalAccountsPage from './pages/portal/PortalAccountsPage'
+import PortalStatementsHeldPage from './pages/portal/PortalStatementsHeldPage'
+import PortalGuidePage from './pages/portal/PortalGuidePage'
 import AppShell from './components/AppShell'
 
 import LandingPage      from './pages/LandingPage'
@@ -62,6 +68,21 @@ export default function App() {
               <Route path="/app/profile"   element={<ProfilePage />} />
               <Route path="/app/admin"     element={<AdminPage />} />
               <Route path="/app/costs"     element={<CostsPage />} />
+            </Route>
+          </Route>
+
+          {/* Protected — client portal. Its own shell and its own wording:
+              the same facts read differently for the person whose case it is. */}
+          <Route element={<ClientRoute />}>
+            <Route element={<ClientShell />}>
+              <Route path="/portal" element={<div />} />
+              <Route path="/portal/:matterId/transactions" element={<PortalTransactionsPage />} />
+              <Route path="/portal/:matterId/accounts" element={<PortalAccountsPage />} />
+              <Route path="/portal/:matterId/statements-held" element={<PortalStatementsHeldPage />} />
+              {/* The client's own guide, published from docs/client-guide by
+                  scripts/sync_user_guide.py. Inside the shell, so reading it
+                  does not mean leaving the portal. */}
+              <Route path="/portal/:matterId/guide" element={<PortalGuidePage />} />
             </Route>
           </Route>
 

@@ -8,8 +8,15 @@ part of that is recoverable and none of it is quick.
 
 The survey is what would have said so up front. It is advisory on purpose: a
 document holding several statements is legal input — a combined statement is one
-upload with five accounts in it — so blocking would trade a real workflow for a
-rare one.
+upload with five accounts in it — so warning rather than blocking is right in
+the range the survey is about.
+
+**And advice was not enough at the top end.** A 700-page PDF of 122 statements
+was uploaded; the survey said "48 first pages in the first 250" and the import
+went ahead anyway, because a warning is a warning. It was a total loss. Past
+`_MAX_UPLOAD_PAGES` or `_MAX_UPLOAD_STATEMENTS` an upload is now REFUSED, and
+refused **before anything is stored** — no object in storage, no job row, no
+half-imported statements. The second half of this suite pins that.
 
 Run:  venv/Scripts/python.exe tests/test_upload_survey.py
 """
@@ -20,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import pymupdf  # noqa: E402
 from services.pdf_service import _PAGE_ONE, pdf_service  # noqa: E402
-from services.statement_service import _MANY_PAGES, statement_service  # noqa: E402
+from services.statement_service import (  # noqa: E402
+    _MANY_PAGES, _MAX_UPLOAD_PAGES, _MAX_UPLOAD_STATEMENTS, statement_service,
+)
 
 FAILURES: list[str] = []
 
@@ -149,6 +158,54 @@ print("\nA warning never costs an upload")
 check("an unreadable file warns nothing rather than raising",
       statement_service.survey_upload(b"not a pdf at all"), [])
 check("and neither does an empty one", statement_service.survey_upload(b""), [])
+
+print("")
+print("The hard limits: refused, not warned")
+
+# The real one, scaled down: far too many pages AND far too many statements.
+monster = pdf(_MAX_UPLOAD_PAGES + 10, statements_of(2))
+refusal = statement_service.refuse_oversized_upload(monster)
+check_true("a production of many statements is refused", refusal)
+check_true("told how many it holds", "at least" in (refusal or ""))
+check_true("told to split it", "Split it into one file per statement" in (refusal or ""))
+# The sentence has to end the question "what happened to my upload?", because
+# the answer is "nothing", and silence there reads as data loss.
+check_true("and told nothing was kept", "Nothing was saved." in (refusal or ""))
+
+# Statement count alone, inside the page limit: 10 one-page statements in 10
+# pages. Length is not what makes this unworkable, so length is not the test.
+many = pdf(_MAX_UPLOAD_STATEMENTS + 2, lambda n: "ACME BANK\nPage 1 of 1\nBalance 1.00")
+refusal = statement_service.refuse_oversized_upload(many)
+check_true("too many statements is enough on its own", refusal)
+check_true("counted", "at least %d" % (_MAX_UPLOAD_STATEMENTS + 2) in (refusal or ""))
+
+# Pages alone: ONE long statement, over the page limit. A single statement that
+# long is rare and the limit still applies — it is a gate, not a guess.
+long_one = pdf(_MAX_UPLOAD_PAGES + 1, one_statement(_MAX_UPLOAD_PAGES + 1))
+refusal = statement_service.refuse_oversized_upload(long_one)
+check_true("too many pages is enough on its own", refusal)
+check_true("says the page count", "%d pages" % (_MAX_UPLOAD_PAGES + 1) in (refusal or ""))
+
+print("")
+print("And what must still be accepted")
+
+check("a single ordinary statement", statement_service.refuse_oversized_upload(pdf(4, one_statement(4))), None)
+check("a combined statement of several accounts",
+      statement_service.refuse_oversized_upload(
+          pdf(8, lambda n: 'Page %d of 8\\nCapital One' % n)), None)
+check("exactly the page limit is allowed — the limit is a maximum, not a bound",
+      statement_service.refuse_oversized_upload(
+          pdf(_MAX_UPLOAD_PAGES, one_statement(_MAX_UPLOAD_PAGES))), None)
+check("and exactly the statement limit",
+      statement_service.refuse_oversized_upload(
+          pdf(_MAX_UPLOAD_STATEMENTS, lambda n: "ACME BANK\nPage 1 of 1\nBalance 1.00")), None)
+
+# A gate that fires when it cannot see would reject a document for being
+# unreadable by the one check that never reads it properly. The ingest reports
+# a corrupt file far better than this could.
+check("an unreadable file is NOT refused by the size gate",
+      statement_service.refuse_oversized_upload(b"not a pdf at all"), None)
+check("nor an empty one", statement_service.refuse_oversized_upload(b""), None)
 
 print("")
 if FAILURES:

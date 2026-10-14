@@ -4,6 +4,7 @@
 | - | --- | - |
 | [**User guide**](user-guide/README.md) | Paralegals, legal assistants, and the attorneys looking over their shoulder | Doing the work: clients, matters, statement discovery, categorizing, exhibits, compliance |
 | [**Operator guide**](operator-guide/README.md) | Whoever runs the servers | Configuration, secrets, deploys, and proving the nodes agree |
+| [**Client guide**](client-guide/README.md) | A client given portal access | One page: what they can see, how marking a transaction works, and what a struck-through tag means. **Published in the portal** as its *How this works* tab, by the same sync script as the user guide |
 
 ## Runbooks
 

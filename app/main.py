@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 
 from middleware.auth_middleware import AuthMiddleware
-from routers import admin, attorney_lead_responder, auth_flow, billing, category_rules, clients, costs, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, staff
+from routers import admin, attorney_lead_responder, auth_flow, billing, category_rules, clients, costs, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, portal, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 from util.config_fingerprint import log_startup_summary
@@ -180,6 +180,9 @@ def create_app() -> FastAPI:
     app.include_router(kb.router)           # /api/v1/kb-articles
     app.include_router(admin.router)        # /api/v1/admin
     app.include_router(costs.router)        # /api/v1/costs — prices and spend (admin)
+    # The client's own view of their matter. Its own prefix, its own wording,
+    # and its own scope resolution — never the staff routes with a filter.
+    app.include_router(portal.router)       # /api/v1/portal — client portal
 
     return app
 

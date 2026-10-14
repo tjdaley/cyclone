@@ -140,6 +140,64 @@ class FinancialAccountUpdateRequest(BaseModel):
     is_closed: Optional[bool] = None
 
 
+class FinancialAccountCreateRequest(BaseModel):
+    """
+    An account somebody adds by hand.
+
+    Two reasons it exists, and the second is the useful one:
+
+    * **An unprocessable scrap** — a receipt from a car floorboard naming an
+      account nothing else mentions. There is no statement to ingest, and the
+      account still belongs on the matter.
+    * **Taking a row off the undisclosed list.** That report is rebuilt from the
+      transactions every time, so nothing can be ticked off it. Adding the
+      account is what resolves it: characterize it ``no_marital_interest`` and
+      the scan stops reporting a $5 repayment to a sibling, or characterize it
+      ``community`` and it joins the compliance grid with no statements against
+      it — which is precisely what a motion to compel is made of.
+    """
+    institution: str = Field(..., min_length=1, max_length=200)
+    account_type: AccountType
+    account_number_last4: Optional[str] = Field(default=None, max_length=4)
+    account_number_masked: Optional[str] = Field(default=None, max_length=60)
+    name_on_account: Optional[str] = Field(default=None, max_length=200)
+    ownership: AccountOwnership = AccountOwnership.unknown
+    property_character: Optional[PropertyCharacter] = Field(
+        default=None,
+        description="Argued, never extracted. `no_marital_interest` takes the account off the "
+                    "undisclosed list and out of the compliance grid and the inventory",
+    )
+    production_responsibility: ProductionResponsibility = ProductionResponsibility.unknown
+    opposing_party_id: Optional[int] = None
+    purpose: Optional[str] = Field(default=None, max_length=500)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
+class StatementBatesRequest(BaseModel):
+    """Bates numbers typed by hand, when detection found none."""
+
+    first: str = Field(
+        ..., min_length=1, max_length=50,
+        description="The stamp on the statement's first page, exactly as printed")
+    last: Optional[str] = Field(
+        default=None, max_length=50,
+        description="The stamp on its last page. The span must match the pages in hand — the "
+                    "arithmetic is the check, because being off by one mis-cites every line")
+
+
+class StatementBatesResult(BaseModel):
+    statement: "StatementResponse"
+    pages_numbered: int = Field(..., description="Pages that received a number")
+
+
+class MotionTextResponse(BaseModel):
+    """The missing statements as a paragraph for a motion to compel."""
+
+    text: str = Field(..., description="Empty when nothing is missing, so the caller can say so")
+    accounts: int = Field(..., description="Accounts with something missing")
+    gaps: int = Field(..., description="Separate periods named across them")
+
+
 class MergeConflict(BaseModel):
     """One reason a merge is unsafe, or worth a second look."""
     code: str = Field(..., description="SAME_ACCOUNT | DIFFERENT_MATTER | PERIOD_OVERLAP | "
@@ -311,6 +369,8 @@ class TransactionTagResponse(BaseModel):
     color: Optional[str]
     display_order: int
     is_active: bool
+    client_visible: bool = Field(
+        default=False, description="Whether clients are offered this tag in the portal")
     usage_count: Optional[int] = Field(
         default=None,
         description="Transactions carrying this tag; populated on the tag list, not on writes",
@@ -323,6 +383,11 @@ class TransactionTagWriteRequest(BaseModel):
     color: Optional[str] = None
     display_order: Optional[int] = None
     is_active: Optional[bool] = None
+    client_visible: Optional[bool] = Field(
+        default=None,
+        description="Offer this tag to clients in the portal. Opt-IN: the firm's list carries "
+                    "litigation strategy, so a tag reaches a client only when somebody says so",
+    )
 
 
 # ── Search ───────────────────────────────────────────────────────────────────
@@ -453,6 +518,10 @@ class TransactionExportRequest(TransactionSearchRequest):
 class TransactionSearchRow(TransactionResponse):
     """A transaction plus the context a result row displays."""
     tag_ids: list[int] = Field(default_factory=list[int], description="All tags on this line, for the tag cloud and bulk tagging")
+    client_tag_ids: list[int] = Field(
+        default_factory=list[int],
+        description="Of those, the ones the CLIENT applied (044). Staff see which assertions are "
+                    "the client's, because an exhibit should never quietly rest on a guess")
     institution: Optional[str] = None
     account_last4: Optional[str] = None
 
@@ -630,7 +699,13 @@ class ReferencedInstitutionResponse(BaseModel):
     seen_on: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
 
-
+    possible_match: Optional[str] = Field(
+        default=None,
+        description="An account on this matter whose institution is close enough that this may "
+                    "already be produced. NEVER suppressed on a near match -- hiding a "
+                    "genuinely undisclosed account is the worse failure -- so the row stays, "
+                    "says which account it probably is, and is left out of the exhibit",
+    )
 class StatementRetryResult(BaseModel):
     """
     What a re-import discarded, and the job now reading the document again.
@@ -767,6 +842,53 @@ class ComplianceScope(BaseModel):
     bounded: bool = Field(..., description="Whether a look-back date was found for this side")
 
 
+class InventoryRow(BaseModel):
+    """One account on the inventory, with the balance its last statement printed."""
+
+    account_id: int
+    institution: str
+    account_number_last4: Optional[str] = None
+    account_type: str
+    held_by: str = Field(
+        ..., description="P, R, J, 3P or ? — from the account's ownership and the matter's "
+                         "client alignment. C/O when no alignment is recorded")
+    as_of: Optional[date] = Field(
+        default=None, description="Period end of the statement the balance came from")
+    balance: Optional[str] = Field(
+        default=None,
+        description="Exact decimal string. **A liability is negative here** — it reduces the "
+                    "estate — while the statement itself prints a positive amount owed. None "
+                    "when no statement is on file")
+    bates: Optional[str] = Field(
+        default=None, description="Stamp on that statement's first page, where one was detected")
+    statement_id: Optional[int] = None
+    is_closed: bool = False
+
+
+class InventoryTotals(BaseModel):
+    assets: str
+    liabilities: str
+    net: str
+    accounts: int
+    without_balance: int = Field(
+        ..., description="Accounts with no statement on file. Listed, never totalled — an "
+                         "account nobody has produced a statement for is what the reader needs "
+                         "to see")
+
+
+class InventoryReport(BaseModel):
+    """Every account on the matter, as an inventory of what it is worth."""
+
+    assets: list[InventoryRow] = Field(default_factory=list)
+    liabilities: list[InventoryRow] = Field(default_factory=list)
+    totals: InventoryTotals
+    legend: list[tuple[str, str]] = Field(
+        default_factory=list, description="Letter and what it means, for the Held by column")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="What the report could not establish — chiefly a missing client alignment")
+
+
 class ComplianceMatrix(BaseModel):
     """
     What the production holds, by account and month — and what it does not.
@@ -851,6 +973,13 @@ class CreditorResponse(BaseModel):
     last_seen: Optional[date] = None
     seen_on: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
+    possible_match: Optional[str] = Field(
+        default=None,
+        description="An account on this matter whose institution is close enough that this may "
+                    "already be produced. NEVER suppressed on a near match -- hiding a "
+                    "genuinely undisclosed account is the worse failure -- so the row stays, "
+                    "says which account it probably is, and is left out of the exhibit",
+    )
 
 
 # What a custodian ruling may say it holds. Mirrors the CHECK in 036 -- the
@@ -860,7 +989,6 @@ _HOLDS = frozenset({
     "deposit", "brokerage", "crypto", "retirement",
     "credit_card", "line_of_credit", "loan", "other",
 })
-
 
 class UndisclosedReport(BaseModel):
     """
@@ -939,7 +1067,13 @@ class ValuePlatformResponse(BaseModel):
         description="Whether the ruling behind this row governs every case or only this one",
     )
 
-
+    possible_match: Optional[str] = Field(
+        default=None,
+        description="An account on this matter whose institution is close enough that this may "
+                    "already be produced. NEVER suppressed on a near match -- hiding a "
+                    "genuinely undisclosed account is the worse failure -- so the row stays, "
+                    "says which account it probably is, and is left out of the exhibit",
+    )
 class PayeeClassificationWriteRequest(BaseModel):
     """Record what a payee is, or stop being asked about it."""
     pattern: str = Field(
@@ -1057,4 +1191,11 @@ class UndisclosedAccountResponse(BaseModel):
                                             "be traced to the page it came from")
 
 
+    possible_match: Optional[str] = Field(
+        default=None,
+        description="An account on this matter whose institution is close enough that this may "
+                    "already be produced. NEVER suppressed on a near match -- hiding a "
+                    "genuinely undisclosed account is the worse failure -- so the row stays, "
+                    "says which account it probably is, and is left out of the exhibit",
+    )
 UndisclosedReport.model_rebuild()

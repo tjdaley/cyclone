@@ -33,6 +33,7 @@ a trap that has already bitten. For *what* the code does, the code wins. For
 | `041_service_rates.sql` | Price table, pricing views, report function | Not confirmed | Yes |
 | `042_served_model.sql` | Records which model actually answered, and prices on that | Not confirmed | Yes. It can also run after the deploy (see §2.7). |
 | `043_cost_report_by_firm.sql` | Adds **Firm** to the Costs page's groupings | Not confirmed | Yes |
+| `044_client_portal_tagging.sql` | Client tags, cleared tags, client-visible tags, the per-matter tagging lock. Seeds seven client-facing waste tags | Not run | Yes. Applied and re-applied against real Postgres 16 |
 
 `docs/operator-guide/04-deploying.md` still says *"This release: 036 and 037"*.
 Update it.
@@ -550,7 +551,177 @@ Retry to clear it.
 will keep showing the false flag. Worth saying in Chapter 7 where account types
 are set — the type also drives how the FIS treats the account's spending.
 
-### 4.9 What Retry looks like now — `05-import-problems.md` § Retry (was §4.4, then §4.5, §4.8, now §4.9)
+### 4.9 The client portal — a new audience, and a new chapter
+
+**This needs its own guide, not a section in the staff one.** The portal has its
+own vocabulary and its own reader, and the existing fourteen chapters are
+written for a paralegal. Two documents to produce:
+
+**A short client guide** (a page or two, linkable by the firm):
+
+- What you can see: your accounts, the statements your attorney's office holds,
+  every transaction, and which months are still missing.
+- **Marking transactions.** Pick anything you think your attorney should look
+  at. It changes nothing in the record — it is a note, and the office reviews
+  each one. Tags come from a list the firm publishes; clients cannot invent
+  their own.
+- **A tag with a line through it** was reviewed and removed by the office, and
+  cannot be put back from here. Ask them if you disagree.
+- **"Tagging is paused"** means the office is preparing for a hearing. Nothing
+  you marked is lost.
+- Searching by amount works the same way as it does for staff: no sign finds
+  money in *and* out; `-5000` finds money out only. Worth an example — it is how
+  a client finds the transaction they are arguing about.
+
+**For the staff guide**, three additions:
+
+- **Turning the portal on for a client** — the `client` role with a client
+  record, and then **Client portal** on the matter detail page to allow tagging.
+  Off by default: a matter does not acquire a tagging client by accident.
+- **Publishing tags.** In the tag manager, "Offer to clients" per tag. Opt-in,
+  because the firm's own list carries strategy. Seven client-facing waste tags
+  ship with 044 and can be renamed or retired like any other.
+- **Reviewing what the client marked** — the panel under the Transactions tab.
+  Removing a tag is permanent as far as the client is concerned; staff can
+  restore it, and a restored tag becomes the firm's rather than the client's.
+  Worth saying plainly: **a client tag that reaches an exhibit is an exhibit
+  resting on a guess**, which is why the panel exists and why the two are
+  visibly different.
+
+One thing to tell the firm before the first client is let in: **a client sees
+the whole matter**, including the other side's produced accounts. That is the
+intended behaviour, and it is the question somebody will ask first.
+
+### 4.10 Large PDFs are now refused, not warned about
+
+`04-importing-statements.md` and `05-import-problems.md`.
+
+**An upload of more than 50 pages, or holding more than 8 statements, is
+refused.** The response says why and what to do, and nothing is kept: no
+document in storage, no job, no partial import. The same check runs on **Retry**,
+before anything is deleted — so a large document imported before this change
+cannot be re-read either, and the statements already held are untouched.
+
+Why it changed, and worth saying plainly in the guide because it reverses
+earlier advice: a 700-page PDF holding 122 statements was uploaded. The warning
+fired and the import ran anyway, because the warning was advice. It was a total
+loss. Below these limits the advisory warning still behaves exactly as Chapter 4
+describes.
+
+What the guide should tell people to do:
+
+- **Split the PDF into one file per statement** and drop the whole stack at
+  once. Worth repeating the reason, because it is counter-intuitive: the worker
+  reads several files at a time, so a stack of monthly files finishes **sooner**
+  than the same months combined, as well as more accurately.
+- A combined statement — several accounts, one bank, one document — is
+  unaffected, since it is well inside both limits.
+
+### 4.11 A new tab: Inventory
+
+Financials → **Inventory**. Needs a short section of its own, probably in
+`07-viewing-statements.md` or beside the FIS chapter.
+
+What it shows: every account on the matter with the ending balance of its most
+recent statement, in two tables — assets and liabilities — each totalled, with a
+net beneath. Columns are institution, account, held by, as of, balance and
+Bates, and the Bates cell opens the statement the figure came from.
+
+Four things the guide should make explicit, because each one is a question
+somebody will ask:
+
+- **Liabilities show as negative.** The card statement says you owe $1,045.45;
+  the inventory shows −$1,045.45, because it reduces the estate. Both are right
+  and they are answering different questions.
+- **Every row has its own "as of" date.** There is no live balance here — each
+  figure is the closing balance of a real statement, which is what makes it
+  citable. Two accounts will usually speak as of different days.
+- **"no statement" is not zero.** An account with nothing on file is listed with
+  no balance and is left out of the total, and the count is shown beneath. Those
+  rows are the ones to chase — the Compliance tab says which months are missing.
+- **Held by** is P, R or J, taken from the account's ownership plus the matter's
+  client alignment. If the matter has no alignment recorded the column reads C
+  and O and the page says why: set the alignment on the matter detail page.
+
+**This is not the Inventory & Appraisement.** The I&A is a sworn form and is
+still unbuilt; this is a schedule of account balances. Worth saying plainly in
+the guide so nobody files the wrong thing.
+
+### 4.12 Fewer false alarms on "Referenced but not produced"
+
+`11-discovery-tracking.md`.
+
+The report compared institution names as raw text, so one bank written two ways
+produced a finding that was already produced — "BofA" against "Bank of America,
+N.A.". Names are now compared **as words**, with the furniture ("Bank",
+"N.A.", "Credit Union", "Financial") set aside so what remains is what actually
+identifies the institution.
+
+What a reader will notice:
+
+- **A new group: "Probably already produced."** Rows whose institution closely
+  resembles an account already on the matter are moved there, named with the
+  account they are likely about, and **left out of the exhibit**. The exhibit's
+  Selection block states how many were set aside, so the filed document never
+  reads as the complete list when it is not.
+- **Nothing is deleted on a near match.** The guide should be explicit about
+  why: reporting an account that turns out to be produced is a visible nuisance;
+  hiding one that was never produced is silent and far worse. So a close match
+  demotes a row, it never removes it — and if one of them really is a separate
+  account, it belongs back in the exhibit and the two account names need
+  reconciling (which the merge feature already handles).
+- **An account on the matter whose number could not be read** used to make every
+  reference to it look undisclosed, since there was nothing to match on. Those
+  now land in the same group.
+- A quieter fix worth a line: a produced Chase card no longer answers for a
+  creditor whose name merely contains the letters, such as "Purchase Power".
+
+### 4.13 Three things that can now be done by hand
+
+`04-importing-statements.md`, `11-discovery-tracking.md`, and wherever the
+compliance grid is covered.
+
+**Add an account** — from the Accounts tab, or from a row on the "Referenced but
+not produced" list. The second is the one to lead with, because it changes a
+workflow: that list is rebuilt from the transactions every time it runs, so
+there is nothing to tick off, and a $5 repayment to a relative stays on it
+forever. Adding the account is what resolves it, and the **character** recorded
+says why:
+
+- **No marital property interest** — a third party's account the production
+  named in passing. It stays on the matter so references stop being reported,
+  and it is left out of the compliance grid and the inventory, because there is
+  nothing to compel and nothing to divide.
+- **Anything else** — the account joins the compliance grid with *nothing
+  produced against it*, which is exactly what a motion to compel is built from.
+
+Worth saying plainly: this replaces keeping a list of "don't worry about it"
+accounts in somebody's head or a spreadsheet, and it is also how an account from
+an unprocessable scrap of paper — a receipt found in a vehicle — gets onto the
+matter. A duplicate is refused, with the existing account named.
+
+**Type in Bates numbers** — on a statement row where detection found none, an
+"add Bates" link. Copy the stamps off the first and last pages exactly as
+printed; the numbers between are filled across the pages held. Two things the
+guide should state:
+
+- **A partial production still runs consecutively.** Physical pages 1, 2 and 4
+  carry three consecutive stamps, because the missing sheet took its number
+  with it.
+- **Both ends are required, and the span is checked.** If the range does not
+  match the pages held, nothing is saved and the message says both counts —
+  being off by one would mis-cite every line after the first.
+
+Every line is marked as numbered by hand, and so is the statement. A detected
+stamp was read off the document; a typed one is somebody's reading of it.
+
+**Text for a motion to compel** — a button under the compliance grid. It
+produces the paragraph and numbered list naming each account and the periods
+nobody produced, in whole dates, ready to paste. Accounts with nothing missing
+are left out. If nothing is missing at all it says so rather than producing an
+empty heading.
+
+### 4.14 What Retry looks like now — `05-import-problems.md` § Retry (was §4.4, then §4.5, §4.8–4.13, now §4.14)
 
 Screenshots or wording to update:
 

@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   getMatter, getOpposingParties,
   queueStatement, awaitStatementJob, retryStatement, setStatementBoundary,
+  setStatementBates,
   getFinancialAccounts, updateFinancialAccount,
   getAccountStatements, getStatementExceptions, reviewStatement,
   getStatementTransactions, getAccountTransactions,
@@ -14,9 +15,12 @@ import TransactionSearchPanel from './TransactionSearchPanel'
 import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import FisPanel from './FisPanel'
 import CompliancePanel from './CompliancePanel'
+import InventoryPanel from './InventoryPanel'
 import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import TransactionAddDialog from './TransactionAddDialog'
+import AccountAddDialog from './AccountAddDialog'
+import ClientTagReviewPanel from './ClientTagReviewPanel'
 import type {
   Matter, OpposingParty,
   FinancialAccount, AccountType, PropertyCharacter, AccountOwnership,
@@ -74,6 +78,10 @@ const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
   separate_respondent: 'Separate — Respondent',
   mixed: 'Mixed',
   disputed: 'Disputed',
+  // Not a kind of separate property: separate property is a party's own and
+  // still gets inventoried. This is a third party's account the production
+  // named in passing, and it leaves the compliance grid and the inventory.
+  no_marital_interest: 'No marital property interest',
 }
 
 /**
@@ -85,11 +93,12 @@ const CHARACTER_LABEL: Record<PropertyCharacter, string> = {
  * and nothing else: importing is an event, curating accounts is bookkeeping,
  * and searching is analysis.
  */
-type Tab = 'import' | 'accounts' | 'compliance' | 'transactions' | 'fis'
+type Tab = 'import' | 'accounts' | 'inventory' | 'compliance' | 'transactions' | 'fis'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'import', label: 'Import' },
   { id: 'accounts', label: 'Accounts' },
+  { id: 'inventory', label: 'Inventory' },
   { id: 'compliance', label: 'Compliance' },
   { id: 'transactions', label: 'Transactions' },
   { id: 'fis', label: 'FIS' },
@@ -227,7 +236,10 @@ export default function MatterFinancialsPage() {
   // rest — the worst kind of failure, since nothing looked wrong.
   const [queue, setQueue] = useState<{ done: number; total: number; name: string } | null>(null)
   const [summary, setSummary] = useState<StatementIngestSummary | null>(null)
-  const [uploadError, setUploadError] = useState<string | null>(null)
+  // A LIST, not one joined string. A refused upload now comes back with a
+  // paragraph explaining what to do about it, and three of those run together
+  // with separators is a wall nobody reads.
+  const [uploadError, setUploadError] = useState<string[]>([])
   // Advice, not failure — kept apart from uploadError so a warning about a
   // long PDF never reads as "the upload broke". These accumulate across a
   // dropped stack and stay on screen after it finishes, because the whole
@@ -256,6 +268,12 @@ export default function MatterFinancialsPage() {
   const [correcting, setCorrecting] = useState<AccountTransaction | null>(null)
   /** The statement a line is being added to. Null unless the dialog is open. */
   const [addingTo, setAddingTo] = useState<AccountStatement | null>(null)
+  /** Open when an account is being added by hand; carries any prefill. */
+  /** The statement whose Bates numbers are being typed in. */
+  const [batesFor, setBatesFor] = useState<AccountStatement | null>(null)
+  const [addingAccount, setAddingAccount] = useState<
+    null | { institution?: string | null; account_number_last4?: string | null;
+             account_number_masked?: string | null }>(null)
 
   async function refresh() {
     const [accountRows, exceptionRows] = await Promise.all([
@@ -319,7 +337,7 @@ export default function MatterFinancialsPage() {
     const pdfs = files.filter(f => f.type === 'application/pdf')
     const rejected = files.length - pdfs.length
     if (pdfs.length === 0) {
-      setUploadError('Only PDF files are accepted')
+      setUploadError(['Only PDF files are accepted'])
       return
     }
 
@@ -360,11 +378,11 @@ export default function MatterFinancialsPage() {
     // file's error until the twelfth finishes means watching a spinner over a
     // run that died at the start, with nothing on screen to say so.
     const failures: string[] = rejected > 0 ? [`Skipped ${rejected} file(s) that were not PDFs`] : []
-    setUploadError(failures.length ? failures.join(' · ') : null)
+    setUploadError([...failures])
 
     function fail(message: string) {
       failures.push(message)
-      setUploadError(failures.join(' · '))
+      setUploadError([...failures])
     }
 
     const advice: string[] = []
@@ -858,7 +876,18 @@ export default function MatterFinancialsPage() {
           ))}
         </div>
       )}
-      {uploadError && <p className="text-sm text-red-600">{uploadError}</p>}
+      {uploadError.length > 0 && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 space-y-2">
+          {uploadError.map((message, i) => (
+            <p key={i} className="text-sm text-red-800">{message}</p>
+          ))}
+          <p className="text-xs text-red-700">
+            {/* The refusal says this too, and it bears repeating where the
+                person is looking: a rejected upload is not a half-import. */}
+            Nothing from a rejected file was imported or stored.
+          </p>
+        </div>
+      )}
 
       {/* ── Ingest result ── */}
       {summary && (
@@ -1068,6 +1097,29 @@ export default function MatterFinancialsPage() {
           }} />
       )}
 
+      {batesFor && (
+        <BatesDialog
+          statement={batesFor}
+          onClose={() => setBatesFor(null)}
+          onSaved={async updated => {
+            setStatements(prev => prev.map(x => (x.id === updated.id ? updated : x)))
+            setBatesFor(null)
+            // The lines now carry numbers, so anything open on screen is stale.
+            if (openStatementId === updated.id) {
+              setTransactions(await getStatementTransactions(updated.id))
+            }
+            await refresh()
+          }} />
+      )}
+
+      {addingAccount && (
+        <AccountAddDialog
+          matterId={matterId}
+          prefill={addingAccount}
+          onClose={() => setAddingAccount(null)}
+          onAdded={async () => { setAddingAccount(null); await refresh() }} />
+      )}
+
       {addingTo && (
         <TransactionAddDialog
           statement={addingTo}
@@ -1084,9 +1136,16 @@ export default function MatterFinancialsPage() {
           }} />
       )}
 
-      {tab === 'transactions' && (
+      {tab === 'transactions' && (<>
         <TransactionSearchPanel matterId={matterId} accounts={accounts} />
-      )}
+        {/* Below the search, not beside it: reviewing what the client marked is
+            its own pass through the data, done when somebody sits down to it. */}
+        <div className="mt-6">
+          <ClientTagReviewPanel matterId={matterId} />
+        </div>
+      </>)}
+
+      {tab === 'inventory' && <InventoryPanel matterId={matterId} />}
 
       {tab === 'compliance' && <CompliancePanel matterId={matterId} />}
 
@@ -1095,8 +1154,14 @@ export default function MatterFinancialsPage() {
       {tab === 'accounts' && (<>
       {/* ── Accounts ── */}
       <div className="card p-5">
-        <h2 className="font-semibold text-navy mb-3">
-          Accounts <span className="ml-1 text-sm font-normal text-text-secondary">{accounts.length}</span>
+        <h2 className="font-semibold text-navy mb-3 flex items-baseline gap-3">
+          <span>
+            Accounts <span className="ml-1 text-sm font-normal text-text-secondary">{accounts.length}</span>
+          </span>
+          {/* An account nothing can be ingested for — a receipt naming one, or
+              a reference somebody is resolving off the undisclosed list. */}
+          <button type="button" className="ml-auto text-xs text-navy underline font-normal"
+            disabled={busy} onClick={() => setAddingAccount({})}>Add an account</button>
         </h2>
         {accounts.length === 0 ? (
           <p className="text-sm text-text-secondary">
@@ -1169,11 +1234,20 @@ export default function MatterFinancialsPage() {
                           {REVIEW_LABEL[s.review_status]}
                         </span>
                         <ReconcileBadge statement={s} />
-                        {s.bates_first && (
+                        {s.bates_first ? (
                           <span className="text-xs text-text-secondary font-mono">
                             {s.bates_first}
                             {s.bates_last && s.bates_last !== s.bates_first ? `–${s.bates_last}` : ''}
                           </span>
+                        ) : (
+                          /* Detection found no series. Rare, and retrying cannot
+                             help: the document reads the same way every time. */
+                          <button type="button" className="text-xs text-navy underline"
+                            disabled={busy}
+                            title="Type the stamps off the pages. They are recorded as entered by hand."
+                            onClick={() => setBatesFor(s)}>
+                            add Bates
+                          </button>
                         )}
                         <span className="ml-auto flex items-baseline gap-3">
                           {/* Marks the edges of the account's life, which is
@@ -1646,5 +1720,85 @@ function MergePanel({ account, accounts, onMerged }: {
         </div>
       )}
     </details>
+  )
+}
+
+/**
+ * Type a statement's Bates numbers in, when detection found none.
+ *
+ * The numbers run consecutively across the pages in hand — a partial production
+ * of physical pages 1, 2 and 4 carries three consecutive stamps, because the
+ * missing sheet took its number with it. Both ends are asked for so the
+ * arithmetic can check the span: being off by one mis-cites every line after
+ * the first, silently, which is worse than no citation at all.
+ */
+function BatesDialog({ statement, onSaved, onClose }: {
+  statement: AccountStatement
+  onSaved: (updated: AccountStatement) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [first, setFirst] = useState('')
+  const [last, setLast] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function save() {
+    setBusy(true); setError(null)
+    try {
+      const result = await setStatementBates(statement.id, first.trim(), last.trim() || undefined)
+      await onSaved(result.statement)
+    } catch (e) {
+      // The server refuses a range that does not span the pages in hand, and
+      // says both counts — that sentence is the whole value of the check.
+      setError(e instanceof Error ? e.message : 'Could not save the Bates numbers')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4"
+      role="dialog" aria-modal="true" aria-label="Add Bates numbers"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="card p-5 w-full max-w-lg my-8 bg-white">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="font-semibold text-navy">Bates numbers for this statement</h2>
+          <button type="button" className="text-sm text-text-secondary hover:text-navy"
+            onClick={onClose}>Close</button>
+        </div>
+        <p className="text-xs text-text-secondary mb-4">
+          Copy the stamps off the first and last pages, exactly as printed. The numbers in
+          between are filled in across the pages held — a production missing a sheet still runs
+          consecutively. Every line is recorded as numbered by hand.
+        </p>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="bates-first">First page</label>
+            <input id="bates-first" className="input mt-1 font-mono" value={first}
+              placeholder="KF 000101" onChange={e => setFirst(e.target.value)} />
+          </div>
+          <div>
+            <label className="label" htmlFor="bates-last">Last page</label>
+            <input id="bates-last" className="input mt-1 font-mono" value={last}
+              placeholder="KF 000103" onChange={e => setLast(e.target.value)} />
+            <p className="text-xs text-text-secondary mt-1">
+              Leave blank for a single page.
+            </p>
+          </div>
+        </div>
+
+        {error && <p className="text-sm text-red-700 mt-3">{error}</p>}
+
+        <div className="flex items-center justify-end gap-3 mt-5">
+          <button type="button" className="btn-secondary" disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary" disabled={busy || !first.trim()}
+            onClick={() => void save()}>
+            {busy ? 'Saving…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

@@ -3,7 +3,10 @@ import { useAuth } from '../context/AuthContext'
 
 /**
  * Wraps routes that require an authenticated session with a staff/admin role.
- * Clients are directed to a separate portal (future work).
+ *
+ * A client has their own portal with its own shell, its own wording and its own
+ * API prefix, so this sends them there rather than denying them. `/access-denied`
+ * now means what it says: a signed-in account with no place to go.
  */
 export default function ProtectedRoute() {
   const { session, profile, loading } = useAuth()
@@ -25,9 +28,11 @@ export default function ProtectedRoute() {
     return <Navigate to="/onboarding" replace />
   }
 
-  // Clients have a separate portal (not yet implemented); deny for now
-  if (profile.role === 'client') {
-    return <Navigate to="/access-denied" replace />
+  // Clients belong in the portal. Checked on `roles` rather than the primary
+  // role: somebody who is both a client and staff of the firm is staff here.
+  const roles = profile.roles ?? [profile.role]
+  if (roles.includes('client') && !roles.some(r => r !== 'client')) {
+    return <Navigate to="/portal" replace />
   }
 
   return <Outlet />

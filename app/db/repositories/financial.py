@@ -16,7 +16,7 @@ from db.models.financial import (
     TransactionCategoryRuleInDB,
     PayeeClassificationInDB,
 )
-from db_handler import BaseRepository, DatabaseManager
+from db_handler import BaseRepository, DatabaseManager, NotNull
 from util.amount_filter import AmountRange, AmountSide
 from util.loggerfactory import LoggerFactory
 
@@ -661,14 +661,56 @@ class TransactionTagLinkRepository(BaseRepository[TransactionTagLinkInDB]):
         """
         Tag ids per transaction, for decorating a page of search results.
 
+        **Cleared links are excluded**, and that default is what makes clearing
+        mean anything: a tag staff removed must not reach a total, an exhibit or
+        a filter merely because a caller forgot a flag. Same rule as
+        ``include_deleted`` on transactions.
+
         :return: ``{transaction_id: [tag_id, ...]}``; untagged lines are absent.
+        :rtype: dict[int, list[int]]
+        """
+        return {
+            transaction_id: [link.tag_id for link in links]
+            for transaction_id, links in self.links_for(transaction_ids).items()
+        }
+
+    def links_for(self, transaction_ids: list[int]) -> dict[int, list[TransactionTagLinkInDB]]:
+        """
+        The live links per transaction, with who applied each one.
+
+        Separate from ``for_transactions`` because a staff screen needs to know
+        which tags the CLIENT applied — an exhibit built on a tag should never
+        quietly rest on a client's guess — while everything that only needs ids
+        keeps the simpler shape.
+        """
+        if not transaction_ids:
+            return {}
+        by_transaction: dict[int, list[TransactionTagLinkInDB]] = {}
+        for chunk in _chunks(transaction_ids, 200):
+            links = self.select_many(
+                condition={"transaction_id": chunk, "cleared_at": None})[0]
+            for link in links:
+                by_transaction.setdefault(link.transaction_id, []).append(link)
+        return by_transaction
+
+    def cleared_for_transactions(self, transaction_ids: list[int]) -> dict[int, list[int]]:
+        """
+        Tag ids staff have CLEARED, per transaction.
+
+        The portal needs these to grey out a client's removed tag. Showing it
+        greyed is deliberate: hiding it silently means the client re-tags, is
+        refused, and reports a bug.
+
+        :return: ``{transaction_id: [tag_id, ...]}``; lines with none are absent.
         :rtype: dict[int, list[int]]
         """
         if not transaction_ids:
             return {}
         by_transaction: dict[int, list[int]] = {}
         for chunk in _chunks(transaction_ids, 200):
-            for link in self.select_many(condition={"transaction_id": chunk})[0]:
+            links = self.select_many(
+                condition={"transaction_id": chunk, "cleared_at": NotNull()})[0]
+            for link in links:
                 by_transaction.setdefault(link.transaction_id, []).append(link.tag_id)
         return by_transaction
 
@@ -684,7 +726,9 @@ class TransactionTagLinkRepository(BaseRepository[TransactionTagLinkInDB]):
         """
         if not tag_ids:
             return []
-        links = self.select_many(condition={"tag_id": tag_ids})[0]
+        # Cleared links do not carry their tag any more, here as everywhere: a
+        # tag staff removed must not pull its line into a filter or an exhibit.
+        links = self.select_many(condition={"tag_id": tag_ids, "cleared_at": None})[0]
         by_transaction: dict[int, set[int]] = {}
         for link in links:
             by_transaction.setdefault(link.transaction_id, set()).add(link.tag_id)

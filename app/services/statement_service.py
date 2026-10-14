@@ -601,6 +601,33 @@ _TRANSACTIONS_SYSTEM = (
 
 _MANY_PAGES = 30
 
+# ── THE HARD LIMITS. Past these an upload is REFUSED, not warned about ───────
+#
+# The warning below was not enough, and the way it failed is worth recording: a
+# 700-page PDF holding 122 statements was uploaded, the survey said so — "48
+# first pages in the first 250" — and the import went ahead anyway because the
+# survey is advice. It was a total loss, and an expensive one: hours of model
+# calls, a mess to unpick, and the statements that did import were not
+# trustworthy enough to keep.
+#
+# A warning is the right answer to a document that is PROBABLY wrong. It is the
+# wrong answer to one that cannot work: at this size the index is windowed
+# across hundreds of pages, every window costs a call, the walk costs more, and
+# a single bad seam mis-files months of transactions against the wrong account.
+# Nothing downstream can recover from an input nobody should have accepted.
+#
+# So the limits are a gate, and they are deliberately well below what the
+# pipeline can technically survive. Splitting is not a workaround here — a stack
+# of monthly files is read SEVERAL AT A TIME by the worker pool, where one
+# combined PDF is read in sequence, so the split version finishes sooner as well
+# as more accurately.
+#
+# Both are module constants rather than settings, like `_MANY_PAGES`: a limit
+# somebody can raise under pressure is a limit that gets raised at the moment it
+# is doing its job.
+_MAX_UPLOAD_PAGES = 50
+_MAX_UPLOAD_STATEMENTS = 8
+
 _PAGE_MARKER_PREFIX = "<<<PAGE "
 _PAGE_MARKER_AT = re.compile(r"<<<PAGE (\d+)>>>")
 
@@ -3464,6 +3491,131 @@ class StatementService:
 
     # ── Discarding a bad extraction ───────────────────────────────────────
 
+    def set_bates(
+        self,
+        manager: DatabaseManager,
+        statement_id: int,
+        first: str,
+        last: Optional[str],
+        staff_id: int,
+        staff_name: str,
+    ) -> tuple[Any, int]:
+        """
+        Number a statement's pages by hand, when detection found no series.
+
+        Rare, and it happens: a production stamped in a font the text layer
+        renders as something else, or a scan where the stamp fell outside the
+        page. Retrying does not help — the same document reads the same way —
+        so the numbers are typed once and applied here.
+
+        **Sequential across the PAGES WE HOLD, not across page numbers.** A
+        partial production arrives as physical pages 1, 2 and 4, and its stamps
+        run consecutively over those three sheets: the missing sheet took its
+        number with it. So the run is assigned in page order over the pages that
+        carry transactions, which is the only page list this system can see.
+
+        **Both ends are asked for, and the arithmetic is the check.** If the
+        range does not span exactly the pages in hand, nothing is written and
+        the refusal says both counts. Getting this wrong by one silently
+        mis-cites every line after the first — a figure traced to a page it is
+        not printed on is worse than a figure with no citation at all.
+
+        Every line and the statement are marked ``BATES_MANUALLY_ENTERED`` with
+        the person and the range, because the audit trail's whole value is that
+        a number in an exhibit can say where it came from. A detected stamp was
+        read off the document; a typed one is somebody's assertion about it, and
+        the record has to tell them apart.
+
+        :param first: The stamp on the statement's first page, as printed.
+        :param last: The stamp on its last page. Optional for a single page.
+        :return: ``(statement, pages_numbered)``.
+        :raises ValueError: Unknown statement, unreadable stamp, no pages to
+            number, or a range that does not match the pages in hand.
+        """
+        statement_repo = FinancialAccountStatementRepository(manager)
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+
+        statement = statement_repo.select_one(condition={"id": statement_id})
+        if statement is None:
+            raise ValueError("Statement not found")
+
+        parsed = bates_service.parse_stamp(first)
+        if parsed is None:
+            raise ValueError(
+                "That does not look like a Bates number. Copy it exactly as it is stamped, "
+                "for example KF 000101 or 000101.")
+        prefix, separator, digits, start = parsed
+
+        lines = transaction_repo.get_by_statement(statement_id)
+        pages = sorted({t.physical_page_number for t in lines
+                        if t.physical_page_number is not None})
+        if not pages:
+            raise ValueError(
+                "No page numbers are recorded for this statement's transactions, so there is "
+                "nothing to attach a stamp to.")
+
+        if last:
+            ending = bates_service.parse_stamp(last)
+            if ending is None:
+                raise ValueError(
+                    "The last Bates number does not look like a stamp. Copy it exactly as "
+                    "printed, or leave it blank.")
+            span = ending[3] - start + 1
+            if span != len(pages):
+                raise ValueError(
+                    "That range covers %d page(s), but this statement has transactions on "
+                    "%d. Check the range against the document: a run that is off by one "
+                    "mis-cites every line after the first."
+                    % (span, len(pages)))
+
+        stamped_at = datetime.now(timezone.utc).isoformat()
+        by_page = {page: "%s%s%0*d" % (prefix, separator, digits, start + offset)
+                   for offset, page in enumerate(pages)}
+
+        for line in lines:
+            number = by_page.get(line.physical_page_number)
+            if number is None or line.bates_number == number:
+                continue
+            transaction_repo.update(line.id, {
+                "bates_number": number,
+                "flags": list(line.flags) + [{
+                    "code": "BATES_MANUALLY_ENTERED",
+                    "severity": "info",
+                    "field_path": "bates_number",
+                    "note": "%s entered this statement's Bates numbers by hand; detection "
+                            "found none on the document." % staff_name,
+                    "by_staff_id": staff_id,
+                    "by": staff_name,
+                    "at": stamped_at,
+                    "to": number,
+                }],
+            })
+
+        extraction = dict(statement.extraction or {})
+        extraction["bates_first"] = by_page[pages[0]]
+        extraction["bates_last"] = by_page[pages[-1]]
+        extraction["bates_manual"] = {
+            "by_staff_id": staff_id, "by": staff_name, "at": stamped_at,
+            "first": by_page[pages[0]], "last": by_page[pages[-1]], "pages": len(pages),
+        }
+        flags = [f for f in statement.flags
+                 if f.get("code") not in ("BATES_UNSTAMPED", "BATES_UNVERIFIED",
+                                          "BATES_MANUALLY_ENTERED")]
+        flags.append(_flag(
+            "BATES_MANUALLY_ENTERED", "info",
+            "%s entered Bates numbers %s to %s by hand across %d page(s); the document "
+            "carried none this system could read. A number here is somebody's reading of "
+            "the page, not a stamp detected on it."
+            % (staff_name, by_page[pages[0]], by_page[pages[-1]], len(pages)),
+            "bates",
+        ))
+        updated = statement_repo.update(statement_id, {
+            "extraction": extraction, "flags": flags})
+
+        LOGGER.info("statement_service.set_bates: statement=%s pages=%d staff=%s",
+                    statement_id, len(pages), staff_id)
+        return updated, len(pages)
+
     def reject_statement(self, manager: DatabaseManager, statement_id: int) -> dict[str, Any]:
         """
         Throw away a bad extraction: the statement, its lines, and — when it is
@@ -3525,6 +3677,74 @@ class StatementService:
             "account_deleted": account_deleted,
             "account_kept_reason": kept_reason,
         }
+
+    def refuse_oversized_upload(self, pdf_bytes: bytes) -> Optional[str]:
+        """
+        Say why this PDF must be split, or None if it may be ingested.
+
+        **Called BEFORE the document is stored or a job is queued**, which is
+        the whole point: a refused upload leaves nothing behind — no object in
+        storage, no job row, no half-imported statements for somebody to unpick.
+        The ordering is the feature, not an optimization.
+
+        Two independent limits, each sufficient on its own:
+
+        * **Pages.** ``_MAX_UPLOAD_PAGES``, counted exactly — the page count is
+          free from the PDF header.
+        * **Statements.** ``_MAX_UPLOAD_STATEMENTS``, counted by restarted
+          pagination. This is a **lower bound**: the survey reads at most
+          ``pdf_service._SURVEY_CAP`` pages, so a 700-page document reporting 48
+          first pages in its first 250 has at least 48 and probably far more.
+          A lower bound is all a refusal needs — exceeding the limit is already
+          proved.
+
+        **A PDF that cannot be surveyed is NOT refused.** A gate that fires when
+        it cannot see would reject a document for being unreadable by the one
+        check that never reads it properly, and the ingest reports a corrupt
+        file far better than this could. Logged, and allowed through.
+
+        :return: The sentence to show the person who uploaded it, or None.
+        :rtype: Optional[str]
+        """
+        from services.pdf_service import pdf_service  # noqa: PLC0415
+
+        try:
+            survey = pdf_service.survey(pdf_bytes)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            LOGGER.warning(
+                "statement_service.refuse_oversized_upload: could not survey the PDF "
+                "(%s); allowing it through", str(e))
+            return None
+
+        pages = survey.get("pages") or 0
+        scanned = survey.get("scanned") or pages
+        statements = survey.get("first_pages") or 0
+
+        if statements > _MAX_UPLOAD_STATEMENTS:
+            LOGGER.warning(
+                "statement_service: refused an upload of %d page(s) holding at least %d "
+                "statement(s); limit is %d", pages, statements, _MAX_UPLOAD_STATEMENTS)
+            return (
+                "This PDF holds at least %d separate statements%s, and %d is the most that "
+                "can be imported at once. Split it into one file per statement and upload "
+                "them together — they are read several at a time, so a stack of monthly "
+                "files finishes sooner than the same months combined. Nothing was saved."
+                % (statements,
+                   " in its first %d pages" % scanned if scanned < pages else "",
+                   _MAX_UPLOAD_STATEMENTS)
+            )
+
+        if pages > _MAX_UPLOAD_PAGES:
+            LOGGER.warning("statement_service: refused a %d-page upload; limit is %d",
+                           pages, _MAX_UPLOAD_PAGES)
+            return (
+                "This PDF is %d pages, and %d is the most that can be imported at once. "
+                "A single statement is rarely longer than that, so this is probably several "
+                "of them in one file: split it into one file per statement and upload them "
+                "together. Nothing was saved."
+                % (pages, _MAX_UPLOAD_PAGES)
+            )
+        return None
 
     def survey_upload(self, pdf_bytes: bytes) -> list[str]:
         """
@@ -3652,6 +3872,18 @@ class StatementService:
             raise ValueError(
                 "The source PDF could not be retrieved from storage, so it cannot be read "
                 "again. Nothing has been deleted — upload the document afresh instead."
+            )
+
+        # THE SAME GATE AS AN UPLOAD, and checked here too because a document
+        # accepted before the limit existed is still in storage. Re-reading one
+        # would run exactly the import that cannot work — and it would do it
+        # AFTER discarding what is already held, which is worse than refusing.
+        # Checked before anything is deleted, like the download above.
+        too_big = self.refuse_oversized_upload(pdf_bytes)
+        if too_big:
+            raise ValueError(
+                "%s Nothing has been deleted, and the statements already imported from it "
+                "are untouched." % too_big.replace(" Nothing was saved.", "")
             )
 
         # Everything this upload produced. Falls back to the one statement when

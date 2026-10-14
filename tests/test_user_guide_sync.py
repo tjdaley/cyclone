@@ -91,6 +91,14 @@ check("nothing is stale", problems, [])
 if problems:
     print("       run: python scripts/sync_user_guide.py")
 
+# The client guide is published the same way and drifts the same way. It is one
+# page with no manifest, so `wanted()` is what decides which shape it has.
+client_source = sync.repo_root() / sync.CLIENT_SOURCE
+check("the client guide is published",
+      sync.differences(client_source, sync.repo_root() / sync.CLIENT_DEST), [])
+check_true("and it is one page, with no manifest",
+           list(sync.wanted(client_source)) == ["README.md"])
+
 published = sorted(n for n in os.listdir(DEST) if n.endswith(".md"))
 check("every chapter is published", published, chapters())
 check_true("the manifest is published", os.path.exists(os.path.join(DEST, "manifest.json")))

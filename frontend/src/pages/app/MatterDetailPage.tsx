@@ -461,6 +461,7 @@ export default function MatterDetailPage() {
       <CaptionSection matter={matter} onSaved={setMatter} />
 
       <ProductionScopeSection matter={matter} onSaved={setMatter} />
+      <ClientPortalSection matter={matter} onSaved={setMatter} />
 
       {/* ── Opposing parties ── */}
       <Section title="Opposing parties" count={parties.length}
@@ -1030,6 +1031,66 @@ function ProductionScopeSection({ matter, onSaved }: {
         </button>
         {saved && <span className="text-xs text-success">Saved</span>}
       </div>
+    </Section>
+  )
+}
+
+/**
+ * Whether the client may tag transactions in their portal.
+ *
+ * Off by default, and turned off again for hearing prep: **tags go into
+ * exhibits, so the set has to stop moving** once somebody is preparing to argue
+ * from it. Staff tagging is unaffected — the lock is about the client.
+ *
+ * The client is told, rather than finding the controls mysteriously dead. A
+ * disabled control that does not say why produces a phone call, which is the
+ * same reasoning as the greyed-out cleared tag.
+ */
+function ClientPortalSection({ matter, onSaved }: {
+  matter: Matter
+  onSaved: (m: Matter) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const enabled = matter.client_tagging_enabled ?? false
+
+  async function toggle() {
+    setBusy(true); setError(null)
+    try {
+      onSaved(await updateMatter(matter.id, { client_tagging_enabled: !enabled }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <Section title="Client portal">
+      <p className="text-sm text-text-secondary mb-3">
+        The client can always read their accounts, statements and transactions. This controls
+        whether they may <strong>tag</strong> them — mark what they think is worth a look.
+        Turn it off while preparing for a hearing: tags reach exhibits, and the set should stop
+        moving before anybody argues from it.
+      </p>
+
+      <label className="flex items-start gap-3 text-sm">
+        <input type="checkbox" className="mt-0.5" checked={enabled} disabled={busy}
+          onChange={() => void toggle()} />
+        <span>
+          <span className="font-medium text-text-primary">Let the client tag transactions</span>
+          <span className="block text-xs text-text-secondary">
+            {enabled
+              ? 'On. Their tags appear for review on the Financials page, marked as theirs.'
+              : 'Off. The client sees a note saying tagging is paused; what they already marked is kept.'}
+          </span>
+        </span>
+      </label>
+
+      <p className="text-xs text-text-secondary mt-3">
+        Which tags they are offered is set per tag, in the tag manager on the Financials page.
+        Nothing is offered to a client until somebody ticks it there.
+      </p>
+
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
     </Section>
   )
 }

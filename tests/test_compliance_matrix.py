@@ -41,7 +41,12 @@ def check(label, got, want):
 
 class FakeAccount:
     def __init__(self, id, institution, last4, account_type=AccountType.checking, closed=False,
-                 responsibility=ProductionResponsibility.unknown):
+                 responsibility=ProductionResponsibility.unknown, character=None):
+        # `character` carries the 045 value: an account characterized as outside
+        # the marital estate is kept on the matter so the undisclosed scan stops
+        # reporting it, and left off this grid because there is nothing to
+        # compel from a third party.
+        self.property_character = character
         self.id = id
         self.institution = institution
         self.account_number_last4 = last4
@@ -755,6 +760,20 @@ check("life insurance is labelled", mod._TYPE_LABEL.get(_AT.life_insurance),
 check("annuities are labelled", mod._TYPE_LABEL.get(_AT.annuity), "Annuities")
 check("crypto is labelled, at last", mod._TYPE_LABEL.get(_AT.crypto), "Crypto")
 
+
+print("")
+print("An account outside the marital estate is not on the grid")
+# Added to the matter so a $5 repayment to a sibling stops being reported as an
+# undisclosed account -- not because anybody will be ordered to produce it.
+from db.models.financial import PropertyCharacter  # noqa: E402
+
+ordinary = FakeAccount(1, "First Financial", "9260")
+outside = FakeAccount(99, "Sibling Credit Union", "7777",
+                      character=PropertyCharacter.no_marital_interest)
+report = run([ordinary, outside], [])
+check("the ordinary account is listed", report["totals"]["accounts"], 1)
+check("and the one outside the estate is not",
+      [a["last4"] for a in report["accounts"]], ["9260"])
 
 print("")
 if FAILURES:
