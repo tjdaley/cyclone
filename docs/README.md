@@ -16,6 +16,12 @@ comes; the operator guide says *why* each one is shaped the way it is.
 | [`aws-ssm-setup.md`](aws-ssm-setup.md) | The full AWS build-out for SSM-backed secrets: IAM, instance metadata, cutover, rollback, Terraform |
 | [`supabase-key-migration.md`](supabase-key-migration.md) | Swapping the legacy Supabase JWT keys before Supabase retires them at the end of 2026 |
 
+## Proposals — not built
+
+| | |
+| - | - |
+| [`specs/document-labeling/`](specs/document-labeling/README.md) | The document pipeline: scan, split, OCR, label, dispatch, and a Rule 196.3(c) production index. **Partly built now** — receiving, routing and the splitting bench ship; classification and the index do not. `SPEC_splitting_bench.md` §8 marks what is done. The three as-received files came from a chat session with no access to this repo and are superseded |
+
 ## Reference and working notes
 
 | | |

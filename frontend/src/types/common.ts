@@ -9,6 +9,9 @@ export interface AppConfig {
   stripe_publishable_key: string
   time_increment_options: number[]
   referral_types: string[]
+  /** Largest file an upload accepts, in MB. Enforced by nginx;
+   *  published so the browser can refuse before sending. */
+  max_upload_mb?: number
 }
 
 /**

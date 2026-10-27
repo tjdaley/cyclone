@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
+
+import {
+  MAX_DIRECT_POST_MB, belongsInReceivedDocuments, isTooLargeError,
+  tooLargeToUpload, uploadLimitMB, uploadRejectedMessage,
+} from '../../lib/uploadLimit'
 import {
   getMatter, getOpposingParties,
   queueStatement, awaitStatementJob, retryStatement, setStatementBoundary,
@@ -237,6 +242,18 @@ export default function MatterFinancialsPage() {
   // often than one at a time, and taking only files[0] silently discarded the
   // rest — the worst kind of failure, since nothing looked wrong.
   const [queue, setQueue] = useState<{ done: number; total: number; name: string } | null>(null)
+  // Files past the automatic import's capacity. They are STORED and offered to
+  // the splitting bench rather than refused: the refusal this replaces was
+  // right about the import and had nothing to offer instead.
+  const [toSplit, setToSplit] = useState<
+    { name: string; sourceDocumentId: number; reason: string }[]>([])
+  // Learned from the server so there is no second copy of the number here.
+  // Null means it could not be learned, and then nothing is pre-checked:
+  // nginx still enforces, and a 413 carries the same advice.
+  const [maxUploadMB, setMaxUploadMB] = useState<number | null>(null)
+  // Set when a dropped file was too large for this page's upload path, so the
+  // other door can be offered rather than merely named in an error.
+  const [useReceived, setUseReceived] = useState(false)
   const [summary, setSummary] = useState<StatementIngestSummary | null>(null)
   // A LIST, not one joined string. A refused upload now comes back with a
   // paragraph explaining what to do about it, and three of those run together
@@ -287,6 +304,12 @@ export default function MatterFinancialsPage() {
     setAccounts(accountRows)
     setExceptions(exceptionRows)
   }
+
+  // The limit comes from the server so there is no second copy of the
+  // number in the client. Null means it could not be learned, and then
+  // nothing is pre-checked -- a guessed fallback would start refusing
+  // files the server would have taken.
+  useEffect(() => { void uploadLimitMB().then(setMaxUploadMB) }, [])
 
   useEffect(() => {
     if (!Number.isFinite(matterId)) { setError('Bad matter id'); setLoading(false); return }
@@ -361,7 +384,7 @@ export default function MatterFinancialsPage() {
       // Whatever happened, the drop zone comes back. A ref left true would
       // disable it for the life of the page, and the only cure would be a
       // reload nobody would know to try.
-      setJob(null); setQueue(null); setPhase(null)
+      setJob(null); setQueue(null); setPhase(null); setToSplit([]); setUseReceived(false)
       uploadingRef.current = false
     }
   }
@@ -404,10 +427,40 @@ export default function MatterFinancialsPage() {
     // longest few, and the only way to make it finish was to merge them into a
     // single enormous PDF, which is slower still.
     const queued: { file: File; jobId: string }[] = []
+    const routed: { name: string; sourceDocumentId: number; reason: string }[] = []
     for (const file of pdfs) {
+      // REFUSED BEFORE A BYTE IS SENT. nginx rejects an oversized body
+      // mid-flight, so without this the user waits out the whole upload to be
+      // shown a raw "413" they cannot act on.
+      const tooBig = tooLargeToUpload(file, maxUploadMB)
+      if (tooBig) {
+        fail(tooBig)
+        continue
+      }
+      // Not refused — routed. This page POSTs the file through the API, which
+      // moves the bytes twice inside one request; past the size that path is
+      // known to carry, Received documents uploads straight to storage.
+      const elsewhere = belongsInReceivedDocuments(file)
+      if (elsewhere) {
+        setUseReceived(true)
+        fail(elsewhere)
+        continue
+      }
       setQueue({ done: queued.length, total: pdfs.length, name: file.name })
       try {
         const job = await queueStatement(matterId, file, batesPrefix)
+
+        // Too large for the automatic import, so a person splits it. Nothing
+        // was queued, so there is no job to poll — and the file IS stored, so
+        // this is an offer rather than a loss.
+        if (job.status === 'routed_to_bench' || !job.id) {
+          routed.push({
+            name: file.name,
+            sourceDocumentId: job.source_document_id ?? 0,
+            reason: job.route_reason ?? 'This document needs splitting by hand.',
+          })
+          continue
+        }
         queued.push({ file, jobId: job.id })
         // Shown as soon as the upload lands, which is seconds — long before the
         // read finishes. It does not stop the ingest: a document holding
@@ -420,8 +473,19 @@ export default function MatterFinancialsPage() {
         }
       } catch (err) {
         // One bad PDF must not abandon the rest of the stack.
-        fail(`${file.name}: ${err instanceof Error ? err.message : 'failed'}`)
+        fail(isTooLargeError(err)
+          ? uploadRejectedMessage(file.name, maxUploadMB)
+          : `${file.name}: ${err instanceof Error ? err.message : 'failed'}`)
       }
+    }
+
+    setToSplit(routed)
+    if (queued.length === 0) {
+      // Nothing to read: every file went to the bench. Saying so beats leaving
+      // a reading spinner on a queue of none.
+      setQueue(null)
+      setPhase(null)
+      return
     }
 
     let finished = 0
@@ -756,6 +820,39 @@ export default function MatterFinancialsPage() {
         </div>
       )}
 
+      {useReceived && (
+        <div className="card p-4 border border-navy/30 bg-navy/5 text-sm
+                        flex flex-wrap items-baseline gap-3">
+          <span>Large productions are uploaded under Received documents.</span>
+          <Link to={`/app/matters/${matterId}/received`}
+                className="text-navy underline">Go to Received documents →</Link>
+        </div>
+      )}
+
+      {toSplit.length > 0 && (
+        <div className="card p-4 border border-navy/30 bg-navy/5 text-sm">
+          <h3 className="font-display text-navy mb-1">
+            {toSplit.length === 1 ? 'This file needs' : `${toSplit.length} files need`} splitting first
+          </h3>
+          <p className="text-text-secondary mb-3">
+            {toSplit.length === 1 ? 'It is' : 'They are'} stored exactly as received — nothing
+            was lost. Splitting by hand is quicker than correcting a bad automatic
+            split, and you can leave {toSplit.length === 1 ? 'it' : 'them'} unsplit
+            if you would rather not.
+          </p>
+          <ul className="space-y-2">
+            {toSplit.map(r => (
+              <li key={r.sourceDocumentId} className="flex flex-wrap items-baseline gap-2">
+                <span className="font-mono">{r.name}</span>
+                <span className="text-text-secondary text-xs">{r.reason}</span>
+                <Link to={`/app/bench/${r.sourceDocumentId}`}
+                      className="ml-auto text-navy underline">split it →</Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {tab === 'import' && (<>
       {/* ── Upload ── */}
       <div
@@ -851,6 +948,11 @@ export default function MatterFinancialsPage() {
               once, so a stack of monthly PDFs finishes far sooner than the same months
               combined into one file. Several statements in one file still works; each is
               filed separately.
+            </p>
+            <p className="text-text-secondary text-xs mt-2">
+              For a whole production — a scanned pile, or anything over
+              {MAX_DIRECT_POST_MB} MB — use Received documents instead, which
+              stores it exactly as served and splits it.
             </p>
           </div>
         )}

@@ -15,6 +15,11 @@ class JobKind(str, Enum):
     """What the job does. Values must match the jobs.kind CHECK constraint."""
     matter_intake = "matter_intake"
     statement_ingest = "statement_ingest"
+    # Reading a received file to find out what it is: how many pages carry
+    # text, how many describe their own pagination. A job because it has to
+    # download the file, and on a 74 MB production doing that inside the upload
+    # request is what haproxy cut with a 504.
+    document_survey = "document_survey"
 
 
 class JobStatus(str, Enum):

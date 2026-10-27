@@ -73,6 +73,9 @@ cyclone/
 │   │   ├── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
 │   │   ├── client_portal_service.py # What a client may see, and the one thing they may do — see §11b
 │   │   ├── inventory_service.py   # Account balances as an inventory: assets, liabilities, totals
+│   │   ├── source_document_service.py     # Receiving a file, and deciding what to do with it — see §11c
+│   │   ├── splitting_bench_service.py     # One received PDF becomes N documents, by hand — §11c
+│   │   ├── document_processor_service.py  # Routing a split document to a processor — §11c
 │   │   └── audit_logger.py        # AuditLogger.log() — never re-raises on failure
 │   └── schemas/                   # Pydantic request/response schemas (one per domain)
 ├── frontend/                      # React + Vite + TypeScript + Tailwind CSS
@@ -159,6 +162,8 @@ cyclone/
 │       ├── 044_client_portal_tagging.sql # client tags, cleared tags, client-visible tags, the hearing lock
 │       ├── 045_no_marital_interest.sql  # a fifth property character: the estate holds nothing here
 │       ├── 046_stop_reason.sql          # why the vendor stopped: out of room, refused, or done
+│       ├── 047_document_pipeline.sql    # as-produced record, working documents, page ranges, index views
+│       ├── 048_document_survey_job.sql  # a `document_survey` job kind
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -620,6 +625,46 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
   **Gemini needed nothing**: with `retry_options` unset, google-genai's
   `retry_args` returns `stop_after_attempt(1)`, so the vendor last in every
   chain was the only one already honouring the deadline as written.
+- **A REASONING MODEL TAKES NEITHER `temperature` NOR `top_p`, AND THE TWO
+  VENDORS DISAGREE ABOUT HOW IT SAYS SO.** OpenAI's migration guidance for
+  `gpt-6.1-sol`: remove `temperature`, `top_p` and `top_logprobs` whenever
+  reasoning effort is not `none` — and that model does not support `none`, so
+  **no setting makes them acceptable** and a request carrying them is refused.
+  Gemini 4 Argon's guidance says to remove the same parameters because they are
+  **ignored**, which is the worse failure of the two: nothing raises, and a
+  profile asking for `temperature: 0.0` quietly samples. Left alone, every
+  OpenAI text call would have come back 400, logged one WARNING, and handed the
+  work to **Gemini** — the vendor that is last precisely because its filters
+  decline this firm's ordinary evidence. Declared as `"sampling": false` on the
+  candidate, **per candidate and never inferred from the model name**: one chain
+  is one task served by three vendors, so a profile-level answer cannot express
+  it, and sniffing the name is the mistake `_anthropic_takes_temperature`
+  documents. Built as a dict and splatted, so an unset value is *absent* rather
+  than `None` — the SDK forwards an explicit `temperature=None` as a body field,
+  which is the rejection being avoided. Covered by `tests/test_llm_sampling.py`.
+- **`reasoning_effort` is one catalog key across two vendors.** `low | medium |
+  high | xhigh | max`, sent to OpenAI as `reasoning_effort` (flat on
+  `chat.completions`; the Responses API spells it `reasoning.effort`) and to
+  Gemini as `thinking_config.thinking_level`, whose scale **stops at `high`** —
+  so `xhigh` and `max` are clamped rather than refused, because an effort is a
+  property of the task and one vendor's shorter scale is not a reason to lose
+  the chain's last candidate. **Left unset everywhere**, so both vendors apply
+  their own default of `medium`: raising it is a measurement, not a guess, and
+  it is billed as output *and* counted against the output ceiling. An invalid
+  value is reported at startup like every other catalog problem, never raised —
+  it costs one candidate, and refusing to boot would cost all of them.
+- **`max_output_tokens` was never sent to Gemini at all**, so a profile's
+  ceiling reached Anthropic and OpenAI and not Gemini — `extract_account_statement`
+  asks for 128,000 and Gemini answered under whatever its own default was. On
+  Gemini 4 that budget covers **thinking as well as the answer**, so an unset
+  one is how a long extraction gets cut off mid-register. Now sent, clamped to
+  `_GEMINI_SYNC_MAX_OUTPUT` (65,536) — above which the vendor requires
+  background execution, which this service does not implement, and an unclamped
+  request is at best ignored and at worst refused. **Only an EXPLICIT ceiling is
+  sent, never the global default**: that default never reached Gemini either, so
+  adopting it would have been a silent *cut* — `ocr_document_page` would have
+  dropped from the vendor's 65,536 to the global 16,384, itself below the 32,768
+  floor Gemini's own guidance advises.
 - **Gemini enforces the deadline server-side**, so an overrun arrives as a structured `504 DEADLINE_EXCEEDED` from Google rather than a client timeout. Anthropic and OpenAI raise client-side (`APITimeoutError`). Same event, three different shapes — do not read the Gemini 504 as a network fault.
 - **Chain order is measured, not priced.** The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI complete and correct, Gemini good but stopped at 200 entries, DeepSeek lost and mis-stated amounts and invented JSON keys. `default` and `vision` therefore run Claude → OpenAI → Gemini. **DeepSeek is in no chain and must not be added to one that touches evidence.**
 - **`complete_detailed()` returns `LLMResult`** — the text plus the vendor, model, and how many candidates were tried. Use it wherever the answer becomes part of a record that has to say how it was produced. `complete()` still returns a bare string and is right everywhere else. The profile name says what was *asked for*; it cannot say who answered, and on a long statement read in passes it cannot even be one answer — the chain is walked independently per call, so a single document can be part Claude and part OpenAI.
@@ -1592,6 +1637,89 @@ Matching those against `financial_accounts` leaves the accounts nobody produced.
 
 Covered by `tests/test_account_discovery.py`, `tests/test_undisclosed_exhibit.py`
 and `tests/test_platform_seeds.py`.
+
+### The document pipeline (§11c)
+
+Three services turn a received file into documents. The design, the
+measurements and what is deliberately not built are in
+`docs/specs/document-labeling/`. What follows is what must not be relearned.
+
+**`source_document_service` — receiving, and the routing decision.**
+
+- **The as-produced record is keyed on the CONTENT HASH, and the object is
+  stored before the row exists.** The same rule §11a paid for once: a record
+  whose file is still uploading fails for anything that reads it. A hash path
+  also makes a retry rewrite the same object, and dedupes a re-served
+  supplement by its bytes — production filenames are unreliable to the point of
+  uselessness.
+- **THE ROUTING PREDICTOR IS PAGINATION SELF-CONSISTENCY, NOT TEXT QUALITY.**
+  The share of pages inside a *complete* `Page i of N` run — a page 1 of 4
+  followed by pages agreeing they are 2, 3 and 4. Measured on two hand-marked
+  piles: 74% on one that splits automatically at 95% precision, **8% on one with
+  a 96% text layer that has no good automatic operating point at any cost
+  ratio.** A text-quality gate would have sent the second down the automatic
+  path and produced 163 false splits on 169 documents. Requiring the run to
+  *complete* is what keeps it honest: a lone "Page 1 of 9" with nothing after it
+  says the document is **not** here.
+- **Past the size limits a file is ROUTED, not refused** (Tom, 21 Oct 2026).
+  The refusal was right about the automatic import and offered nothing instead.
+  Declining at the bench reaches the same end state by a path somebody can
+  take, and the unsplit file is kept — it was served on us.
+- **The verdict is DERIVED from `page_features`, never stored beside them.** A
+  stored verdict computed before a file was OCR'd would still say "no text
+  layer" afterwards. `_verdict()` is shared by the pass that reads a PDF and
+  the one that reads the stored facts, and a test asserts they agree across
+  every fixture — the same rules reachable two ways is the shape that drifts.
+
+**`splitting_bench_service` — the manual split.**
+
+- **Why a person rather than a better model.** Reviewing a wrong split costs
+  MORE than making the right one: the reviewer must reconstruct what the
+  machine did, discover welds hidden inside fragments, and recognise that
+  fragment 47 belongs with fragment 52. Automation pays when review collapses
+  to a spot check, and the frontier says which case you are in.
+- **There is no session table.** The grid is derived from the file plus the
+  page ranges existing documents claim, so opening only takes the lock and
+  resuming is free.
+- **IT DOES NOT READ THE FILE.** `open_session` used to compute the badges
+  inline when missing — downloading 73 MB inside a request and racing the
+  survey job doing identical work. The job owns it; the session reports
+  `surveyed` so the screen can say "still being read".
+- **An empty grid means two different things and must never assert one.** With
+  no features stored, nothing is listed and nothing is claimed, and the screen
+  announced *"Every page is in a document"* to somebody whose file had not been
+  read. Same family as a flag that contradicts its own row.
+- **Bundles are SERVER state.** A client-side list is lost when somebody
+  finishes or reloads, leaving them told there are four documents with no way
+  to see what is in them — so they guess, and guessing here makes duplicates.
+- **The claim NAMES its owner** (`claim_for`, not `claim_once`). The bench
+  re-opens its session after every bundle, so an anonymous claim reported the
+  operator as somebody else from their second bundle onward. A warning false
+  every time it fires is worse than none.
+- **A swept remainder is labelled `blank_or_separator` only when every swept
+  page really is blank**, because that label asserts those pages are not
+  documents.
+- **The thing worth caching is the source PDF, not the thumbnails.** A 33 MB
+  download per thumbnail is 660 MB for one screen; the bytes are cached per
+  node and each render costs 25 ms.
+
+**`document_processor_service` — the one route out, for now.**
+
+- The job points at the document's **existing object** (`storage_path` on
+  `enqueue_statement_ingest`), so nothing is uploaded a third time and the
+  statement's "show me the source" opens the split document rather than page 47
+  of a production.
+- **A document holding several statements is linked to NONE of them.** A
+  combined package is one document with three accounts; picking one would make
+  the index cite that account's period for all three. `SEVERAL_STATEMENTS`
+  names the ids instead.
+- **An ingest that finds nothing is a finding about the document**, not a
+  failed job. `NOT_A_STATEMENT`, at warn.
+
+Covered by `tests/test_document_routing.py`, `tests/test_splitting_bench.py`,
+`tests/test_document_to_statement.py`, `tests/test_pdf_authoring.py`,
+`tests/test_page_readability.py` and `tests/test_document_pipeline_sql.py`
+(real Postgres, skips with exit 2 without Docker).
 
 ### Inventory Service (`inventory_service.py`)
 
@@ -2716,7 +2844,15 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Fee agreement templates + e-sign | ❌ Model exists; no UI or workflow |
 | Client intake form / StepWizard | ❌ Not started |
 | Shared components (DataTable, ConfirmDialog) | ❌ Pages use inline tables |
-| Test suite | ❌ No unit or integration tests |
+| Receiving a production as produced | ✅ Built — 047. `source_documents` holds the file exactly as served: hashed on receipt, never split, OCR'd or re-saved. Uploaded **browser-to-storage over a signed URL**, so the bytes never pass through the API |
+| Routing a received file | ✅ Built — `pagination_coverage` decides: OCR first, the bench, or an automatic split. Deterministic, no model, computed in the survey job. Measured 74% vs 8% on two real piles, **both with a text layer**, which is why text quality is not the test |
+| Splitting bench (one PDF → N documents, by hand) | ✅ Built — thumbnails, discontinuous selection, per-bundle undo, finish-and-sweep. Server-side bundle list. No naming: a document is a row, and its description comes from classification |
+| Oversized upload routes to the bench | ✅ Built — replaces the 413/refusal on both the statement upload and Received documents. The file is kept whether or not anybody splits it |
+| A split document → statement ingest | ✅ Built — `read as statement` on the bundle row. The job points at the document's existing object, so the statement's source PDF **is** the statement. Several statements link to none of them and say so |
+| Automatic split of a high-coverage pile | ❌ Not started — the free signals find 86% of boundaries at 95% precision on such a pile and that measurement is currently unused. Those piles are told to use the bench |
+| Writing a text layer back into a PDF (step 3) | ❌ Not started — an `ocr_first` verdict dead-ends: the user is told to OCR elsewhere. `pdf_service.write_pages` proves PDF authoring works; the engine decision (Textract, and its BAA) is open |
+| Document classification + processor registry | ❌ Not started — needs the taxonomy, whose shape is still open. Until then **read as statement** is a human choice |
+| Test suite | ✅ Now substantial for the financial and document paths — ~30 suites run directly with the venv interpreter, no runner. Two need Docker and **exit 2 with SKIPPED** without it, deliberately: a check that silently did not run must not read as a pass |
 
 
 ---
@@ -3051,6 +3187,11 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Index into `response.content[0]` on an Anthropic reply | Extended thinking puts a `ThinkingBlock` first. Select by block type — `_anthropic_text` |
 | Test an Anthropic model family with `"-5" in model` | That matches `claude-haiku-4-5-…` too, and silently drops `temperature` on tasks that ask for 0.0. Use `_anthropic_takes_temperature` |
 | Read a Gemini `504 DEADLINE_EXCEEDED` as a network fault | It is usually our own deadline. Gemini enforces it server-side and reports it in Google's error format |
+| Send `temperature` or `top_p` to a reasoning model | OpenAI refuses the request outright and `gpt-6.1-sol` has no effort setting that would accept them; Gemini 4 ignores them, so a profile asking for 0.0 quietly samples. `"sampling": false` on the candidate |
+| Decide a model's capabilities from its name | One chain is one task on three vendors, and `"-5" in model` already matched `claude-haiku-4-5` once. Declare it per candidate in the catalog |
+| Pass an unsupported parameter as `None` to skip it | The SDK forwards `temperature=None` as a body field and the model refuses it just the same. Build the kwargs as a dict and splat — absent, not null |
+| Assume a profile's `max_tokens` reaches every vendor | The Gemini call never sent `max_output_tokens` at all. On Gemini 4 that budget covers thinking too, so unset is how a long extraction stops mid-register |
+| Start sending a global default to a vendor that never received it | It reads as a fix and lands as a cut — `ocr_document_page` would have gone from the vendor's 65,536 to the global 16,384. Send only what a profile asked for explicitly |
 | Set one global timeout for every task | A long answer needs a long deadline, and a short one silently selects for the model that quits earliest. Use `timeout_seconds` on the profile |
 | Build an Anthropic or OpenAI client without `max_retries` | Both default to 2 and retry a timeout, per attempt — so a 300s deadline is a 900s one. A measured chunk failed after 901,587 ms and ate 15 of a 23-minute job. `_MAX_RETRIES = 0`; the failover is the retry, and it moves to a *different* vendor |
 | Infer "it ran out of room" from `output_tokens` against the configured ceiling | The vendor says which, and we were discarding it. `stop_reason` (046), plus `stop_reason_class` so one query spans three vocabularies |
@@ -3233,6 +3374,18 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Persist PDF-extracted text straight from PyMuPDF | It can contain NULs; Postgres rejects the row (`22P05`). `pdf_service` sanitizes — use its output |
 | Decide "opposing" without knowing our client | `intake_service`/`pleading_service` take the client name; a pleading names *our* attorney too |
 | Assume a bank masks an account with X's | Chase uses dots and no space (`Chk ...9323`). Match a run of mask characters, not a literal XX |
+| Decide a page needs OCR from its character count alone | A Bates stamp applied as a text object is ~30 characters of PERFECT text, so no quality measure rejects it either. It cleared a 20-char bar on 344 of 396 pages, OCR never ran, and the ingest reported success with zero statements. `pdf_service.page_needs_ocr` — too short **or** not language |
+| Keep a second copy of "is this text layer usable" | Three had drifted and the most permissive was the one deciding whether to OCR, so it won every time. One definition in `pdf_service`, imported by the bench and the router |
+| Use `claim_once` for a claim held across requests | It stores the literal `"1"`, so the holder is anonymous and re-entry is indistinguishable from a conflict. The bench told its own operator somebody else had the file open, from their second bundle onward. `claim_for(key, owner, ttl)` |
+| Let an empty list assert the finished case | "No pages left" and "not read yet" look identical and only one is "you are done". The bench announced *"Every page is in a document"* to somebody whose file had not been read. Report the state (`surveyed`), do not infer it from a count |
+| Show a row id where a person needs an identity | "statement #771" correlates to nothing anybody can see. A statement is its institution, account and period — the same argument that put the filename and page range on the ingest label instead of a job uuid |
+| POST a large file through the API | The bytes move twice inside one request and haproxy cuts it with a 504 while everything is still working. A signed upload URL takes the application out of the path, and removes the memory ceiling and the nginx body limit with it |
+| Compute per-page facts inside a request | On a 73 MB production that is a download the request must not wait for — and it raced the survey job doing identical work. §11a, met again |
+| Gate the content type on only some upload paths | The signed-URL path accepted anything the client claimed while every multipart route refused non-PDF. "We only upload PDFs" was holding by habit on the one route where nothing enforced it |
+| Advise splitting a PDF "by size" | It lands mid-document, and the halves then sit in separate uploads where nothing can put them back together. Split at a boundary somebody can see — a year, an account |
+| Assume the upload limit is ours | Supabase Storage enforces its own cap on the direct path, defaulting to 50 MB, and refuses with an HTTP 400 whose body says 413. No test can see it; the error says which of the three limits refused the file |
+| Serve an as-produced image through a storage transform | It returns a re-encode with metadata stripped, and it looks like the photograph. Capture time and GPS are routinely the evidence. `get_signed_url` only, never `transform` — not even `format: origin` |
+| Ship a frontend without explicit `Cache-Control` | Browsers cache `index.html` heuristically, and it NAMES the content-hashed bundle. A stale copy asks for a file the new image lacks, so the deploy serves the old app or a blank page while every server check passes |
 | Match people on surname alone | Adverse parties share surnames — require first **and** last (`_match_confidence`) |
 
 ---

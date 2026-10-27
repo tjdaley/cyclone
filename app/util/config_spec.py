@@ -81,6 +81,11 @@ FLEET = frozenset({
     "redis_timeout_seconds",
     "job_poll_interval_seconds",
     "job_concurrency",
+    # FLEET: a node that accepted larger uploads than its neighbour would make
+    # whether a file is refused depend on which server the load balancer picked
+    # -- the same shape of bug as two nodes on different model configuration,
+    # which produced a document that processed, then did not, then did.
+    "max_upload_mb",
     "lead_poll_interval_seconds",
     "welcome_leads_after",
 })

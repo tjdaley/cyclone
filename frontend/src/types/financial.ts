@@ -268,6 +268,25 @@ export interface StatementIngestSummary {
   bates: BatesSeriesSummary | null
 }
 
+/**
+ * What an upload came to. TWO outcomes on one endpoint.
+ *
+ * `routed_to_bench` replaces what used to be a 413 refusal: past the automatic
+ * import's capacity the file is kept, recorded as produced, and offered to the
+ * splitting bench, where a person can split it or decline. No extraction is
+ * queued, so `id` is null.
+ */
+export interface StatementUploadResult {
+  /** Null when routed to the bench — nothing was queued to poll. */
+  id: string | null
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'routed_to_bench'
+  warnings: string[]
+  /** The as-produced record, when routed to the bench. */
+  source_document_id?: number | null
+  /** Why a person should split it, in words they can disagree with. */
+  route_reason?: string | null
+}
+
 export interface StatementJobStatus {
   id: string
   status: 'queued' | 'running' | 'succeeded' | 'failed'

@@ -8,6 +8,10 @@ Vetted line by line against the deployed schema after migration 037. Every
 cardinality below traces to a column's nullability and its foreign key — if you
 change a column between `NULL` and `NOT NULL`, the diagram needs updating too.
 
+**047 adds frame 6a**, the document pipeline: the file as produced, the working
+documents split from it, and the label-to-request spine the Rule 196.3(c)
+production index is composed from. 048 is a CHECK widening only.
+
 **033 adds the tenth frame.** `transaction_payee_classifications` records what
 the firm has decided a payee *is*, and 036 widened it from two verdicts to
 three. 034–037 are otherwise columns only: statement boundary markers, the
@@ -205,6 +209,63 @@ chain in the schema.
   `get_by_matter` and `get_pending_client` single-table. Since migration 022 a
   composite foreign key on `(discovery_request_id, matter_id)` guarantees it
   equals the parent document's, so the shortcut cannot lie.
+
+---
+
+## 6a. The document pipeline
+
+```mermaid
+erDiagram
+    MATTERS              ||--o{ DOCUMENT_PRODUCTIONS : receives
+    MATTERS              ||--o{ SOURCE_DOCUMENTS : "holds as produced"
+    DOCUMENT_PRODUCTIONS ||--o{ SOURCE_DOCUMENTS : "arrived in"
+    SOURCE_DOCUMENTS     ||--o{ DOCUMENTS : "split into"
+    DOCUMENTS            ||--|{ DOCUMENT_SOURCE_PAGES : "covers pages"
+    DOCUMENTS            ||--o| DOCUMENTS : "continues"
+    DOCUMENTS            ||--o| FINANCIAL_ACCOUNT_STATEMENTS : "was read as"
+    DOCUMENT_TYPE_LABELS ||--o{ DOCUMENTS : names
+    DISCOVERY_REQUEST_ITEMS ||--o{ REQUEST_DOCUMENT_TYPES : "is answered by a type"
+    DOCUMENTS            ||--o{ DOCUMENT_REQUEST_OVERRIDES : "included or excluded by hand"
+    DISCOVERY_REQUEST_ITEMS ||--o{ DOCUMENT_REQUEST_OVERRIDES : "for"
+    STAFF                ||--o{ SOURCE_DOCUMENTS : received
+```
+
+Added by migration 047. It sits between diagram 6 and diagram 7 because that is
+where it sits in the work: a production arrives, is split into documents, and
+some of those documents turn out to be account statements.
+
+**The two halves are not the same thing and the split is the point.**
+`SOURCE_DOCUMENTS` is the file exactly as it was served — hashed on receipt,
+never OCR'd, split or re-saved. `DOCUMENTS` are the working copies cut out of
+it. Lineage is a column, not an afternoon of matching mangled filenames.
+
+- `source_documents` is unique on `(matter_id, content_sha256)`. One matter
+  cannot hold the same bytes twice; across matters it can, because the same
+  bank statement produced in two cases is two records.
+- **`DOCUMENT_SOURCE_PAGES` is a LIST, which is why the relationship is
+  `||--|{`.** A document interrupted mid-way by unrelated pages and resumed
+  later is one document with two ranges. An exclusion constraint stops one
+  document claiming a page twice — and there is deliberately **no** constraint
+  across documents, because a combined statement prints one account's close and
+  the next account's opening on the same sheet.
+- `documents.continues_document_id` is the self-reference for the *automatic*
+  path, where nobody has asserted two fragments are one document. Where a
+  person groups them on the bench, they are one document with two ranges
+  instead.
+- `documents.statement_id` is `NULL` when a document held **several**
+  statements, not just when it held none. Picking one of them would make the
+  production index cite that account's period for all of them.
+- `request_document_types` is one judgment per *(request, label)* rather than
+  per *(document, request)*: six labels against twenty requests is 120
+  decisions made once, and every document produced later inherits by its label.
+  `document_request_overrides` is the per-document exception, in both
+  directions, and is a row rather than a deletion — a suppression has to say
+  who made it.
+
+The three views over this — `production_index`, `unmapped_documents` and
+`requests_without_documents` — are `security_invoker` and revoked from the
+public key, as is `document_page_spans`, which derives a document's outer page
+span rather than storing it beside the ranges.
 
 ---
 

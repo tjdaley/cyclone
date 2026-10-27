@@ -20,9 +20,28 @@ from db.models.financial import (
 
 
 class StatementIngestJobResponse(BaseModel):
-    """A queued statement extraction. Poll it at GET /statements/jobs/{id}."""
-    id: str = Field(..., description="Job id to poll")
-    status: str = Field(..., description="queued | running | succeeded | failed")
+    """A queued statement extraction, or a document a person should split first.
+
+    Two outcomes on one endpoint, told apart by ``status``. The second used to
+    be a 413 refusal: past 50 pages or 8 statements the automatic import cannot
+    work, and saying so was right about the import and offered nothing instead.
+    Now the file is kept, recorded as produced, and offered to the splitting
+    bench — where a person can split it, or decline and leave it unsplit.
+    """
+    id: Optional[str] = Field(
+        default=None,
+        description="Job id to poll. NULL when the document was routed to the bench instead, "
+                    "because no extraction was queued")
+    status: str = Field(
+        ...,
+        description="queued | running | succeeded | failed | routed_to_bench")
+    source_document_id: Optional[int] = Field(
+        default=None,
+        description="The as-produced record, when routed to the bench. The file is kept "
+                    "whether or not anybody splits it: it was served on us")
+    route_reason: Optional[str] = Field(
+        default=None,
+        description="Why a person should split it, in words they can disagree with")
     warnings: list[str] = Field(
         default_factory=list,
         description="What the upload looks like before anything reads it — chiefly that a PDF "

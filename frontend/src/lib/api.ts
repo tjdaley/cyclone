@@ -1,5 +1,13 @@
 import { supabase } from './supabaseClient'
 import type {
+  BundleSummary,
+  StatementUploadResult,
+  ReceivedDocument,
+  ReceivedUpload,
+  BenchGrid,
+  BenchSession,
+  BundleResult,
+  FinishResult,
   AppConfig,
   UserProfile,
   Client, ClientCreatePayload,
@@ -56,6 +64,21 @@ export type { UserProfile, ClientCreatePayload, MatterCreatePayload }
  * one that turns up here — no usable body, where the status is all there is.
  */
 async function errorMessage(res: Response): Promise<string> {
+  // The two statuses that come from the proxies rather than the application,
+  // so their bodies are HTML and carry nothing a person can act on. Both are
+  // reached by uploading a large file, and "Request failed: 504" sends
+  // somebody looking for a bug in a request that was still working.
+  if (res.status === 504) {
+    return 'The server did not respond in time. On a large upload this usually '
+      + 'means the file was still being transferred when the gateway gave up — '
+      + 'the upload may in fact have completed, so check whether the file is '
+      + 'already listed before sending it again. Sending it twice is harmless: '
+      + 'files are identified by their contents, not their names.'
+  }
+  if (res.status === 413) {
+    return 'The server rejected this file as too large to upload.'
+  }
+
   const fallback = `Request failed: ${res.status}`
   const body = await res.text()
   if (!body) return fallback
@@ -783,7 +806,7 @@ export async function queueStatement(
   matterId: number,
   file: File,
   batesPrefix?: string,
-): Promise<{ id: string; warnings: string[] }> {
+): Promise<StatementUploadResult> {
   const { data: { session } } = await supabase.auth.getSession()
   const form = new FormData()
   form.append('file', file)
@@ -799,8 +822,8 @@ export async function queueStatement(
   if (!res.ok) {
     throw new Error(await errorMessage(res))
   }
-  const job: { id: string; warnings?: string[] } = await res.json()
-  return { id: job.id, warnings: job.warnings ?? [] }
+  const job: StatementUploadResult = await res.json()
+  return { ...job, warnings: job.warnings ?? [] }
 }
 
 /**
@@ -1766,4 +1789,149 @@ export async function clearClientTag(linkId: number): Promise<ClientTagReview> {
 
 export async function restoreClientTag(linkId: number): Promise<ClientTagReview> {
   return apiFetch<ClientTagReview>(`/api/v1/client-tags/${linkId}/restore`, { method: 'POST' })
+}
+
+// ── The splitting bench ───────────────────────────────────────────────────────
+
+/** Open or resume work on a received file. Reports the size of the job. */
+export async function openBench(sourceDocumentId: number): Promise<BenchSession> {
+  return apiFetch<BenchSession>(`/api/v1/source-documents/${sourceDocumentId}/bench`,
+    { method: 'POST' })
+}
+
+/** One screen of the grid. Reads stored badges, so it never fetches the PDF. */
+export async function benchPages(
+  sourceDocumentId: number, offset: number, limit = 20, includeClaimed = false,
+): Promise<BenchGrid> {
+  const claimed = includeClaimed ? '&include_claimed=true' : ''
+  return apiFetch<BenchGrid>(
+    `/api/v1/source-documents/${sourceDocumentId}/bench/pages?offset=${offset}&limit=${limit}${claimed}`)
+}
+
+/**
+ * One page thumbnail, as an object URL.
+ *
+ * It has to come through fetch rather than an `<img src>`: the endpoint is
+ * behind `require_role` and an image element cannot carry a bearer token. The
+ * same reason a stored PDF is served as a signed URL rather than a plain link.
+ *
+ * **The caller must revoke the URL it gets back.** A 396-page pile scrolled
+ * end to end is 396 object URLs, and a browser holds every one of them until
+ * told otherwise — which on a grid this size is a leak measured in hundreds of
+ * megabytes.
+ */
+export async function benchThumbnail(
+  sourceDocumentId: number, page: number, width = 450,
+): Promise<string> {
+  const { data: { session } } = await supabase.auth.getSession()
+  const headers: Record<string, string> = {}
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`
+  }
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
+  const res = await fetch(
+    `${baseUrl}/api/v1/source-documents/${sourceDocumentId}/bench/pages/${page}/thumbnail?w=${width}`,
+    { headers })
+  if (!res.ok) {
+    throw new Error(await errorMessage(res))
+  }
+  return URL.createObjectURL(await res.blob())
+}
+
+/**
+ * The documents already split off this file, and which pages are in each.
+ *
+ * Read rather than remembered: a client-side list is lost when somebody closes
+ * the page or finishes, which leaves them told there are four documents with no
+ * way to see what is in them.
+ */
+export async function benchBundles(sourceDocumentId: number): Promise<BundleSummary[]> {
+  return apiFetch<BundleSummary[]>(
+    `/api/v1/source-documents/${sourceDocumentId}/bench/bundles`)
+}
+
+/** Make the selected pages one document. Order is irrelevant; duplicates collapse. */
+export async function bundlePages(
+  sourceDocumentId: number, pages: number[],
+): Promise<BundleResult> {
+  return apiFetch<BundleResult>(
+    `/api/v1/source-documents/${sourceDocumentId}/bench/bundles`,
+    { method: 'POST', body: JSON.stringify({ pages }) })
+}
+
+/** Put a bundle's pages back on the grid. */
+export async function undoBundle(documentId: number): Promise<void> {
+  return apiFetch<void>(`/api/v1/bench/bundles/${documentId}`, { method: 'DELETE' })
+}
+
+/** Declare the pile split, sweeping whatever is left into one separator document. */
+export async function finishBench(sourceDocumentId: number): Promise<FinishResult> {
+  return apiFetch<FinishResult>(
+    `/api/v1/source-documents/${sourceDocumentId}/bench/finish`, { method: 'POST' })
+}
+
+/**
+ * Read a split document as an account statement.
+ *
+ * The one route out of the bench into a processor. Returns a job to poll, like
+ * every other statement ingest.
+ */
+export async function ingestDocumentAsStatement(
+  documentId: number,
+): Promise<StatementUploadResult> {
+  return apiFetch<StatementUploadResult>(
+    `/api/v1/documents/${documentId}/ingest-as-statement`,
+    { method: 'POST', body: JSON.stringify({}) })
+}
+
+/** Give the pile up without finishing. The unsplit file is kept. */
+export async function leaveBench(sourceDocumentId: number): Promise<void> {
+  return apiFetch<void>(`/api/v1/source-documents/${sourceDocumentId}/bench/leave`,
+    { method: 'POST' })
+}
+
+// ── Received documents: the as-produced record, and where each file goes ──────
+
+/**
+ * Record a file exactly as it arrived.
+ *
+ * `fetch` directly rather than `apiFetch`, like every multipart upload here:
+ * the boundary has to be set by the browser, which means not setting
+ * Content-Type at all.
+ */
+export async function uploadReceivedDocument(
+  matterId: number, file: File,
+): Promise<ReceivedUpload> {
+  const { data: { session } } = await supabase.auth.getSession()
+  const headers: Record<string, string> = {}
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`
+  }
+  const form = new FormData()
+  form.append('file', file)
+
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
+  const res = await fetch(`${baseUrl}/api/v1/matters/${matterId}/received-documents`,
+    { method: 'POST', headers, body: form })
+  if (!res.ok) {
+    throw new Error(await errorMessage(res))
+  }
+  return res.json() as Promise<ReceivedUpload>
+}
+
+/** Every file this matter has received, and how far each has been split. */
+export async function listReceivedDocuments(matterId: number): Promise<ReceivedDocument[]> {
+  return apiFetch<ReceivedDocument[]>(`/api/v1/matters/${matterId}/received-documents`)
+}
+
+/**
+ * Ask again what should be done with a file already on record.
+ *
+ * The answer changes: a pile routed to OCR has no text layer, and once it has
+ * one the same signals give a different verdict.
+ */
+export async function rerouteReceivedDocument(
+  sourceDocumentId: number,
+): Promise<ReceivedUpload> {
+  return apiFetch<ReceivedUpload>(`/api/v1/received-documents/${sourceDocumentId}/route`)
 }

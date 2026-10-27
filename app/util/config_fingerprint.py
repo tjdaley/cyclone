@@ -365,6 +365,30 @@ def log_startup_summary(settings: Any) -> None:
             bad["variable"], bad["holds"], bad["exposure"],
         )
 
+    # MAX_UPLOAD_MB is a Settings field that is NOT a knob, and the difference
+    # is invisible from inside the process. The limit is enforced by
+    # `client_max_body_size` in the frontend image's nginx.conf, which no
+    # environment variable reaches: raising the setting makes the API advertise
+    # a limit nginx still refuses, so the browser stops pre-checking files it
+    # will then reject mid-upload with a raw error page -- the exact failure the
+    # pre-check was added to remove. Lowering it is no better: uploads are
+    # refused that the server would have taken, with nothing saying why.
+    #
+    # tests/test_upload_limit.py pins the DEFAULT against nginx.conf, which is
+    # the only comparison it can make statically. This is the other half: it
+    # catches somebody setting the variable at runtime, where no test can look.
+    if "max_upload_mb" in getattr(settings, "model_fields_set", set()):
+        LOGGER.warning(
+            "MAX_UPLOAD_MB is set to %s, but the limit is enforced by nginx in the "
+            "frontend image and no environment variable changes it. The API will "
+            "advertise %s while nginx still refuses anything over its own "
+            "client_max_body_size, so uploads between the two are rejected "
+            "mid-flight. Change frontend/nginx.conf and the default together, or "
+            "unset this.",
+            getattr(settings, "max_upload_mb", "?"),
+            getattr(settings, "max_upload_mb", "?"),
+        )
+
     for local in local_defaults_in_production(settings):
         LOGGER.warning(
             "%s is not set on this node and fell back to %s, which names THIS "

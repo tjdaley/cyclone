@@ -45,6 +45,12 @@ def public_config() -> dict[str, Any]:
         "referral_types": settings.referral_types,  # Client intake dropdown values
         "version": settings.version,
         "id": settings.id,
+        # So the browser can refuse an oversized file BEFORE sending it. The
+        # limit is enforced by nginx, which rejects the body mid-flight and
+        # answers with its own HTML error page -- after the user has waited for
+        # a 73 MB upload to finish. Knowing the number up front turns minutes of
+        # waiting into an instant, actionable message.
+        "max_upload_mb": settings.max_upload_mb,
         # A hash over the configuration that is supposed to be identical on
         # every node. Two nodes disagreeing is drift, and this is what turns
         # finding it from luck into a one-line diff:

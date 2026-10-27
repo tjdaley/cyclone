@@ -191,6 +191,36 @@ class Settings(BaseSettings):
     #: before raising it.
     job_concurrency: int = 5
 
+    # The largest file an upload accepts, in megabytes.
+    #
+    # MUST MATCH `client_max_body_size` in frontend/nginx.conf, which is the one
+    # that actually enforces it -- nginx rejects the body before the request
+    # reaches any Python. tests/test_upload_limit.py fails if the two disagree,
+    # because a mismatch is invisible from either side: the API would advertise
+    # a limit nginx refuses, and the user gets a raw nginx error page.
+    #
+    # 128, not 50, because 50 was refusing ordinary input: real productions from
+    # one opposing firm measured 36 MB to 665 MB, so the smallest of them nearly
+    # hit the old limit. 128 is bounded by MEMORY, not by preference -- every
+    # upload route does `file.file.read()`, which holds the whole file in RAM,
+    # and no container here sets a memory limit, so an overrun takes the host
+    # rather than one container. Going higher needs streaming first.
+    #
+    # ── A THIRD LIMIT EXISTS AND IS NOT OURS ─────────────────────────────────
+    #
+    # SUPABASE STORAGE ENFORCES ITS OWN UPLOAD CAP, set in the storage project
+    # settings and defaulting to 50 MB. Received documents now PUT straight to
+    # storage over a signed URL, so that cap applies to a request this codebase
+    # never sees: a file inside the limit here is still refused there, with an
+    # HTTP 400 whose body says 413.
+    #
+    # No test can check it -- it is a third party's setting behind a network
+    # call -- so it is named here instead. **Raise the storage cap to at least
+    # this value, or lower this to match it.** The client reports which of the
+    # two refused a file, because otherwise the person reading the error
+    # searches logs that will never mention it.
+    max_upload_mb: int = 128
+
     # CRM agent poller
     lead_poll_interval_seconds: int = 60
     # Only leads created at/after this ISO timestamp are eligible for the

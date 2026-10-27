@@ -5,7 +5,7 @@ REM ONE variable drives both the image tag and the build stamped inside it.
 REM Two literals would eventually disagree, and the failure is an image that
 REM reports a version it is not -- worse than reporting nothing, because
 REM check-fleet.sh would then confirm agreement that does not exist.
-set CYCLONE_BUILD=1.0.4
+set CYCLONE_BUILD=1.0.5
 
 REM ── PREFLIGHT: the frontend's build args come from THIS machine's .env ──────
 REM

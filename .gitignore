@@ -213,3 +213,9 @@ frontend/dist/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Client documents used for measurement -- NEVER commit these.
+# Anchored, per the lib/ lesson above: an unanchored rule matches a source
+# directory three levels down that happens to share the name.
+/test_data/
+/scratch/

@@ -36,6 +36,13 @@
       "title": "Part 3 \u2014 Financial statement discovery",
       "chapters": [
         {
+          "slug": "17-receiving-productions",
+          "file": "17-receiving-productions.md",
+          "number": "17",
+          "title": "Receiving and splitting a production",
+          "summary": "A production as it arrived, kept untouched, and split into documents by hand"
+        },
+        {
           "slug": "04-importing-statements",
           "file": "04-importing-statements.md",
           "number": "4",

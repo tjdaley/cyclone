@@ -126,9 +126,21 @@ def slow(manager, repo_, job):
 repo = FakeJobRepo([FakeJob("job-%d" % n) for n in range(5)])
 patch(repo, slow)
 
+# CLAIMING IS OUTSIDE THE MEASUREMENT, and that is not a detail.
+#
+# `claim_pending` takes a Redis key per job, and on a machine with no Redis each
+# of those costs about four seconds before it fails -- two for `::1` and two for
+# `127.0.0.1`, because `localhost` resolves to both and they are tried in order.
+# Five jobs is twenty seconds, against a bound of 0.9, so this check failed
+# every time on any developer machine without Redis running, measuring a cache
+# that is not what it is about.
+#
+# What it IS about is whether the pool runs the work concurrently. That is the
+# `run_claimed` calls and nothing else.
+jobs = job_service.claim_pending(object(), limit=5)
+
 begin = time.monotonic()
 with ThreadPoolExecutor(max_workers=5) as pool:
-    jobs = job_service.claim_pending(object(), limit=5)
     futures = [pool.submit(job_service.run_claimed, object(), j) for j in jobs]
     for future in futures:
         future.result()

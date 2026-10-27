@@ -70,6 +70,61 @@ def claim_once(key: str, ttl_seconds: int = 86400) -> bool:
     return bool(get_redis().set(key, "1", nx=True, ex=ttl_seconds))
 
 
+def claim_for(key: str, owner: str, ttl_seconds: int = 3600) -> tuple[bool, Optional[str]]:
+    """
+    Claim a key for a NAMED owner, or report who already holds it.
+
+    `claim_once` cannot express this and using it here was a bug that reached
+    production. It stores the literal value "1", so the holder is anonymous and
+    a second call by the SAME person is indistinguishable from a conflict: the
+    splitting bench re-opens its session after every bundle, so from the second
+    bundle onward the operator was told somebody else had the document open.
+    They were somebody else to themselves.
+
+    Re-entry by the owner also EXTENDS the claim, which `claim_once` could not
+    do either — `SET NX` on an existing key is a no-op, so the "refresh" that
+    was supposed to keep a long session alive did nothing at all.
+
+    Best-effort, like every other use of Redis here: if it is unreachable the
+    claim is granted. A bench nobody can open because a cache is down is worse
+    than two people on one pile, and the exclusion constraint still stops either
+    of them corrupting a single document.
+
+    :return: ``(is_ours, current_owner)``.
+    """
+    try:
+        r = get_redis()
+        if r.set(key, owner, nx=True, ex=ttl_seconds):
+            return True, owner
+        current = r.get(key)
+        if current == owner:
+            # Ours already: extend it rather than reporting a conflict.
+            r.expire(key, ttl_seconds)
+            return True, owner
+        return False, current
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("claim_for: Redis unavailable for %s, granting: %s", key, str(e))
+        return True, owner
+
+
+def release_claim(key: str) -> None:
+    """
+    Give up a key taken with ``claim_once``.
+
+    ``lock`` is the right primitive for work that finishes inside one function;
+    it cannot express a claim held across HTTP requests, which is what one
+    operator holding one pile on the splitting bench is. That needs
+    take-and-hold with a TTL, and therefore an explicit release.
+
+    Never raises: failing to release costs a wait until the TTL expires, while
+    raising would fail the operation that had already succeeded.
+    """
+    try:
+        get_redis().delete(key)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("release_claim: could not release %s: %s", key, str(e))
+
+
 @contextmanager
 def lock(key: str, ttl_seconds: int = 300) -> Iterator[bool]:
     """

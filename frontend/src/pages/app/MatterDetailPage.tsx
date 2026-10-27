@@ -438,8 +438,10 @@ export default function MatterDetailPage() {
           {matter.is_pro_bono && (
             <span className="text-xs rounded-full px-2 py-0.5 bg-purple-100 text-purple-700">Pro bono</span>
           )}
+          <Link to={`/app/matters/${matterId}/received`}
+            className="ml-auto text-sm text-navy underline">Received documents →</Link>
           <Link to={`/app/matters/${matterId}/financials`}
-            className="ml-auto text-sm text-navy underline">Financials →</Link>
+            className="text-sm text-navy underline">Financials →</Link>
         </div>
         <p className="text-sm text-text-secondary mt-1">
           {[

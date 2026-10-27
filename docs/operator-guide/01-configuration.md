@@ -213,6 +213,109 @@ one that needs AWS access.
 
 ---
 
+## ⚠ The upload limit is three numbers, and only two are ours
+
+`MAX_UPLOAD_MB` is a `Settings` field but it is **not a knob**, and the
+difference is invisible from inside the application.
+
+| Where | What it does | Who can change it |
+| ----- | ------------ | ----------------- |
+| `client_max_body_size` in `frontend/nginx.conf` | **Enforces** the limit for anything POSTed through the API | Edit the file, rebuild the frontend image |
+| `settings.max_upload_mb` | What the API **tells the browser**, so a file can be refused before it is sent | Edit the default, rebuild the API |
+| Supabase Storage's own cap | **Enforces** the limit for the direct upload, which the browser PUTs straight to storage | Storage project settings. Defaults to **50 MB** |
+
+The first two are pinned to each other by `tests/test_upload_limit.py`, because
+a mismatch is invisible from either side: too high and the browser accepts a
+file nginx then refuses with a raw error page; too low and uploads fail for no
+stated reason.
+
+**The third cannot be tested** — it is a third party's setting behind a network
+call — so raise it to at least `max_upload_mb`, or lower `max_upload_mb` to
+match it. Until they agree, a file between the two passes the browser's check
+and is refused by storage. The error says which of them refused it, in those
+words, because a refusal at storage never appears in any Cyclone log.
+
+**Setting `MAX_UPLOAD_MB` in an env file does not work**, and the application
+says so at startup:
+
+```
+MAX_UPLOAD_MB is set to 512, but the limit is enforced by nginx in the
+frontend image and no environment variable changes it...
+```
+
+Nginx cannot read an environment variable here, so raising the setting alone
+makes the browser stop pre-checking files that storage and nginx still reject.
+To change the limit for real, edit **both files** and rebuild the frontend.
+
+---
+
+## ⚠ The worker is silent at the default log level
+
+`LOG_LEVEL` defaults to **WARNING**, and every line describing what an ingest is
+doing — which file, how many pages, how many needed OCR, which statements were
+committed — is **INFO**.
+
+So `docker compose logs worker` on a job that is running correctly shows
+nothing at all, and a job that failed shows one line with no context. When
+diagnosing an import, set `LOG_LEVEL=INFO` on the worker and restart it.
+
+Leave it at WARNING the rest of the time: §6 of the conventions forbids client
+names, amounts and case facts in logs, and INFO is where the volume is.
+
+---
+
+## Cache headers, and a deploy that looks like it did not take
+
+`frontend/nginx.conf` sets `Cache-Control` explicitly, and it has to.
+
+Without it a browser applies **heuristic caching** — roughly a tenth of the age
+since the file was last modified — and decides for itself how long to keep
+`index.html`. The bundles are content-hashed, so a new build gives them new
+names; `index.html` is not, and it is the file that **names** the hashed
+bundle. A stale copy of it asks for the previous bundle, which the new image no
+longer contains: the deploy then serves either the old application or a blank
+page, while every server-side check passes.
+
+| Path | Header | Why |
+| ---- | ------ | --- |
+| `/assets/` | `immutable, max-age=1y` | The name changes when the content does |
+| `index.html` and SPA routes | `no-cache` | It names the hashed bundle |
+| `/user-guide/`, `/client-guide/` | `no-cache` | Markdown fetched at runtime; the names never change, so a corrected chapter would never appear |
+
+`no-cache` does not mean "do not cache" — it means revalidate before use, which
+with nginx's ETag is a 304 carrying no body. One conditional request per page
+load, in exchange for a deploy that is actually deployed.
+
+**Bumping the image tag does not fix this.** The server had the new files; the
+browser never asked for them. After deploying, check:
+
+```
+curl -I https://<host>/ | grep -i cache-control
+```
+
+---
+
+## Image transformation on the storage project
+
+Supabase enables it automatically. It cannot affect anything today, for two
+independent reasons, **and both expire the moment images are ever stored**:
+
+1. PDF is not a transformable source, and every upload route refuses anything
+   else.
+2. A transformation happens only when a caller asks for one. Nothing does.
+
+The risk is ahead: converting photographs and TIFFs to PDF is planned, and the
+original of such a file — a JPEG, a HEIC, a TIFF — **is** a transformable
+source. Serving one through a transform returns a re-encoded image with its
+metadata stripped, and it looks like the photograph. Capture time and GPS are
+routinely the evidence.
+
+Turning the feature off in the storage project settings costs nothing while no
+image is ever transformed, and is stronger than a convention about who calls
+what.
+
+---
+
 ## Removing a setting takes two releases
 
 `Settings` uses `extra = "forbid"`: a variable in `.env` that the application

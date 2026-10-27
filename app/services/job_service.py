@@ -90,6 +90,8 @@ class JobService:
         pdf_bytes: bytes,
         bates_prefix: Optional[str] = None,
         source_filename: Optional[str] = None,
+        storage_path: Optional[str] = None,
+        document_id: Optional[int] = None,
     ) -> JobInDB:
         """
         Store an uploaded statement PDF and queue it for extraction.
@@ -106,11 +108,20 @@ class JobService:
         :param bates_prefix: Optional stamp prefix to disambiguate detection on
             an odd production. Carried on the job because the user types it at
             the upload and the worker needs it minutes later, elsewhere.
+        :param storage_path: An object already in storage holding these bytes —
+            a document split on the bench. Given, nothing is uploaded again.
+            **That makes the statement's source PDF the split document rather
+            than a copy of the whole pile**, which is what somebody wants when
+            they ask to see where a figure came from: a page of a 396-page
+            production is not an answer. The as-produced original is still on
+            record through ``documents.source_document_id``.
+        :param document_id: The ``documents`` row this came from, so the
+            statement it produces can be linked back to it.
         :return: The queued job.
         :rtype: JobInDB
         """
         job_id = str(uuid4())
-        path = StorageService(manager).upload_intake(job_id, pdf_bytes)
+        path = storage_path or StorageService(manager).upload_intake(job_id, pdf_bytes)
 
         job = JobRepository(manager).insert({
             "id": job_id,
@@ -123,11 +134,42 @@ class JobService:
                 params={k: v for k, v in {
                     "bates_prefix": bates_prefix,
                     "source_filename": source_filename,
+                    "document_id": document_id,
                 }.items() if v},
             ).model_dump(),
         })
         LOGGER.info("job_service.enqueue_statement_ingest: job=%s matter=%s staff=%s",
                     job.id, matter_id, staff_id)
+        return job
+
+    def enqueue_document_survey(
+        self, manager: DatabaseManager, staff_id: int, matter_id: int,
+        source_document_id: int, storage_path: str,
+    ) -> JobInDB:
+        """
+        Queue the reading of a received file.
+
+        **Nothing is uploaded here**, unlike every other enqueue in this class:
+        the file is already in storage, put there by the browser over a signed
+        URL. That is the whole point — 74 MB moving twice inside one request is
+        what haproxy cut with a 504 while everything was still working.
+
+        :param source_document_id: The record to write page_features onto.
+        """
+        job_id = str(uuid4())
+        job = JobRepository(manager).insert({
+            "id": job_id,
+            **Job(
+                kind=JobKind.document_survey,
+                status=JobStatus.queued,
+                storage_path=storage_path,
+                matter_id=matter_id,
+                requested_by_staff_id=staff_id,
+                params={"source_document_id": source_document_id},
+            ).model_dump(),
+        })
+        LOGGER.info("job_service.enqueue_document_survey: job=%s source_document=%s",
+                    job.id, source_document_id)
         return job
 
     def get_for_staff(self, manager: DatabaseManager, job_id: str, staff_id: int) -> Optional[JobInDB]:
@@ -161,7 +203,8 @@ class JobService:
             return []
         repo = JobRepository(manager)
         claimed: list[JobInDB] = []
-        for kind in (JobKind.matter_intake, JobKind.statement_ingest):
+        for kind in (JobKind.matter_intake, JobKind.statement_ingest,
+                     JobKind.document_survey):
             if len(claimed) >= limit:
                 break
             for job in repo.next_queued(kind, limit=limit - len(claimed)):
@@ -182,6 +225,7 @@ class JobService:
         handlers = {
             JobKind.matter_intake: self._run_matter_intake,
             JobKind.statement_ingest: self._run_statement_ingest,
+            JobKind.document_survey: self._run_document_survey,
         }
         handler = handlers.get(job.kind)
         if handler is None:
@@ -236,6 +280,153 @@ class JobService:
         })
         return True
 
+    def _run_document_survey(self, manager: DatabaseManager, repo: JobRepository,
+                             job: JobInDB) -> None:
+        """
+        Read a received file and record what each page carries.
+
+        One pass, no model, no OCR: the per-page facts the splitting bench shows
+        as badges, and the counts the routing verdict is derived from. Measured
+        on a 396-page production at 0.39s of CPU -- the reason this is a job is
+        not the reading, it is the DOWNLOAD of a file that may be a hundred
+        megabytes.
+
+        The content hash is verified here, and this is the only place it can be.
+        `register` deliberately does not check it: that would mean downloading
+        the file back into the request this design exists to keep it out of. A
+        mismatch is recorded rather than raised -- the file is whatever it is,
+        and an upload that landed corrupted is a finding somebody has to see,
+        not a job to fail silently.
+        """
+        import hashlib  # noqa: PLC0415
+
+        from db.repositories.document import SourceDocumentRepository  # noqa: PLC0415
+        from services.splitting_bench_service import splitting_bench_service  # noqa: PLC0415
+        from services.storage_service import StorageService  # noqa: PLC0415
+
+        LOGGER.info("job_service: running document_survey job=%s", job.id)
+        try:
+            source_document_id = (job.params or {}).get("source_document_id")
+            if not source_document_id:
+                raise ValueError("Document survey requires a source_document_id")
+            if not job.storage_path:
+                raise ValueError("Document survey requires a stored file")
+
+            content = StorageService(manager).download(job.storage_path)
+            if content is None:
+                raise ValueError(
+                    "The file could not be retrieved from storage, so it could not be read")
+
+            repo_docs = SourceDocumentRepository(manager)
+            record = repo_docs.select_one(condition={"id": source_document_id})
+            if record is None:
+                raise ValueError("That received file is no longer on record")
+
+            features = splitting_bench_service.page_features(content)
+            patch = {"page_features": features, "page_count": len(features)}
+
+            digest = hashlib.sha256(content).hexdigest()
+            if digest != record.content_sha256:
+                # Recorded, not raised. The bytes in storage are what they are,
+                # and the dedup key now disagrees with them -- which somebody
+                # has to see, because every lineage claim rests on that hash.
+                LOGGER.error(
+                    "job_service: document_survey job=%s source_document=%s HASH MISMATCH "
+                    "- the stored bytes are not what was registered; every lineage claim "
+                    "rests on that hash",
+                    job.id, source_document_id)
+            repo_docs.update(source_document_id, patch)
+
+            summary = {
+                "source_document_id": source_document_id,
+                "pages": len(features),
+                "hash_verified": digest == record.content_sha256,
+            }
+            repo.update(job.id, {
+                "status": JobStatus.succeeded.value,
+                "result": summary,
+                "error": None,
+                "finished_at": _now(),
+            })
+            LOGGER.info("job_service: document_survey job=%s pages=%s verified=%s",
+                        job.id, len(features), summary["hash_verified"])
+        except Exception as e:  # noqa: BLE001 — the failure belongs on the job
+            LOGGER.error("job_service: document_survey job=%s failed: %s", job.id, str(e))
+            repo.update(job.id, {
+                "status": JobStatus.failed.value,
+                "error": str(e),
+                "finished_at": _now(),
+            })
+
+    @staticmethod
+    def _link_document(manager: DatabaseManager, job: JobInDB, summary: dict) -> None:
+        """
+        Tie the statement that came out of a split document back to it.
+
+        **Only when the ingest produced exactly ONE statement.**
+        ``documents.statement_id`` is singular, and a document holding several
+        statements is a real thing — a combined bank package is one document
+        with three accounts in it. Picking one of them would make the production
+        index cite one account's period for a document covering three, so the
+        link is left null and the ids are recorded on the document's flags
+        instead. The index then reads that document's own Bates range and
+        period, which is the correct answer for a combined statement anyway.
+
+        Never raises: the statements are committed by this point, and losing the
+        back-link is a smaller loss than failing a job that succeeded.
+        """
+        document_id = (job.params or {}).get("document_id")
+        if not document_id:
+            return
+
+        ids = [r.get("statement_id") for r in (summary.get("results") or [])
+               if r.get("statement_id")]
+        try:
+            from db.repositories.document import DocumentRepository  # noqa: PLC0415
+
+            repo = DocumentRepository(manager)
+            document = repo.select_one(condition={"id": document_id})
+            if document is None:
+                LOGGER.warning("job_service._link_document: document %s is gone", document_id)
+                return
+
+            patch: dict = {"needs_review": False}
+            if len(ids) == 1:
+                patch["statement_id"] = ids[0]
+            elif len(ids) > 1:
+                flags = list(document.flags or [])
+                flags.append({
+                    "code": "SEVERAL_STATEMENTS",
+                    "severity": "info",
+                    "field_path": "statement_id",
+                    "note": "This document holds %d statements, so it is not linked to one "
+                            "of them: %s. A combined statement is one document with several "
+                            "accounts in it, and the index reads this document's own period "
+                            "and Bates range." % (len(ids), ", ".join(str(i) for i in ids)),
+                })
+                patch["flags"] = flags
+            else:
+                # The ingest found nothing. That is a finding about the document,
+                # not a failure of the job: somebody sent a letter to the
+                # statement processor.
+                flags = list(document.flags or [])
+                flags.append({
+                    "code": "NOT_A_STATEMENT",
+                    "severity": "warn",
+                    "field_path": "doc_type",
+                    "note": "Sent to statement extraction, which found no account statement "
+                            "in it. It is probably a different kind of document.",
+                })
+                patch["flags"] = flags
+                patch["needs_review"] = True
+
+            repo.update(document_id, patch)
+            LOGGER.info("job_service._link_document: document=%s statements=%d",
+                        document_id, len(ids))
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("job_service._link_document: document=%s failed: %s",
+                           document_id, str(e))
+
     def _run_statement_ingest(self, manager: DatabaseManager, repo: JobRepository, job: JobInDB) -> None:
         """
         Read a statement PDF and write its statements, accounts, and lines.
@@ -282,6 +473,7 @@ class JobService:
                 bates_prefix=(job.params or {}).get("bates_prefix"),
                 source_filename=(job.params or {}).get("source_filename"),
             )
+            self._link_document(manager, job, summary)
             repo.update(job.id, {
                 "status": JobStatus.succeeded.value,
                 "result": summary,

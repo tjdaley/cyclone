@@ -1,0 +1,92 @@
+{
+  "_notes": [
+    "Vendor-neutral draft. Map 'options[].label' and 'options[].description' to the field names your API expects (Decision-1 and Jev differ; check each vendor's docs).",
+    "Input: extracted text of the first 1-2 pages of ONE file, after the text-layer check has passed.",
+    "Classes are drawn to match processing branches. Merge or split wherever your branches differ.",
+    "Anything below your confidence threshold on 'document_type', or with 'multiple_documents' = yes, should leave the automated path."
+  ],
+  "instruction": "You are classifying a single document produced in discovery in a Texas family law case. Decide based only on the text provided. If the text does not clearly fit an option, choose other_unknown.",
+  "questions": {
+    "document_type": {
+      "type": "choice",
+      "options": [
+        { "label": "bank_statement", "description": "Periodic statement for a checking, savings, or money market deposit account showing deposits, withdrawals, and balances." },
+        { "label": "credit_card_statement", "description": "Periodic statement for a credit or charge card showing purchases, payments, interest, and balance due." },
+        { "label": "brokerage_statement", "description": "Periodic statement for a taxable investment account showing holdings, trades, dividends, and market value." },
+        { "label": "retirement_statement", "description": "Statement for a 401(k), 403(b), IRA, pension, or other retirement or deferred compensation plan." },
+        { "label": "loan_statement", "description": "Statement or payoff letter for a mortgage, HELOC, auto loan, student loan, or other installment or revolving loan that is not a credit card." },
+        { "label": "payment_app_record", "description": "Transaction history from a payment or crypto platform such as Venmo, Zelle, PayPal, Cash App, or Coinbase." },
+        { "label": "individual_tax_return", "description": "Personal income tax return (Form 1040 and attached schedules) or an IRS account or return transcript for an individual." },
+        { "label": "business_tax_return", "description": "Entity tax return such as Form 1120, 1120-S, 1065, or a Texas franchise tax report." },
+        { "label": "tax_information_form", "description": "Standalone information form such as a W-2, 1099, 1098, or Schedule K-1, not attached to a full return." },
+        { "label": "pay_stub", "description": "Paycheck stub or earnings statement showing gross pay, deductions, and net pay for a pay period." },
+        { "label": "employment_record", "description": "Offer letter, employment agreement, benefits summary, equity or bonus award, performance review, or personnel file document." },
+        { "label": "business_financial_statement", "description": "Profit and loss statement, balance sheet, cash flow statement, general ledger, or trial balance for a business." },
+        { "label": "business_governance_record", "description": "Company agreement, bylaws, certificate of formation, minutes, ownership ledger, or cap table for a business entity." },
+        { "label": "invoice_or_bill", "description": "Request for payment from a vendor, utility, school, medical provider, or other business, itemizing amounts owed." },
+        { "label": "receipt", "description": "Proof of a completed purchase or payment, such as a store receipt or order confirmation showing amount paid." },
+        { "label": "real_property_record", "description": "Deed, deed of trust, closing or settlement statement, appraisal district record, survey, or lease for real estate." },
+        { "label": "title_or_registration", "description": "Certificate of title or registration for a vehicle, boat, trailer, aircraft, or other titled personal property." },
+        { "label": "appraisal_or_valuation", "description": "Appraisal or valuation report for real estate, a business interest, jewelry, art, or other property." },
+        { "label": "insurance_record", "description": "Insurance policy, declarations page, cash-value statement, claim record, or beneficiary designation." },
+        { "label": "estate_planning_document", "description": "Will, trust instrument, power of attorney, or trust account statement or accounting." },
+        { "label": "contract_or_agreement", "description": "Signed or draft agreement not covered above, such as a premarital or marital property agreement, promissory note, or purchase contract." },
+        { "label": "inventory_and_appraisement", "description": "A party's sworn inventory and appraisement or other schedule listing assets, liabilities, and claimed separate property." },
+        { "label": "court_filing", "description": "Pleading, motion, order, decree, or other document filed in or issued by a court." },
+        { "label": "discovery_instrument", "description": "Discovery request, written response, objection, privilege log, or deposition transcript." },
+        { "label": "email", "description": "Email message or thread with sender, recipient, date, and subject headers." },
+        { "label": "text_message", "description": "SMS, iMessage, WhatsApp, or similar chat messages, whether exported as text or captured as a transcript." },
+        { "label": "coparenting_app_record", "description": "Messages, calendar entries, or expense logs exported from a co-parenting app such as OurFamilyWizard, AppClose, or TalkingParents." },
+        { "label": "social_media_content", "description": "Post, comment, profile, or direct message from a social media or dating platform." },
+        { "label": "letter_or_correspondence", "description": "Formal letter or notice on paper or letterhead that is not an email, including demand letters and agency notices." },
+        { "label": "drug_or_alcohol_test_result", "description": "Laboratory or monitoring report of drug or alcohol testing, including hair, nail, urine, PEth, or remote breath-testing reports." },
+        { "label": "medical_record", "description": "Treatment record, visit summary, prescription record, or billing record from a medical or dental provider." },
+        { "label": "mental_health_record", "description": "Record from a therapist, counselor, psychologist, psychiatrist, or substance abuse treatment provider, including evaluations." },
+        { "label": "school_or_childcare_record", "description": "Report card, attendance record, disciplinary record, special education document, or enrollment record for a child." },
+        { "label": "law_enforcement_or_cps_record", "description": "Police report, incident report, arrest record, protective order record, or child protective services record." },
+        { "label": "calendar_or_log", "description": "Calendar, journal, diary, possession log, or timeline kept by a person to record events." },
+        { "label": "summary_or_spreadsheet", "description": "Table, spreadsheet, or summary prepared by a party or professional to compile or analyze other records." },
+        { "label": "photo_or_image", "description": "Photograph or image with little or no meaningful text, or only a caption or filename." },
+        { "label": "other_unknown", "description": "Does not clearly fit any other option, or the text is too sparse or garbled to tell." }
+      ]
+    },
+    "multiple_documents": {
+      "type": "yes_no",
+      "question": "Does this file appear to contain more than one distinct document?"
+    },
+    "multiple_accounts": {
+      "type": "yes_no",
+      "question": "If this is an account statement, does it cover more than one account or account number?"
+    },
+    "transaction_detail_present": {
+      "type": "yes_no",
+      "question": "Does the document list individual dated transactions, as opposed to only summary totals or balances?"
+    },
+    "business_or_entity_owner": {
+      "type": "yes_no",
+      "question": "Is the account, return, or record in the name of a business, trust, or other entity rather than an individual?"
+    },
+    "annual_or_year_end": {
+      "type": "yes_no",
+      "question": "Is this an annual or year-end summary rather than a monthly or quarterly statement?"
+    },
+    "attorney_involved": {
+      "type": "yes_no",
+      "question": "Is an attorney or law firm a sender, recipient, or author of this document?"
+    },
+    "involves_child": {
+      "type": "yes_no",
+      "question": "Does the document primarily concern a minor child?"
+    },
+    "non_english": {
+      "type": "yes_no",
+      "question": "Is a substantial portion of the text in a language other than English?"
+    },
+    "text_quality": {
+      "type": "score",
+      "min": 0,
+      "max": 100,
+      "question": "How clean and complete is the extracted text, where 0 is unreadable and 100 is clean native text?"
+    }
+  }
+}

@@ -22,6 +22,8 @@ import DashboardPage  from './pages/app/DashboardPage'
 import BillingPage    from './pages/app/BillingPage'
 import MattersPage    from './pages/app/MattersPage'
 import MatterDetailPage from './pages/app/MatterDetailPage'
+import ReceivedDocumentsPage from './pages/app/ReceivedDocumentsPage'
+import SplittingBenchPage from './pages/app/SplittingBenchPage'
 import MatterFinancialsPage from './pages/app/MatterFinancialsPage'
 import ClientsPage    from './pages/app/ClientsPage'
 import DiscoveryPage  from './pages/app/DiscoveryPage'
@@ -59,6 +61,10 @@ export default function App() {
               <Route path="/app/billing"   element={<BillingPage />} />
               <Route path="/app/matters"   element={<MattersPage />} />
               <Route path="/app/matters/:matterId" element={<MatterDetailPage />} />
+              {/* Reached from a received file, not from the nav: the bench is
+                  always about one specific document somebody is splitting. */}
+              <Route path="/app/matters/:matterId/received" element={<ReceivedDocumentsPage />} />
+              <Route path="/app/bench/:sourceDocumentId" element={<SplittingBenchPage />} />
               <Route path="/app/matters/:matterId/financials" element={<MatterFinancialsPage />} />
               <Route path="/app/clients"   element={<ClientsPage />} />
               <Route path="/app/discovery" element={<DiscoveryPage />} />

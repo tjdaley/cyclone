@@ -22,10 +22,12 @@ first, except that everything in Part 3 assumes a matter exists.
 ## Part 3 — Financial statement discovery
 
 This is the largest part of the guide, and the order below is the order the
-work happens in.
+work happens in. (Chapter numbers are file names, not reading order — the
+newest chapter sits where its work belongs.)
 
 | | |
 | - | - |
+| [17. Receiving and splitting a production](17-receiving-productions.md) | A production as it arrived, kept untouched, and split into documents by hand |
 | [4. Importing statements](04-importing-statements.md) | Dropping PDFs, what happens to them, and how to read the result |
 | [5. When an import has a problem](05-import-problems.md) | The exceptions queue, every flag you can see, and what to do about each one |
 | [6. Merging accounts](06-merging-accounts.md) | When one real account has been filed twice |

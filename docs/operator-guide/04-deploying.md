@@ -84,7 +84,7 @@ this project.
 by hand, and **release notes must name the migration files** so they can be
 applied before the containers come up.
 
-**This release: `038` through `046`, in order.** All nine are safe to run
+**This release: `038` through `048`, in order.** All eleven are safe to run
 before the deploy, and that is the right order — a migration run late costs data
 that was never recorded.
 
@@ -99,6 +99,25 @@ that was never recorded.
 | `044_client_portal_tagging.sql` | Client tags, cleared tags, client-visible tags, and the per-matter tagging lock. Seeds seven client-facing waste tags | The client portal's tagging cannot be switched on. Applied and re-applied against real Postgres 16 |
 | `045_no_marital_interest.sql` | A fifth account characterization: *no marital property interest* | Choosing it is refused with a constraint sentence ([Chapter 5](05-startup-log.md#a-write-the-database-refused)) |
 | `046_stop_reason.sql` | Records **why** a vendor stopped generating — its own word, plus a class reconciled across the three vocabularies | Usage is still recorded, without the stop reason, and one ERROR names the file. Same shape as `042`: run it, then **restart api and worker** |
+| `047_document_pipeline.sql` | The document pipeline: files as produced, the working documents split from them, their page ranges, and the production index views. Installs `btree_gist` | **The whole Received-documents page and the splitting bench fail.** Nothing else is affected |
+| `048_document_survey_job.sql` | Lets a `document_survey` job exist | **Silently**: an uploaded file is stored, its survey is never queued, and it sits at *"Still being read"* for ever. The upload still reports success |
+
+`047` is the largest migration here and the only one that installs an
+extension. It was applied, re-applied and checked against real Postgres 16 by
+`tests/test_document_pipeline_sql.py`, which also verifies RLS on all seven new
+tables and `security_invoker` on all three new views.
+
+**`048` is the one to watch**, because its failure is quiet. The endpoint that
+queues the survey catches the error, logs it and carries on — deliberately, so a
+file is never lost because a job could not be queued. The cost is that a missing
+`048` looks like a slow survey rather than a broken one. Check it directly:
+
+```sql
+select pg_get_constraintdef(oid) from pg_constraint
+where conname = 'jobs_kind_check';
+```
+
+If `document_survey` is not in that list, `048` has not run.
 
 Two things about this set that are not in the files:
 

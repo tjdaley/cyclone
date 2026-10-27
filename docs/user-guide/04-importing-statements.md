@@ -19,6 +19,12 @@ The Financials page has six tabs, and they are the shape of the whole job:
 | **Inventory** | Every account's latest balance, totalled — see [Chapter 7](07-viewing-statements.md#the-inventory-tab) |
 | **FIS** | The Financial Information Statement |
 
+> **A whole production goes to a different page.** This one is for statements:
+> drop a stack of monthly PDFs and they are read. A scanned pile, a bag of
+> mixed documents, or anything over 50 MB belongs on **Received documents**,
+> which keeps the file exactly as served and lets you split it into documents
+> first — [Chapter 17](17-receiving-productions.md).
+
 Two of the tabs carry an amber count when something needs you:
 
 - **Import** — statements that did not clear on their own.
@@ -37,32 +43,34 @@ twelve monthly PDFs dropped together finish far sooner than the same twelve
 months combined into one large file — and much sooner than dropping them one at
 a time.
 
-> ### ⛔ A very large PDF is refused
+> ### ⛔ A very large PDF is sent somewhere else, not refused
 >
-> **Two limits, and an upload that breaks either is rejected outright:**
+> **Two limits, and an upload past either one goes to the splitting bench:**
 >
 > | Limit | |
 > | ----- | - |
 > | **50 pages** | A single statement is rarely longer |
 > | **8 statements in one file** | Counted from the pagination the statements print |
 >
-> **Nothing is kept when an upload is refused** — no document in storage, no
-> job, no partial import. The message says which limit it was and what to do.
+> **The file is kept.** It is recorded exactly as it arrived and offered to the
+> bench, where you can split it by hand or decline and leave it unsplit. See
+> [Chapter 17](17-receiving-productions.md). No extraction is started, so
+> nothing is half-imported either way.
 >
-> **Split the PDF into one file per statement, and drop the whole stack at
-> once.** That is faster as well as more accurate: the files are read several at
-> a time, so twelve monthly PDFs finish sooner than the same twelve months
-> combined into one.
+> **This used to be a flat refusal.** A 700-page PDF holding 122 statements was
+> uploaded, the warning fired, the import ran anyway — because a warning is
+> only advice — and the result was a total loss. Refusing it was right about
+> the import and offered nothing instead: "no", with no door. Declining at the
+> bench reaches the same place, by a path you can take.
 >
-> **Why this is now a refusal and not a warning.** A 700-page PDF holding 122
-> statements was uploaded. The warning fired, the import ran anyway — because
-> the warning was only advice — and the result was a total loss. Below these
-> limits the advisory warning still behaves as described
+> **Anything over 50 MB is not sent through this page at all.** It is pointed
+> at **Received documents**, which uploads straight to storage and has no such
+> ceiling. Below those limits the advisory warning still behaves as described
 > [further down](#if-you-are-told-the-pdf-looks-like-several-statements).
 >
 > **Retry runs the same check**, before anything is deleted. So a large document
-> imported before this release cannot be re-read either: the statements already
-> held are left untouched, and splitting the file is the way forward.
+> imported before this release cannot be re-read here either: the statements
+> already held are left untouched, and splitting the file is the way forward.
 >
 > **A long document that is not read all the way through now says so**, on every
 > statement it produced, as **PAGES_NOT_INDEXED**

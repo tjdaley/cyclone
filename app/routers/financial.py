@@ -88,6 +88,7 @@ from services.inventory_service import inventory_service
 from services.audit_logger import AuditLogger
 from services import exhibit_service
 from services.job_service import job_service
+from services.source_document_service import source_document_service
 from services.statement_service import statement_service
 from services.storage_service import StorageService
 from services.transaction_search_service import transaction_search_service
@@ -170,20 +171,41 @@ def upload_statement(
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty")
 
-    # REFUSED BEFORE ANYTHING IS STORED. The survey used to run after queueing,
-    # because it only produced advice; a limit has to run first, or a refused
-    # upload leaves an object in storage and a job row behind. A 700-page PDF of
-    # 122 statements is what this exists to stop — the survey warned about it,
-    # the import went ahead because a warning is advice, and the result was a
-    # total loss. Nothing is written on this path: no object, no job, no
-    # half-imported statements.
+    # PAST THE AUTOMATIC IMPORT'S CAPACITY, A PERSON SPLITS IT -- Tom, 21 Oct 2026.
+    #
+    # This was a 413 refusal, written after a 700-page PDF of 122 statements was
+    # warned about, imported anyway, and was a total loss. The refusal was right
+    # about the automatic import and had nothing to offer instead: "no" with no
+    # door. Now the file is recorded as produced and offered to the splitting
+    # bench, where somebody can split it or decline -- and declining reaches the
+    # same end state as the refusal did, by way of a path they can take.
+    #
+    # Still nothing half-done on this path: the as-produced record is written,
+    # and NO extraction job is queued.
     too_big = statement_service.refuse_oversized_upload(pdf_bytes)
     if too_big:
-        LOGGER.warning("financial.upload_statement: refused matter=%s file=%s",
-                       matter_id, (file.filename or "")[:80])
-        # 413, not 422: the request was understood and the document is too large
-        # for this operation, which is exactly what the status says.
-        raise HTTPException(status_code=413, detail=too_big)
+        LOGGER.info("financial.upload_statement: routing to the bench matter=%s file=%s",
+                    matter_id, (file.filename or "")[:80])
+        try:
+            record, _ = source_document_service.receive(
+                manager, matter_id, pdf_bytes,
+                original_filename=(file.filename or "untitled").strip(),
+                media_type=file.content_type,
+                received_by_staff_id=_staff_id(request, manager),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.error("financial.upload_statement: could not store for the bench: %s",
+                         str(e))
+            raise HTTPException(
+                status_code=502,
+                detail="The file could not be stored, so nothing was recorded.") from e
+
+        return StatementIngestJobResponse(
+            id=None,
+            status="routed_to_bench",
+            source_document_id=record.id,
+            route_reason=too_big,
+        )
 
     try:
         job = job_service.enqueue_statement_ingest(
