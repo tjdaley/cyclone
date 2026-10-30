@@ -164,6 +164,7 @@ cyclone/
 │       ├── 046_stop_reason.sql          # why the vendor stopped: out of room, refused, or done
 │       ├── 047_document_pipeline.sql    # as-produced record, working documents, page ranges, index views
 │       ├── 048_document_survey_job.sql  # a `document_survey` job kind
+│       ├── 049_thinking_measurement.sql # how much of a reply was thinking, in CHARS
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -792,6 +793,69 @@ The catalog is `app/config/llm_profiles.json` (path from `settings.llm_profiles_
 - Image enhancement: grayscale, contrast 2.0, sharpness 1.5 before sending to the vision model
 - Tesseract is **not** used — LLM vision is more accurate for legal documents
 - **A page nobody could read is not a blank page.** When the text layer is unusable *and* the vision fallback fails, `_vision_extract` leaves `_UNREADABLE_MARKER` in place of the page's text instead of returning `""`. It used to return an empty string, so the page contributed nothing and no record anywhere said one had been lost. The marker travels in `raw_text`, and `statement_service` raises `PAGE_UNREADABLE` (warn) naming the pages.
+- **A TEXT LAYER CAN BE PRESENT, WORD-LIKE, AND WRONG — AND THAT IS WHERE THE
+  WORST FIGURES COME FROM** (`untrustworthy_text_layer`). `page_needs_ocr`
+  answers whether a page's TEXT is usable, from the text, and is right about the
+  two shapes it was built for. Two real failures are neither, and no content
+  test can see them because both read as language:
+  - **A substitution cipher.** A Bank of America statement — native text, no
+    scan, renders perfectly — extracts as `SEGA&INI`, `an)`, `Be$innin$
+    ba-ance`, `..O. Bo(`. Its subset fonts carry a private `/Differences`
+    encoding (code 38 spells "D", code 33 spells "1") and the ToUnicode CMap
+    covers 23 codes out of hundreds, so extraction falls back to the raw byte.
+    Every `L` an `&`, every `d` a `)`, **and digits as punctuation.** Measured:
+    `page_needs_ocr` trusted **5 of 8 pages, including page 1** — the account
+    summary — so the beginning balance reached extraction corrupted, on a page
+    nothing re-read. That account carries **36** of the firm's 84 hand
+    corrections, the most of any.
+  - **A FONT THAT NAMES ITSELF AN OCR LAYER.** `HiddenHorzOCR` is the invisible
+    face Acrobat writes over a scan; `GlyphLessFont` is Tesseract's. That is the
+    tool **declaring what it did** — the strongest signal here and the one
+    tested first. It needs no corroboration from image coverage, and **one page
+    carrying it condemns the document**, because an OCR tool writes its font on
+    the pages it processed. Found on a Chase Amazon production whose layer reads
+    `Mcl1age your account online`, `w,yw.ct)ooe.com/amazoo`, `Do.vnkm Ille Chase
+    Motie app txlay` — at **0.93 word-like**, because the garbage is ordinary
+    letters. The base-14 rule below **missed it**, for the pointed reason that
+    this font is not one of the base fourteen: a rule written from two specimens
+    did not survive the third.
+  - **Somebody else's OCR over a scan.** A subpoenaed Chase copy, re-scanned,
+    77% image, text layer in Helvetica and Arial: `TIIIS ITE~l IS l'AIIT OF A
+    STA'l'E~IENT COl'Y IIEQlJEST`, one originator id as both `1060013402` and
+    `1860813402`. Word-like ratio **0.70** — above the 0.60 bar, so trusted.
+    27 corrected amounts on that account. **A transposed digit reads as perfect
+    language**, which is why no threshold reaches it: raising the word-like bar
+    to catch it also rejects real registers, whose ACH descriptors are full of
+    non-words by nature (`ID:7300604847`, `CCD`, `Eed:221209`).
+
+  So the verdict is read from the document's **structure** — fonts and image
+  coverage — not its content, the same argument as finding a Bates number by
+  pattern rather than asking a model. **Each detector needs two facts, because
+  one alone is ordinary:** a private encoding is common and harmless when its
+  ToUnicode covers it, so the cipher requires the structure *and* the symptom
+  (punctuation inside words, measured 6.2–13.4 per 1k against a 2.0 floor,
+  0.0 on clean prose); and an image-dominated page is a scan only when it also
+  carries text in nothing but the base-fourteen faces an OCR tool writes —
+  a brand font over an image is a generated page.
+  - **The verdict is per DOCUMENT.** One bad font applies throughout and a
+    production is scanned in one pass, so judging page by page gets the short
+    pages wrong — which is exactly how page 1 above was cleared. Sampled to
+    `_VERDICT_SAMPLE_PAGES`, since reading 396 pages to learn one document-wide
+    fact costs minutes for nothing.
+  - **It does NOT replace `page_needs_ocr`,** which remains the single
+    definition of whether a page's text is usable. The two compose: either one
+    sends a page to vision.
+  - **A distrusted layer is RE-READ, never refused.** The pages render
+    correctly; only the text lies. Tom's call, and it makes the fix free — the
+    vision path already exists and never sees the broken encoding.
+  - Measured across nine real documents from six generators: fires on exactly
+    the two bad ones, 0 false positives. `tests/test_text_layer_trust.py`
+    carries synthetic fixtures (test_data/ is gitignored) plus an opt-in pass
+    over the real specimens that prints SKIPPED rather than passing silently.
+  - **Known gap:** `page_texts` and `source_document_service.route` do not
+    consult it. `page_texts` has no OCR fallback by design, and a scrambled
+    document still routes correctly as "has text" because the statement path
+    re-reads it internally — but the bench's page badges will show the cipher.
 - **Output is sanitized** (`_sanitize`): control characters and lone surrogates are stripped. A NUL from a badly encoded exhibit page makes Postgres reject the entire row (`22P05`, "unsupported Unicode escape sequence"), which fails an ingest *after* all the extraction work is done. Never persist raw extraction output that has not been through this.
 - Logs pages, OCR-page count, and elapsed time at `INFO` — OCR is the dominant cost of an ingest and a slow upload otherwise looks like a hang
 
@@ -915,6 +979,211 @@ statements reachable.**
   documents where nothing is missing.
 
 **A long statement must be read in passes.** One call reliably handles a short statement and reliably gives up on a long one. A 27-page statement of 286 entries came back with 38 — every credit, then fifteen debits, then a closing brace. The JSON was valid, the input was 36,863 characters against a 60,000 ceiling, and the output used about a seventh of its 32,000-token budget: nothing failed, nothing was truncated, the model just stopped. **No limit can be raised to fix that, because no limit was reached.** Above `_MAX_SINGLE_PASS_PAGES` the document is indexed once (accounts, periods, balances, page ranges) and then each statement is walked `_PAGES_PER_CHUNK` pages at a time asking only for transactions, so every answer is small enough that finishing is the easy option. Line numbers are assigned in Python — each pass only ever saw a slice — and every pass is handed the statement period, or a line printed "12/04" has no year.
+
+**THE CLIFF HAS MOVED, AND THE REASON TO CHUNK IS NOT THE ONE WRITTEN ABOVE.**
+Re-measured 2026-10-27 on the same 27-page, 286-entry First Financial statement
+that produced the 38-row failure. Through the chunked path it now reads **286 of
+286, reconciled to 0.00**, with the printed totals tying exactly
+(2,446.84 + 202,100.41 − 195,600.04 = 8,947.21) and **every pass `complete`** —
+the largest chunk used 13% of its ceiling, so nothing came near running out of
+room. Read in **one** document-block call it returned **92,027 tokens** and
+`end_turn`: the early-stop behaviour `_MAX_SINGLE_PASS_PAGES = 6` was calibrated
+against is gone at this length.
+
+So the constant stays, for three reasons that have nothing to do with the
+original one:
+- **WALL CLOCK IS OUTPUT TOKENS DIVIDED BY ~114 PER SECOND, AND NOTHING ELSE.**
+  The single pass took 809s; 92,027 ÷ 113.75 predicts 809s. Of a 1,110-second
+  production job, **1,073s was inside vendor calls and 37s was everything else**
+  — PDF render, storage, Bates detection, 286 inserts, reconciliation, 3.3% of
+  the total. Round trips were never a cost worth removing, so collapsing
+  fourteen of them into one saves nothing: measured, the single pass is 4.7%
+  *slower*, which is exactly its 5.2% larger output.
+- **Chunks parallelise; one call cannot.** Seven independent passes four ways is
+  the only structural headroom there is.
+- **One call has a hard wall at ~38 pages** (3,408 output tokens per page
+  against a 128,000 ceiling) while `_MAX_UPLOAD_PAGES` is **50**, and it puts
+  the whole document at risk in one deadline. A chunk that times out costs one
+  failover — measured, 49s; the production run proves it happens.
+
+The single pass is therefore a **verification instrument** (`scripts/document_pass_lab.py`),
+not a production path: an independent second reading for a disputed statement.
+That script keeps every response to disk *before* parsing, because the case that
+most needs the text is the one where `json.loads` raises, and it prints the row
+count whether or not a truth file was given — `complete` on a *short* answer is
+the whole failure it exists to detect, and the counters cannot show it.
+
+**Right-size a deadline from the distribution of SUCCESSFUL calls — ACROSS MANY
+JOBS, NOT ONE.** In one job the chunk passes took 119, 123, 129, 136 and 149
+seconds while one Anthropic call died at the 300s ceiling having produced
+nothing: **27% of the whole job on one dead call**, before OpenAI answered the
+same chunk in 49s. The reading taken from that — drop the ceiling to about
+200s, since a hung call otherwise burns twice the useful work before failover
+gets a turn — **was wrong, and 300s stays.**
+
+**One job's distribution is not the distribution.** On the same statement a
+later run had that chunk legitimately take **204,190 ms and succeed**, and the
+lab has seen it take 311. A 200s ceiling would have killed a good call and
+failed it over for nothing. The chunk is not special in any way the database
+can see — same rows, same characters, same digit share as its neighbours — it
+simply costs two to three times the tokens, and varies run to run while doing
+it. **Size a per-call deadline off the worst legitimate case you have ever
+measured, not the median of one job**, and remember that the failover being the
+retry argues for a *generous* ceiling on a path where a second vendor is
+waiting: a deadline that fires early does not save time, it spends the whole
+deadline and then spends the next vendor's call as well.
+
+**THE WIRE SHAPE IS NOT THE STORED SHAPE** (`_FLAG_SPEC`, `_LINE_ALIASES`,
+`_normalize_lines`). Since time is output characters, the only lever on import
+duration is how much the model is asked to write — and measured on one real
+196-line extraction, most of it was waste:
+
+| field | share | what it was |
+| ----- | ----- | ----------- |
+| `flags` | 23.4% | 197 objects, **196 of them identical** |
+| `description_lines` | 16.2% | byte-for-byte redundant, 196 of 196 |
+| `description` | 14.6% | the actual content |
+| `bates_number` | 6.2% | 196 asks, **6 distinct answers** |
+| `physical_page_number` | 4.1% | 196 one-character values under a 20-character key |
+
+Trimming takes the payload down **66.4%** — that 809-second pass becomes ~272s,
+and the production job ~300s serial. Five changes, each with its own argument:
+- **`severity` and `field_path` are FUNCTIONS of the code**, because the prompt
+  defines them that way: we were paying the model 306 tokens a row to read back
+  our own lookup table. A flag is now a bare code, and
+  **`_FLAG_SPEC` is the only place the codes are written down — both prompts are
+  BUILT from it** via `<<FLAG_CODES>>`. Stating a set in Python and again in
+  English inside a prompt is precisely how `_CASH_FLOW_ACCOUNTS` drifted; here
+  it would ask for a code nothing can expand.
+- **`description` is DEFINED as the join of `description_lines`** ("the printed
+  description as one line"), so the field was redundant by specification rather
+  than by accident, and nothing renders it. The column stays, so existing rows
+  keep their content, and verbatim line breaks remain recoverable from
+  `raw_text` plus `physical_page_number`.
+- **A Bates stamp is printed once per PAGE, so it is asked once per page**
+  (`bates_by_page`). The chunk prompt now forbids one outright — `bates_service`
+  reads it off the page exactly, and when it detects a series it *discards* the
+  model's answer anyway, so that 6.2% bought a field we throw away.
+- **A null and a missing key mean the same thing here**, so the prompts say to
+  omit either.
+- **Short key names, never integer keys.** Measured, integers bought ~0% over
+  short names (272 chars against 274 on one row) and cost the one property that
+  makes a wrong answer visible to a person reading the JSON. Abbreviated only
+  where it stays pronounceable: `amt`, `desc`, `pg`, `payee`.
+- **ASKING FOR COMPACT JSON IS A NO-OP. TRIED AND MEASURED, 2026-10-28.** The
+  reasoning was good and the arithmetic was right: left to itself a model
+  pretty-prints, `indent=2` measures **1.34×** minified on the trimmed shape
+  against 1.29× on the fat one, so a quarter of the answer should have been
+  whitespace nothing but a parser reads. In production on the same statement it
+  changed **six of seven chunk passes by +1.0% in total** — a 25% saving cannot
+  hide inside that. Either the model already emits compact JSON or it ignores
+  the instruction; either way the paragraph cost attention and bought nothing,
+  and it is gone. `tests/test_wire_schema.py` asserts its absence so the same
+  plausible idea is not re-derived from the same plausible arithmetic.
+- **AND THE MEASUREMENT NEARLY READ THE OTHER WAY, WHICH IS THE REAL LESSON.**
+  On the *totals* that run was **+8.8%** output and **+9.8%** clock, which
+  invites the conclusion that the instruction made things worse. All of it was
+  **one chunk** moving +27.2%. Run-to-run noise on a single pass is larger than
+  the effect being looked for, so **compare per chunk or do not compare at
+  all** — and note that `temperature: 0.0` buys determinism only for an
+  *identical* prompt, which a changed prompt is not.
+
+**Measured in production 2026-10-28** on the same 27-page statement, re-imported
+through the trimmed prompts: **286 of 286 lines, delta 0.00, auto-accepted**,
+286 of 286 Bates numbers, **9 calls, no failover, no dead call, every pass
+`complete`** — and **1,110s → 574s, 48% faster**. The flag expansion is
+confirmed by a detail worth keeping: 149 rows carried `LOCATION_INFERRED` with
+the note *"a city/state was split off the printed description"*, which is
+`_FLAG_SPEC`'s own wording and not something a model emits verbatim 149 times.
+Those flags arrived as bare codes and were expanded from the catalog.
+
+**NEARLY HALF THE OUTPUT IS THINKING NOBODY ASKED FOR, AND ONE CHUNK IS THREE
+QUARTERS.** Settled 2026-10-29 by `reasoning_tokens`, after three wrong readings
+of the same number. On the 27-page First Financial statement:
+
+| pass | output | reasoning | % | answer tok | chars/answer tok |
+| ---- | ------ | --------- | - | ---------- | ---------------- |
+| pages 1-4   |  6,753 |  2,712 | 40% | 4,041 | 1.76 |
+| **pages 5-8** | **23,094** | **17,419** | **75%** | **5,675** | **1.68** |
+| pages 9-12  |  8,759 |  2,592 | 30% | 6,167 | 1.70 |
+| pages 13-16 |  9,772 |  2,926 | 30% | 6,846 | 1.69 |
+| pages 17-20 |  9,043 |  2,931 | 32% | 6,112 | 1.71 |
+| pages 21-24 |  7,853 |  2,167 | 28% | 5,686 | 1.69 |
+| pages 25-27 |  1,397 |    442 | 32% |   955 | 1.73 |
+
+**The answer costs a flat 1.68-1.76 characters per non-reasoning token on every
+chunk.** All of the variance is reasoning: 442-2,931 across the siblings and
+**17,419 on `pages 5-8`, 5.9× the highest of them**. Across the job, **31,204
+of 68,257 output tokens — 46%, about 284 seconds — were reasoning.**
+`_call_anthropic` sends no `thinking` parameter; `claude-opus-5` reasons
+adaptively at its own default, which is `medium`.
+
+**SO THE LEVER IS REAL, AND IT IS `output_config.effort`.** Not `budget_tokens`:
+`thinking: {type: "enabled", budget_tokens: N}` returns **400** on Claude 4.7
+and later, which is every model in these chains. Adaptive thinking is steered by
+`output_config: {effort: ...}` — **not** inside the `thinking` object and **not**
+top-level — over `low | medium | high | xhigh | max`, which is exactly the set
+`reasoning_effort` already carries, so the catalog key needs an Anthropic
+mapping and nothing else. `medium` is the default on Opus 5.5 and Haiku 5.5,
+`high` on most others. Three things that bear on using it: `max_tokens` is the
+hard cap on thinking *plus* answer (128,000 here, and every pass ends
+`end_turn`, so no change needed); changing effort invalidates prompt-cache
+breakpoints, though setting it explicitly to the model's default does not; and
+`display: "omitted"` is **not** a cost lever — it hides the summary and you are
+billed for the reasoning regardless.
+
+**STILL UNEXPLAINED: why that one chunk thinks six times as hard.** Nothing the
+database can see distinguishes it — same rows, same characters, same digit share
+(36.0% against its cheap neighbour's 36.9%), same `REF#` pattern, no checks on
+it. And it is not stable: the same pass has reported 16.7k, 19.4k, 21.3k, 23.1k
+and 28.1k output tokens across runs. Worth knowing rather than chasing.
+
+**THREE WRONG READINGS OF ONE NUMBER, AND WHY EACH FAILED.** This is the most
+useful part of the section, because the mistake was the same every time —
+a ratio compared against a constant from memory instead of one measured here.
+
+1. **"88% of the output never reached the answer, so it is thinking."** Right
+   conclusion, wrong evidence: 0.35 chars per output token was called
+   impossible against **prose's 2.5-3.5**, where this schema's *answer* measures
+   **1.68-1.76** and its whole output measures ~1.29. The arithmetic proved
+   nothing.
+2. **"Not thinking after all, because `thinking_chars` is 0."** The retraction,
+   and it was wrong. Thinking blocks are **not returned on this path**, so the
+   summary everybody would reach for is absent even while reasoning is 75% of
+   the bill. The docs say it outright: *"you are billed for the full thinking
+   process, not the thinking content visible in the response."* **A measurement
+   of the summary is not a measurement of the thinking.**
+3. **Whitespace, read-ahead duplication, content length, the checks table,
+   digit density.** Five more, each killed by data: the reply is 5.2%
+   whitespace; `_slice_body` fences the continuation page and `rows by page`
+   matched the stored counts; the expensive chunk carries *less* description
+   than its neighbour; the checks are on page 25, the cheapest chunk; and every
+   chunk is 30-38% digits with the cheap neighbour higher.
+
+**Only the vendor's own breakdown settled it**, and it had been there all along
+in `output_tokens_details.thinking_tokens`. **Read the vendor's number before
+inferring one** — that is what 049 and the `reasoning_tokens` mapping are for,
+and the fleet-wide version of this table is now one query.
+
+
+**THE READER IS TOLERANT AND NEVER DROPS A FLAG.** One chain is three vendors
+complying to a schema to different degrees, and a flag records an inference
+somebody may have to answer for. A bare code, the short `{"c","n"}` object and
+the original four-key object all read; an unrecognised code is **kept** with
+severity `info` rather than discarded — the same argument as `stop_reason_class`
+mapping an unknown vendor word to `other` instead of guessing. A canonical key
+always beats its alias, so a vendor that answered in long form is not
+second-guessed.
+
+**Nothing downstream changed.** Normalisation runs at the two parse boundaries,
+so `_commit_one`, the date audit, the completeness check and the stored `flags`
+jsonb see exactly what they saw before — verified field by field against a real
+196-line extraction, 196 of 196 identical including flags. The nine existing
+statement suites pass unmodified while still feeding the **old** long-key shape,
+which is the backwards-compatibility proof. Covered by
+`tests/test_wire_schema.py`, which also asserts that every short key the prompts
+name has an alias: one that does not lands in the insert under a name no column
+has, and PostgREST rejects the whole row (PGRST204).
 
 **A printed total's side comes from its sign where the statement gives one,
 not from the word in its key.** `_DEBIT_WORDS` carries "payment" because on a
@@ -1054,14 +1323,29 @@ produced ~40 entries and 17,264 characters cut off mid-array, with `max_tokens`
 at 32,000 and a fraction of it used. Nothing hit a ceiling; the reply simply
 stopped.
 
-**The retry is not a re-roll, and that is load-bearing.** This profile runs at
-`temperature: 0.0`, so a second call on an identical prompt returns the
-identical reply — the only thing making a retry worth anything is that the note
-changes the question. Which is why the note has to name the failure it answers:
-telling a model that ran out of room to escape its quotes more carefully
-addresses nothing. Measured on the same document, a truncation-specific retry
-recovered it **twice out of two**, and the reasoning that said it could not
-("the answer comes back the same length") was wrong for exactly this reason.
+**THE RETRY *IS* A RE-ROLL NOW, AND THE REASONING BELOW IS STALE.** It used to
+rest on the profile's `temperature: 0.0` making a second identical call return
+an identical reply. **That 0.0 never reaches the model that serves this
+profile.** The 5.x Anthropic family rejects `temperature`, so
+`_anthropic_takes_temperature` drops it for `claude-opus-5` — correctly, or the
+call would 400 — and nothing downstream says the determinism went with it.
+Neither can `top_p` be set. Measured on one statement re-imported six times:
+286 lines, 286, 285, 285, then 286 with 27 spurious flags; and reasoning tokens
+on the same pass ranging 0 to 17,419. **Variability on this path is a property
+of the toolset, not a bug to be found.**
+
+Two consequences. The **Retry button is doing real work** — it is a genuine
+second draw, which is why it clears a statement that came in dirty, and that is
+not a workaround but the correct use of the only lever there is. And a
+**different line can go missing on each run**, so a single short import is not
+evidence of a prompt bug: compare across runs before bisecting, which would
+have saved a day here.
+
+The note on a retry still has to name the failure it answers — telling a model
+that ran out of room to escape its quotes more carefully addresses nothing, and
+a truncation-specific retry recovered a measured case **twice out of two**. That
+part stands. What no longer stands is the claim that the note is the *only*
+thing making a retry worth anything.
 
 Splitting is the fallback, not the first move: `_read_pages` halves the page
 range and asks each half, down to a single page — the rule already stated for a
@@ -1217,6 +1501,20 @@ register, its value block states period totals, and those figures never had
 dates. That is `info`, says so, keeps the consequence worth knowing (a
 date-range exhibit will not contain them) and drops the instruction nobody can
 follow.
+
+**A MISSING CODE IS WHY A MODEL MISCODES, and the nearest code is a lie.** With
+nothing in the catalog for a checks-table row printed with a date and an amount
+but **no serial number** — ordinary, since an ARC or electronic check has none —
+the model reached for `AMOUNT_UNCLEAR` and explained itself in the note. That
+left a statement holding a `warn` which asserted a figure was illegible when it
+read **-6,885.66** plainly on the page, and a warn holds the *whole* statement
+in the exceptions queue. It would have fired on every statement carrying such a
+row: the "warning that is always on" again, arrived at from the other
+direction — not a condition stated too broadly, but a vocabulary with a gap in
+it. `CHECK_NUMBER_NOT_PRINTED` is `info`, names `check_number`, and both
+prompts now say in as many words not to call the amount unclear. Every code's
+`field_path` must also be a key in `_CORRECTABLE`, or the flag points at
+nothing a person can go and fix.
 
 Covered by `tests/test_brokerage_cash_flow.py` and
 `tests/test_statement_prompts.py`.
@@ -2821,7 +3119,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Secrets from SSM under an IAM instance role | ✅ Built, opt-in — `CYCLONE_SECRETS_SOURCE=ssm`. Path from the EC2 instance tag, so no bootstrap credential and nothing to typo |
 | Supabase legacy key migration | ⏳ Code is ready and format-agnostic; startup warns with days remaining. **The key swap itself is a dashboard + .env change, deadline end of 2026** |
 | LLM cost pricing + Admin > Costs page | ✅ Built — 041, plus 043 for the **Firm** grouping. Dated `service_rates` priced at read time; spend by month × firm, vendor/model, task, matter, staff or source; missing-price to-do list; atomic set-price and audited corrections. Storage/hosting costs and budgets not started |
-| LLM usage ledger (`llm_calls`) | ✅ Built — 039, plus 042 (who answered) and **046 (why it stopped — `truncated` / `refused` / `complete`, reconciled across three vendor vocabularies)**. Every vendor attempt, normalized across vendors, attributed to firm / job / matter / staff / request / lead. Pricing is built (041); **storage and hosting costs, and budgets, are designed in `docs/cost-tracking-design.md` and not started** |
+| LLM usage ledger (`llm_calls`) | ✅ Built — 039, plus 042 (who answered), 046 (why it stopped — `truncated` / `refused` / `complete`, reconciled across three vendor vocabularies) and **049 (how much of the reply was thinking rather than answer, in characters — 88% of one measured statement chunk, which Anthropic bills inside `output_tokens` and never breaks out)**. Every vendor attempt, normalized across vendors, attributed to firm / job / matter / staff / request / lead. Pricing is built (041); **storage and hosting costs, and budgets, are designed in `docs/cost-tracking-design.md` and not started** |
 | Per-firm settings in a `firms` table | ❌ Not started — `FIRM_NAME`, `REFERRAL_TYPES`, `TIME_INCREMENT_OPTIONS`, `DEFAULT_REFRESH_TRIGGER_PCT` are classified `PER_FIRM` and still served per process from `/api/config`. The multi-tenant blocker |
 | Standard privileges/objections lookup tables | ✅ Seeded |
 | Privacy policy + terms of use pages (for Google OAuth cert) | ✅ Built |
@@ -3199,12 +3497,36 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Retry a rejected ledger insert once | PostgREST names ONE missing column per rejection, so a database behind by two migrations writes nothing. Shed the group and loop (`_LATE_COLUMNS`) |
 | Read a timed-out call as costing nothing | It records no usage, so the SDK's hidden retries generated a ~34,000-token answer three times and left one row with NULL tokens. Spend the Costs page cannot see is spend nobody can question |
 | Extract a rewards or points-activity block | It restates purchases already in the register to report their points, so it charges the card twice. 22 such rows were the whole of one statement's 278.62 delta. The Rewards COLUMN is the tell — its sub-headings are a register's own words |
+| Trust a text layer because it looks like language | A BoA subset font's private encoding made every `L` an `&` and digits punctuation, at 0.72–0.87 word-like; a foreign OCR layer put `1860813402` where `1060013402` belongs, at 0.70. Read the verdict from fonts and image coverage (`untrustworthy_text_layer`) |
+| Raise the word-like bar to catch a bad OCR layer | A real register is full of non-words — `ID:7300604847`, `CCD`, `Eed:221209` — so a bar high enough to catch transposed digits rejects genuine pages. The signal is structural, not textual |
+| Judge a scrambled text layer page by page | The font is document-wide and a production is scanned in one pass. Per-page, 5 of 8 pages cleared — including the one carrying the beginning balance |
+| Flag a private `/Differences` encoding on its own | Plenty of generators subset that way and ship a ToUnicode that covers it. Require the structure AND the symptom, or every one of their pages goes to vision |
+| Refuse an import over a bad text layer | The pages render correctly; only the text lies. Re-read them by OCR — the path already exists and never sees the broken encoding |
 | Return `""` for a page OCR could not read | Leave the marker. A page known to be missing and a page that was blank are not the same fact |
 | Repair only the nulls when a batch comes back with missing dates | A null marks a degraded call; the dates it did produce are equally suspect. Re-read the whole batch's date column |
 | Match a re-read line by its description or amount | Both repeat constantly on a statement. Match by printed position |
 | Assume a checks-summary table repeats debits already listed | On many statements it is the only place the check appears. Skip rows with no printed amount; dedupe the rest |
 | Read a multi-column table straight down one column | Statement tables are column groups read left to right; the extracted text interleaves them |
 | Raise `max_tokens` when an extraction comes back short | Check what it actually used first. A model that stops at a seventh of its budget did not run out of room — split the work instead |
+| Optimise an import by reducing round trips | Measured: 37 of 1,110 seconds sat outside vendor calls, and one call for fourteen was 4.7% SLOWER. Wall clock is output tokens ÷ ~114/s and nothing else |
+| Ask the model for a field whose value your own prompt already fixes | `severity` and `field_path` are functions of the flag code, so 196 rows paid to read back a lookup table — 23.4% of the payload. Derive them (`_FLAG_SPEC`) |
+| State the flag codes in a prompt by hand | Same drift that read a policy statement with bank rules. Build the catalog from `_FLAG_SPEC` via `<<FLAG_CODES>>` |
+| Drop a flag that arrived in an unexpected shape | One chain is three vendors complying differently, and a flag records an inference somebody answers for. Keep an unknown code at `info` |
+| Ask for a per-line Bates number | The stamp is printed per PAGE — 196 asks for 6 answers — and `bates_service` discards every one when it finds a series. `bates_by_page`, or nothing |
+| Use integer keys to shrink a JSON payload | Measured ~0% against short names (272 chars vs 274) and it costs the readability that makes a wrong answer visible. Abbreviate, don't encode |
+| Tell a model to emit compact JSON to save output | Tried: a measured no-op, +1.0% across six of seven chunk passes, though `indent=2` really is 1.34× minified. The paragraph costs attention and buys nothing |
+| Compare two prompt variants on a job's TOTAL output | One outlier chunk moved +27% and made a no-op read as +8.8%. Compare per chunk, or the noise is bigger than the effect |
+| Expect `temperature: 0.0` to make two runs comparable | It gives an identical reply to an *identical* prompt. Change one paragraph and every pass can move by a quarter |
+| Infer a reasoning cost instead of reading `reasoning_tokens` | Every vendor reports it — Anthropic at `output_tokens_details.thinking_tokens`, OpenAI-compatible at `completion_tokens_details.reasoning_tokens`, Gemini at `thoughts_token_count`. Three inferences from the ledger were wrong before anyone read the field |
+| Assume a model only thinks when you ask it to | `_call_anthropic` sends no `thinking` parameter and `claude-opus-5` reasons adaptively at its default. Measured: **46% of a job's output tokens, 75% on one chunk**. Steer it at `output_config.effort`, never `budget_tokens` (400 on 4.7+) |
+| Put an estimated reasoning count in `reasoning_tokens` | Every other vendor fills it with a figure the vendor reported. A derived number in that column is the quiet way a figure stops being evidence. Measure characters (049) and leave the NULL alone |
+| Report "cannot reach the database" as a retryable hiccup | `SupabaseManager()` with no service-role key raises `ValueError` and can never come right inside the process, yet it was retried per row and logged at the 1st, 10th, 100th. Disable and say it once at ERROR, as a missing table already does |
+| Diagnose where output tokens went from the ledger | It cannot say what the tokens SAY. Four hypotheses died against it and two were mine. Reproduce the call and read the reply (`document_pass_lab.py --pages`) |
+| Compare a chars-per-token ratio against the 2.5–3.5 figure for prose | This schema's ANSWER measures a flat **1.68–1.76** and its whole output ~1.29. That mistake made a correct diagnosis look like it rested on an impossibility, and then made the retraction look justified |
+| Size a per-call deadline from one job's successful calls | Those five ran 119–149s, which argued for 200s. The same chunk later took 204s and succeeded. Use the worst legitimate case ever measured |
+| Read a zero `thinking_chars` as "it did not think" | Thinking blocks are NOT returned on this path, so the summary is absent while reasoning is 75% of the bill. A measurement of the summary is not a measurement of the thinking |
+| Size a per-call deadline at a round number | 300s was 2× the slowest real success, so a hung call burned 27% of the job before failover. Size it from the distribution of calls that SUCCEEDED |
+| Discard a lab's response when no truth file was given | That was 809 paid seconds and 92,027 tokens thrown away, and a parse failure is exactly when the text is wanted. Write it down before parsing |
 | Index a long document with one clipped call | 60,000 characters is about eight monthly statements, and the clip was silent. Window it, and stitch the descriptions (`_index_document`) |
 | Detect a missed statement by looking for unclaimed pages | The statement before it absorbs them, so every page has an owner. A page that restarts pagination and begins no indexed statement is the signal |
 | Trust a well-formed extraction because it parsed | Valid JSON says nothing about completeness. Compare it against the totals the statement prints for itself |
@@ -3312,7 +3634,9 @@ Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 | Throw a failed response's raw body as the error | The prose the handler wrote is inside `detail`. `errorMessage()` unwraps it; ~90 display sites showed braces before it existed |
 | `window.open` after an `await` | The popup blocker judges a tab by whether a real click opened it. Open it synchronously, then set `location` |
 | Answer "the PDF is missing" with one 404 | Never stored, purged, and storage-is-down call for three different next moves from whoever clicked |
-| Retry a temperature-0 call without changing the prompt | It returns the identical reply. The retry note is the mechanism, not the second call |
+| Rely on `temperature: 0.0` for a repeatable extraction | The 5.x Anthropic family REJECTS it, so the profile's 0.0 is dropped on the model that serves `extract_account_statement`, and `top_p` cannot be set either. One statement re-imported six times gave 286, 286, 285, 285, 286-with-27-false-flags |
+| Bisect a prompt change off one short import | A DIFFERENT line goes missing each run. Compare line counts across several runs of the same document before blaming a change — that cost a day here |
+| Give a flag code a note that only says what it IS for | "the printed text ran off the page" was read as "ran onto a second line" and flagged 27 of 286 complete descriptions. Where a plausible wrong use exists, exclude it by name — the note is what the model reads |
 | Give a truncated reply the malformed-JSON retry note | It ran out of room; escaping advice answers a different failure. Name the one that happened |
 | Split a range before asking it again | Splitting costs a call per half. The second ask recovered the measured case twice out of two |
 | Discard a split's successful half when its sibling fails | Return the pages that failed, not an exception. The loss is reported page by page |

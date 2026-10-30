@@ -9,7 +9,7 @@ import base64
 import io
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 from PIL import ImageFile, Image
 import pymupdf
 
@@ -73,6 +73,262 @@ def wordlike_ratio(text: str) -> float:
     if not tokens:
         return 0.0
     return sum(1 for t in tokens if _WORDLIKE.match(t)) / len(tokens)
+
+
+#: A punctuation character sitting BETWEEN two letters. Real prose has almost
+#: none of these; a scrambled encoding is full of them, because the mapping
+#: turns letters into punctuation mid-word — "SEGA&INI", "an)", "Be$innin$".
+_INNER_PUNCT = re.compile(r"(?<=[A-Za-z])[$&)(!%*@#](?=[A-Za-z])")
+
+#: Conflicting codes on one page before its font is called scrambled. Not zero:
+#: subsetting legitimately remaps a code or two, and a lone remap is a quirk
+#: rather than a cipher. Measured on the real specimen: 23 to 75 per font.
+_SCRAMBLE_MIN_CODES = 4
+
+#: Inner-punctuation per 1,000 characters before the SYMPTOM is taken as
+#: present. Measured: 6.2 to 13.4 on affected pages, 0.0 on clean text.
+_SCRAMBLE_MIN_INNER_PUNCT = 2.0
+
+#: Share of a page covered by images before it reads as a scan rather than a
+#: generated page. Measured: 77% on a re-scanned production copy carrying a
+#: foreign OCR layer, 0.3% to 13% on every bank-generated page examined.
+_OCR_LAYER_MIN_IMAGE = 0.50
+
+#: The faces an OCR tool writes. A bank's own generator embeds its brand fonts
+#: (Connections, ITC Franklin Gothic, Chase's own); Tesseract and Acrobat write
+#: the base fourteen. Text in nothing but these, over an image-dominated page,
+#: was added by somebody after the fact.
+_BASE14_NAMES = ("helvetica", "times", "courier", "arial", "symbol", "zapf")
+
+#: Fonts that NAME THEMSELVES as an OCR layer. `HiddenHorzOCR` is the invisible
+#: face Acrobat writes over a scan; `GlyphLessFont` is Tesseract's. This is not
+#: an inference — it is the tool declaring what it did, which makes it stronger
+#: than every other signal here and worth testing first.
+#:
+#: Found on a Chase Amazon card production whose text layer reads "Mcl1age your
+#: account online", "w,yw.ct)ooe.com/amazoo", "Do.vnkm Ille Chase Motie app
+#: txlay" — and which scored **0.93 word-like** on page 1, because the garbage
+#: is made of ordinary letters. The base-14 test below missed it precisely
+#: because this font is not one of the base fourteen.
+#: The tool is worth NAMING, not just detecting. Each marker belongs to one
+#: program, so the font attributes a file to the workflow that produced it —
+#: which is what tells somebody whose process to change. Both of this firm's
+#: were real: Acrobat run over a scanned pile before splitting (a pre-Cyclone
+#: habit, done so Egnyte could search the text), and a Tesseract script a
+#: litigation assistant generated to split on "Page 1".
+_OCR_FONT_MARKERS = {
+    "hiddenhorzocr": "Adobe Acrobat",
+    "hiddenvertocr": "Adobe Acrobat",
+    "glyphless": "Tesseract",
+    "ocrmypdf": "OCRmyPDF (Tesseract)",
+    "tesseract": "Tesseract",
+}
+
+
+def ocr_tool(doc: Any, page_no: int) -> Optional[str]:
+    """Which OCR program wrote this page's text layer, if it named itself."""
+    for font in doc.get_page_fonts(page_no):
+        face = font[3].split("+")[-1].lower().replace("-", "").replace(" ", "")
+        for marker, tool in _OCR_FONT_MARKERS.items():
+            if marker in face:
+                return tool
+    return None
+
+#: Pages sampled for the document-level verdict. The fonts and the scanning are
+#: properties of the whole document, so reading every page of a 396-page pile to
+#: learn the same fact would cost minutes for nothing.
+_VERDICT_SAMPLE_PAGES = 8
+
+
+def inner_punct_rate(text: str) -> float:
+    """Punctuation-inside-a-word, per 1,000 characters. The scrambling symptom."""
+    if not text:
+        return 0.0
+    return 1000.0 * len(_INNER_PUNCT.findall(text)) / len(text)
+
+
+def scrambled_encoding(doc: Any, page_no: int) -> int:
+    """
+    Codes this page's fonts remap to a DIFFERENT character than they spell.
+
+    A subset font may carry its own ``/Differences`` encoding where code 38
+    ("&") means "D" and code 33 ("!") means "1". That is ordinary, and harmless
+    while the font also ships a ToUnicode CMap covering it. The specimen's
+    covered 23 codes out of hundreds, so extraction fell back to the raw byte
+    and produced a one-to-one substitution cipher: every ``L`` an ``&``, every
+    ``d`` a ``)``, every ``g`` a ``$``, and digits as punctuation.
+
+    The glyphs are right — the page RENDERS correctly — so the repair is to read
+    the image rather than the text, and the only hard part is noticing.
+
+    :return: Count of conflicting codes; 0 when the encoding is unremarkable.
+    """
+    conflicts = 0
+    for font in doc.get_page_fonts(page_no):
+        try:
+            obj = doc.xref_object(font[0])
+        except Exception:  # noqa: BLE001 — a font we cannot read is not a verdict
+            continue
+        found = re.search(r"/Differences\s*\[(.*?)\]", obj, re.S)
+        if not found:
+            continue
+        code = None
+        for number, name in re.findall(r"(\d+)|/([A-Za-z0-9_.]+)", found.group(1)):
+            if number:
+                code = int(number)
+                continue
+            if code is None:
+                continue
+            # A glyph named uniXXXX states its own Unicode outright, which is
+            # what makes the comparison exact rather than a guess.
+            if name.startswith("uni") and len(name) >= 7:
+                try:
+                    spelled = chr(int(name[3:7], 16))
+                except ValueError:
+                    spelled = None
+                if spelled and 33 <= code < 127 and spelled != chr(code):
+                    conflicts += 1
+            code += 1
+    return conflicts
+
+
+def foreign_ocr_layer(doc: Any, page_no: int, text: str) -> bool:
+    """
+    Is this page a SCAN carrying text somebody else's OCR put there?
+
+    Three facts together, none sufficient alone: the page is mostly image, it
+    has a text layer worth trusting by the ordinary test, and that text is set
+    in nothing but the base-fourteen faces an OCR tool writes.
+
+    It matters because such a layer is **plausibly wrong**. Measured on a
+    re-scanned Chase production copy: ``TIIIS ITE~l IS l'AIIT OF A STA'l'E~IENT``,
+    one originator id rendered as both ``1060013402`` and ``1860813402``, and a
+    word-like ratio of 0.70 — above the 0.60 bar, so trusted. Twenty-seven
+    amounts on that account have since been corrected by hand. No content test
+    can catch it: a transposed digit reads as perfect language.
+    """
+    import pymupdf  # noqa: PLC0415
+
+    if page_needs_ocr(text):
+        return False          # already going to vision; nothing to add
+    faces = [f[3].split("+")[-1].lower().replace("-", "").replace(" ", "")
+             for f in doc.get_page_fonts(page_no)]
+    if not faces:
+        return False
+
+    # A FONT THAT NAMES ITSELF AN OCR LAYER IS A DECLARATION, not a deduction,
+    # so it needs no corroboration from image coverage. Tested first because it
+    # is the only signal here that cannot be wrong about what it is.
+    if ocr_tool(doc, page_no):
+        return True
+
+    page = doc.load_page(page_no)
+    area = abs(page.rect)
+    if not area:
+        return False
+    covered = sum(abs(pymupdf.Rect(i["bbox"]) & page.rect) for i in page.get_image_info())
+    if covered / area < _OCR_LAYER_MIN_IMAGE:
+        return False
+    return all(any(base in face for base in _BASE14_NAMES) for face in faces)
+
+
+def untrustworthy_text_layer(doc: Any) -> Optional[str]:
+    """
+    Should this document's text layer be disbelieved and the pages re-read?
+
+    **A DOCUMENT-LEVEL VERDICT, deliberately.** Both failures are properties of
+    the whole file — one bad font applies throughout, and a production is
+    scanned in one pass — so judging page by page gets the short pages wrong.
+    On the real specimen the per-page text test cleared 5 of 8 pages, including
+    page 1, which carries the account summary with its digits corrupted: the
+    beginning balance, on a page nothing re-read.
+
+    This does **not** replace ``page_needs_ocr``, which remains the one
+    definition of whether a page's TEXT is usable. It answers a different
+    question — whether the text layer can be believed at all — from the
+    document's structure rather than its content, the same way Bates numbers
+    and account numbers are found by pattern rather than asked of a model. The
+    two compose: either one sends a page to vision.
+
+    :return: A short reason for the log, or None when the layer is fine.
+    """
+    pages = doc.page_count
+    if not pages:
+        return None
+    step = max(1, pages // _VERDICT_SAMPLE_PAGES)
+    sampled = list(range(0, pages, step))[:_VERDICT_SAMPLE_PAGES]
+
+    worst_conflicts, inner, chars = 0, 0, 0
+    declared_ocr, inferred_ocr = 0, 0
+    tools: set[str] = set()
+    for index in sampled:
+        try:
+            text = doc.load_page(index).get_text().strip()
+        except Exception:  # noqa: BLE001
+            continue
+        worst_conflicts = max(worst_conflicts, scrambled_encoding(doc, index))
+        inner += len(_INNER_PUNCT.findall(text))
+        chars += len(text)
+        if not foreign_ocr_layer(doc, index, text):
+            continue
+        tool = ocr_tool(doc, index)
+        if tool:
+            declared_ocr += 1
+            tools.add(tool)
+        else:
+            inferred_ocr += 1
+
+    rate = 1000.0 * inner / chars if chars else 0.0
+    # STRUCTURE AND SYMPTOM TOGETHER. A private encoding on its own is ordinary;
+    # one whose consequence is visible in the extracted text is the cipher.
+    if worst_conflicts >= _SCRAMBLE_MIN_CODES and rate >= _SCRAMBLE_MIN_INNER_PUNCT:
+        return ("font encoding is scrambled (%d remapped codes, %.1f inner-punctuation "
+                "per 1k chars) — the text layer is a substitution cipher" % (worst_conflicts, rate))
+    # A DECLARATION NEEDS ONE PAGE; AN INFERENCE NEEDS A MAJORITY. A font named
+    # HiddenHorzOCR cannot be wrong about what it is, and an OCR tool writes it
+    # on the pages it processed — so one is proof the layer is not the
+    # generator's. The base-14 inference CAN be wrong, and a majority is what
+    # protects the mixed document: a real 396-page production carries 16
+    # genuine scans inside otherwise native pages, and condemning it on those
+    # would turn 28 vision calls into 396.
+    if declared_ocr:
+        return ("text layer was written by %s, which named itself in the fonts (%d of %d "
+                "sampled pages) — its digits cannot be trusted"
+                % (" and ".join(sorted(tools)) or "an OCR tool", declared_ocr, len(sampled)))
+    if inferred_ocr and inferred_ocr >= len(sampled) / 2:
+        return ("text layer looks added by an outside OCR tool over a scan (%d of %d sampled "
+                "pages, base-14 fonts only) — its digits cannot be trusted"
+                % (inferred_ocr, len(sampled)))
+    return None
+
+
+def text_layer_verdict(pdf_bytes: bytes) -> Optional[str]:
+    """
+    ``untrustworthy_text_layer`` for a caller holding bytes rather than a document.
+
+    The survey job and the bench reach this from page features, where there is
+    no open document to pass. Opening one costs nothing against the verdict's
+    own work — it samples a handful of pages and reads their fonts.
+
+    **Returns None rather than raising on an unopenable file.** A verdict is an
+    opinion about a text layer; a file that cannot be opened has no text layer
+    to hold an opinion about, and that is `page_texts`' error to report.
+
+    :param pdf_bytes: Raw PDF file content.
+    :return: A short reason the layer cannot be believed, or None.
+    """
+    import pymupdf  # noqa: PLC0415
+
+    try:
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("pdf_service.text_layer_verdict: could not open the PDF (%s)",
+                       type(e).__name__)
+        return None
+    try:
+        return untrustworthy_text_layer(doc)
+    finally:
+        doc.close()
 
 
 def page_needs_ocr(text: str) -> bool:
@@ -277,11 +533,30 @@ class PDFService:
         page_num = 0
         ocr_pages = 0
         started = time.monotonic()
+
+        # A TEXT LAYER CAN BE PRESENT, WORD-LIKE, AND WRONG. Two real shapes:
+        # a subset font whose encoding is a substitution cipher, and somebody
+        # else's OCR laid over a scan. Both read as language, so no content test
+        # sees them; both are visible in the document's structure. When the
+        # verdict comes back, every page is re-read from the image — the pages
+        # render correctly, it is only the text that lies.
+        distrusted = untrustworthy_text_layer(doc)
+        if distrusted:
+            # The page count is in the line because it IS the cost: one vision
+            # call per page, where a trusted layer costs none. Measured on a
+            # real 396-page production carrying a foreign OCR layer, this turns
+            # 28 calls into 396. Bounding the volume belongs at the entry point
+            # that accepted the document — this says plainly what is about to
+            # happen, so the bill is never a surprise.
+            LOGGER.warning(
+                "pdf_service.extract_text: distrusting the text layer and reading all %d "
+                "page(s) by OCR — %s", doc.page_count, distrusted)
+
         page: pymupdf.Page
         for page in doc:
             page_num += 1
             text = page.get_text().strip()  # type: ignore[union-attr]
-            if not page_needs_ocr(text):  # type: ignore[union-attr]
+            if not distrusted and not page_needs_ocr(text):  # type: ignore[union-attr]
                 LOGGER.debug("pdf_service: page %s text extraction ok (%s chars)", page_num, len(text))  # type: ignore[union-attr]
                 pages.append(text)  # type: ignore[union-attr]
             else:

@@ -161,14 +161,26 @@ def normalize(vendor: str, usage: Any) -> dict[str, Optional[int]]:
         return empty
 
     if vendor == "anthropic":
-        # input_tokens already EXCLUDES the cache; output_tokens INCLUDES
-        # extended thinking, which is not broken out.
+        # input_tokens already EXCLUDES the cache. output_tokens INCLUDES
+        # thinking and remains the authoritative billing total.
+        #
+        # THINKING *IS* BROKEN OUT, in `output_tokens_details.thinking_tokens`
+        # -- a read-only observability breakdown, always <= output_tokens, and
+        # present on non-streaming responses (when streaming it arrives only on
+        # the final message_delta, which this service does not use). This was
+        # read as unavailable for a session, which left 88% of one statement
+        # chunk's billed output unexplained; see 049.
+        #
+        # It reports the RAW reasoning the model generated, which is the figure
+        # that was billed -- not the summarized thinking text the response body
+        # carries. Those two differ by a lot, which is why characters off the
+        # blocks cannot stand in for it.
         return {
             "input_uncached_tokens": _num(usage, "input_tokens"),
             "input_cache_read_tokens": _num(usage, "cache_read_input_tokens"),
             "input_cache_write_tokens": _num(usage, "cache_creation_input_tokens"),
             "output_tokens": _num(usage, "output_tokens"),
-            "reasoning_tokens": None,
+            "reasoning_tokens": _num(usage, "output_tokens_details", "thinking_tokens"),
         }
 
     if vendor == "gemini":
@@ -348,6 +360,61 @@ def stop_of(vendor: str, response: Any) -> Optional[str]:
 # and the loop reads it back when it records the attempt. Same thread, same
 # context, so a plain ContextVar set is visible to the caller on return.
 
+#: Response block types that are thinking, and the attribute each carries it in.
+#:
+#: `redacted_thinking` holds encrypted bytes rather than readable text, and its
+#: length is counted all the same: it was generated and it was billed, and a
+#: reply whose reasoning came back redacted must not read as a reply that did
+#: not reason.
+_THINKING_BLOCKS = {"thinking": "thinking", "redacted_thinking": "data"}
+
+
+def blocks_of(vendor: str, response: Any) -> tuple[Optional[int], Optional[int]]:
+    """
+    Characters of thinking SUMMARY in a reply, and characters of answer.
+
+    **THE FIRST NUMBER IS NOT A MEASURE OF THINKING, AND READING IT AS ONE IS A
+    MISTAKE THIS DOCSTRING EXISTS TO PREVENT.** Anthropic returns thinking as a
+    *summary* of the reasoning, not the reasoning: "you are billed for the full
+    thinking process, not the thinking content visible in the response", and the
+    two differ by a lot. So this systematically understates, and under
+    ``display: "omitted"`` it would be zero on a reply that thought hard.
+
+    **The real figure is ``reasoning_tokens``**, which `normalize` reads from
+    Anthropic's ``output_tokens_details.thinking_tokens`` and Gemini's
+    ``thoughts_token_count``. Use that for cost and for the thinking share.
+
+    What these two are still good for: ``text_chars`` is the answer's true
+    length, which is the only way to sanity-check a reply against its token
+    count — a chunk that reported 28,056 output tokens for 9,774 characters of
+    answer is 0.35 chars per token, where text runs 2.5 to 3.5, and that
+    arithmetic is what exposed the thinking in the first place. A non-zero
+    ``thinking_chars`` is NOT a yes/no that the model reasoned, which is what
+    this docstring first claimed. **Measured: it is 0 on every call of a
+    statement walk where ``reasoning_tokens`` shows reasoning at 28-75% of
+    output.** Thinking blocks are simply not returned on this path. A non-zero
+    value still means the model reasoned; a zero means nothing at all.
+
+    ``(None, None)`` for a vendor whose replies are not block-shaped, because a
+    zero would assert that a reply carried no thinking when nothing looked.
+
+    :return: ``(thinking_chars, text_chars)``.
+    :rtype: tuple[Optional[int], Optional[int]]
+    """
+    content = getattr(response, "content", None)
+    if not isinstance(content, (list, tuple)):
+        return None, None
+
+    thinking = answer = 0
+    for block in content:
+        kind = getattr(block, "type", None)
+        if kind == "text":
+            answer += len(getattr(block, "text", None) or "")
+        elif kind in _THINKING_BLOCKS:
+            thinking += len(getattr(block, _THINKING_BLOCKS[kind], None) or "")
+    return thinking, answer
+
+
 def _nothing_noted() -> dict[str, Any]:
     return {
         "counts": {field: None for field in USAGE_FIELDS},
@@ -356,6 +423,8 @@ def _nothing_noted() -> dict[str, Any]:
         "vendor_response_id": None,
         "stop_reason": None,
         "stop_reason_class": None,
+        "thinking_chars": None,
+        "text_chars": None,
     }
 
 
@@ -402,6 +471,11 @@ def note_response(vendor: str, response: Any) -> None:
     except Exception as e:  # noqa: BLE001
         LOGGER.warning("llm_usage: could not read usage from a %s response (%s)",
                        vendor, type(e).__name__)
+    try:
+        noted["thinking_chars"], noted["text_chars"] = blocks_of(vendor, response)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("llm_usage: could not measure the blocks of a %s response (%s)",
+                       vendor, type(e).__name__)
     _NOTED.set(noted)
 
 
@@ -428,6 +502,11 @@ _LATE_COLUMNS = (
         ("stop_reason", "stop_reason_class"), "046_stop_reason.sql",
         "usage is recorded WITHOUT why the vendor stopped, so a truncated reply and a "
         "refusal cannot be told apart from a complete one"),
+    _LateColumns(
+        ("thinking_chars", "text_chars"), "049_thinking_measurement.sql",
+        "usage is recorded WITHOUT how much of the reply was thinking rather than "
+        "answer, which on one measured statement chunk was 88% of the billed output "
+        "and 276 of its 311 seconds"),
 )
 
 
@@ -514,6 +593,24 @@ class _DatabaseWriter:
                         "llm_usage: the llm_calls table does not exist. Run "
                         "db/migrations/039_cost_tracking.sql. LLM usage is NOT being "
                         "recorded by this process until it restarts.")
+                    continue
+                # NO CREDENTIALS IS THE SAME SHAPE OF FAILURE AS NO TABLE, AND
+                # WAS BEING REPORTED AS A HICCUP. `SupabaseManager()` raises
+                # ValueError when the URL or the service-role key is empty, and
+                # that cannot come right inside this process -- settings are
+                # read once at import. Retrying it per row logged a WARNING at
+                # 1, 10, 100 and every 1000th row, which reads as an
+                # intermittent database problem rather than "this node is not
+                # recording spend at all". Matched on the message rather than
+                # the type, narrowly, because a bare ValueError from anywhere
+                # else really may be transient.
+                if isinstance(e, ValueError) and "SUPABASE_SERVICE_ROLE_KEY" in text:
+                    self._disabled = True
+                    LOGGER.error(
+                        "llm_usage: no Supabase service-role credentials, so the ledger "
+                        "cannot be written. LLM usage is NOT being recorded by this "
+                        "process until it restarts with SUPABASE_URL and "
+                        "SUPABASE_SERVICE_ROLE_KEY set.")
                     continue
                 self._failures += 1
                 repo = None   # a broken connection is rebuilt on the next row
@@ -621,6 +718,8 @@ def record_attempt(
             duration_ms=duration_ms,
             stop_reason=noted["stop_reason"],
             stop_reason_class=noted["stop_reason_class"],
+            thinking_chars=noted["thinking_chars"],
+            text_chars=noted["text_chars"],
             usage_raw=noted["raw"],
             **noted["counts"],
         )

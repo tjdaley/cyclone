@@ -1,0 +1,115 @@
+-- 049_thinking_measurement.sql
+--
+-- Measure how much of a reply was thinking rather than answer.
+--
+-- RUN BY HAND, after 048. Safe to run before or after deploying the code that
+-- writes these columns: code that finds them missing records usage without them
+-- and says so at ERROR, naming this file. Safe to run twice.
+--
+-- ── NINE TENTHS OF ONE CALL'S OUTPUT WAS THINKING, AND NOTHING COULD SAY SO ──
+--
+-- Measured 2026-10-28 by reproducing one chunk of a statement walk exactly
+-- (scripts/document_pass_lab.py --pages 5-8). The reply was 9,774 characters.
+-- The vendor reported 28,056 output tokens. That is 0.35 characters per token,
+-- where ordinary text runs 2.5 to 3.5 -- so roughly 24,800 tokens, about 88%,
+-- never appeared in the answer at all. At the measured ~90 tok/s that is some
+-- 276 of the call's 311 seconds spent on content the reply does not contain.
+--
+-- `_call_anthropic` sends no `thinking` parameter. The model reasons anyway.
+-- `_anthropic_text` has existed for a year precisely because a ThinkingBlock
+-- arrives first and indexing `content[0].text` raised AttributeError -- the
+-- same fact, read from the other end, and nobody connected it to the clock.
+--
+-- ── CORRECTION, 2026-10-29: reasoning_tokens IS AVAILABLE AFTER ALL ──────────
+--
+-- The paragraph below was written on the belief that Anthropic does not report
+-- thinking separately. IT DOES: `usage.output_tokens_details.thinking_tokens`,
+-- a read-only observability breakdown, always <= output_tokens, present on
+-- non-streaming responses. `llm_usage.normalize` now reads it, so
+-- reasoning_tokens is populated for Anthropic as it already was for Gemini, and
+-- THAT is the figure to use for cost and for the thinking share.
+--
+-- Which also demotes thinking_chars, and the reason matters: Anthropic returns
+-- thinking as a SUMMARY, not as the reasoning. "You are billed for the full
+-- thinking process, not the thinking content visible in the response." So
+-- counting characters off the blocks systematically understates, and under
+-- `display: "omitted"` it would read as zero on a reply that thought hard.
+--
+-- The columns are kept, with their jobs narrowed rather than invented:
+--   text_chars      the answer's true length, which is the only way to
+--                   sanity-check a reply against its token count -- 28,056
+--                   output tokens for 9,774 characters is 0.35 chars/token
+--                   where text runs 2.5 to 3.5, and that arithmetic is what
+--                   exposed the thinking at all
+--   thinking_chars  a cheap yes/no that the model reasoned on this call, for a
+--                   vendor that reports no token breakdown
+--
+-- The DDL is unchanged and already applied; only this explanation was wrong.
+--
+-- ── WHY NOT reasoning_tokens (the original, mistaken, reasoning) ─────────────
+--
+-- Because Anthropic does not report it. `usage` carries input_tokens,
+-- output_tokens and the two cache figures, and thinking is counted INSIDE
+-- output_tokens without being broken out. llm_usage.normalize therefore maps
+-- reasoning_tokens to NULL for this vendor and that is correct: a NULL means
+-- the vendor did not say, never that no thinking happened. Writing an estimate
+-- there would put a derived number in a column every other vendor fills with a
+-- reported one, which is the quiet way a figure stops being evidence.
+--
+-- Gemini is the opposite case and needs nothing from this migration: it reports
+-- thoughts_token_count, which normalize already reads and adds into output.
+--
+-- ── SO: CHARACTERS, WHICH ARE OURS AND ARE FACTS ─────────────────────────────
+--
+-- Both counts are measured off the response's own content blocks, in the same
+-- place and at the same moment as the served model and the stop reason:
+--
+--   thinking_chars  characters in `thinking` blocks, plus the payload length of
+--                   `redacted_thinking` blocks, which carry encrypted bytes
+--                   rather than text but are still generation that was billed
+--   text_chars      characters in `text` blocks -- the answer itself
+--
+-- Two columns rather than one, because the SHARE is the question and a share
+-- needs a denominator that makes no assumption. thinking_chars alone would have
+-- to be compared against output_tokens through a characters-per-token ratio,
+-- and that ratio is exactly the thing being measured. With both:
+--
+--   select profile,
+--          count(*)                                        as calls,
+--          sum(thinking_chars)                             as thinking,
+--          sum(text_chars)                                 as answer,
+--          round(100.0 * sum(thinking_chars)
+--                / nullif(sum(thinking_chars + text_chars), 0), 1) as pct_thinking
+--     from llm_calls
+--    where occurred_at >= now() - interval '7 days'
+--      and thinking_chars is not null
+--    group by 1 order by pct_thinking desc nulls last;
+--
+-- NULL and 0 are deliberately different, as everywhere else in this ledger: a
+-- NULL is a call recorded before this migration or by a vendor whose blocks we
+-- do not walk, and a 0 is a reply that genuinely carried no thinking. Reading
+-- the first as the second would report a fleet-wide absence of thinking that is
+-- merely an absence of measurement.
+--
+-- ── THE VIEWS ARE DELIBERATELY NOT TOUCHED ───────────────────────────────────
+--
+-- Same reasoning as 046. llm_call_costs and llm_unpriced_meters select explicit
+-- column lists, and these are diagnostics, not cost dimensions -- the spend is
+-- already priced correctly, because output_tokens includes the thinking. What
+-- was missing was not the money but the explanation. Query llm_calls directly.
+--
+-- No new table, no new view, no new function, so 040's RLS stands unchanged.
+
+begin;
+
+alter table llm_calls add column if not exists thinking_chars integer;
+alter table llm_calls add column if not exists text_chars     integer;
+
+-- Only the rows that measured something. The overwhelming majority of calls
+-- will carry a 0 here once a non-thinking model serves them, and nobody queries
+-- for those; the ones worth finding are the replies that thought.
+create index if not exists idx_llm_calls_thinking
+    on llm_calls (profile, occurred_at)
+    where thinking_chars > 0;
+
+commit;

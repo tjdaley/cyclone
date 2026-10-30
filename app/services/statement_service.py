@@ -184,7 +184,10 @@ else is given. The table is laid out in COLUMN GROUPS read left to right
 (Date/Number/Amount, then Date/Number/Amount again on the same rows), which the
 extracted text interleaves into one sequence — read it as repeating triples. A
 row whose amount is not a printed figure ("-See above-", blank) is already
-itemised in the debit list; skip it or you will double-count.
+itemised in the debit list; skip it or you will double-count. A row with a date
+and an amount but NO serial number is still an ordinary check — extract it,
+leave the check number off, and flag CHECK_NUMBER_NOT_PRINTED. Its amount is
+printed plainly, so do not call it unclear.
 
 BROKERAGE AND RETIREMENT ACCOUNTS — A DIFFERENT RULE ABOUT WHAT COUNTS. On
 those account types, extract money that CROSSED THE ACCOUNT BOUNDARY and nothing
@@ -284,32 +287,39 @@ statement object has:
   so a figure you calculated rather than read defeats the check entirely.
 - securities_transactions_omitted: integer, how many buy/sell/redemption rows
   you deliberately passed over on this statement. 0 for a non-brokerage account.
-- transactions: array, in printed order. Each has:
-  - line_no: 1-based integer
-  - transaction_date: "YYYY-MM-DD" or null
-  - posted_date: "YYYY-MM-DD" or null
-  - date_provenance: "printed" if the full date was printed, "derived" if you
-    inferred the year from the statement period, "unknown" otherwise
-  - description: the printed description as one line
-  - description_lines: array of the raw printed lines for this entry
-  - counterparty: the merchant or payee with card noise removed, or null.
-    "FSP*PILOT POINT FEED S PILOT POINT TX" has counterparty "Pilot Point Feed".
-  - location: trailing "City ST" if present, else null
-  - amount: SIGNED number — see the sign rule below
-  - running_balance: number or null, only if the statement prints one per line
-  - physical_page_number: integer. The document text is broken up by lines of
-    the form "<<<PAGE 7>>>". Report the number from the marker that most
-    recently preceded this transaction. Null only if no marker precedes it.
-  - check_number: string or null. Set it whenever a check number is printed for
-    the entry, wherever it appears — "ARC CHECK # 2487" in the debit list and a
-    row of the checks table are both checks. As printed, without any trailing
-    asterisk.
-  - bates_number: string or null. Productions are stamped with a Bates number in
-    a corner of every page, e.g. "KF-000142", "SMITH 0087". If the page this
-    line appears on carries one, copy it EXACTLY as printed, prefix and leading
-    zeros included. If the page is unstamped, return null — never construct,
-    guess, or extrapolate a Bates number from a neighbouring page.
-  - flags: array of {code, severity, field_path, note} objects
+- bates_by_page: object or null. Productions are stamped with a Bates number in
+  a corner of every page, e.g. "KF-000142", "SMITH 0087". Give the stamp ONCE
+  PER PAGE, keyed by the page number: {"3": "KF-000142", "4": "KF-000143"}.
+  Copy each EXACTLY as printed, prefix and leading zeros included. Omit a page
+  that carries no stamp, and return null if the document is unstamped — never
+  construct, guess, or extrapolate a number from a neighbouring page.
+- transactions: array, in printed order. **OMIT ANY KEY WHOSE VALUE WOULD BE
+  null OR AN EMPTY ARRAY** — a missing key and a null mean the same thing here,
+  and the shorter answer is the one that finishes. Each entry has:
+  - n: 1-based integer, the printed sequence
+  - date: "YYYY-MM-DD", the transaction date
+  - posted: "YYYY-MM-DD", only if a separate posted date is printed
+  - dprov: "printed" if the full date was printed, "derived" if you inferred
+    the year from the statement period, "unknown" otherwise
+  - desc: the printed description as one line. Where an entry's text is printed
+    over several lines, join them with single spaces — do not report the
+    individual lines, which carry nothing the joined form does not.
+  - payee: the merchant or payee with card noise removed.
+    "FSP*PILOT POINT FEED S PILOT POINT TX" has payee "Pilot Point Feed".
+  - loc: trailing "City ST" if present
+  - amt: SIGNED number — see the sign rule below
+  - bal: number, only if the statement prints a running balance per line
+  - pg: integer. The document text is broken up by lines of the form
+    "<<<PAGE 7>>>". Report the number from the marker that most recently
+    preceded this transaction.
+  - chk: string, whenever a check number is printed for the entry, wherever it
+    appears — "ARC CHECK # 2487" in the debit list and a row of the checks
+    table are both checks. As printed, without any trailing asterisk.
+  - f: array of flag CODES, e.g. ["YEAR_INFERRED"]. Bare strings, not objects:
+    each code already fixes its own severity and the field it concerns, so
+    repeating those adds nothing. Where you need to say something the code does
+    not already say, use {"c": "CODE", "n": "what you observed"} for that one
+    flag only.
 
 SIGN RULE — this is the most important field. Sign each amount by how it moves
 the balance the institution prints:
@@ -323,14 +333,9 @@ change in market value as one of the amounts — never against the cash balance.
 If your amounts do not satisfy that, re-check the signs before answering. Do NOT
 add, drop, or alter a transaction to force it to balance — report what is printed.
 
-FLAGS — record every inference you make. Use severity "info" for a routine
-derivation and "warn" for something a human should look at. Codes:
-  - YEAR_INFERRED       the line printed MM/DD and you took the year from the period
-  - LOCATION_INFERRED   you split a city/state off the description
-  - SIGN_ASSUMED        the direction was not explicit and you inferred it
-  - AMOUNT_UNCLEAR      the figure is smudged, cut off, or ambiguous
-  - DESCRIPTION_TRUNCATED the printed text ran off the page
-Set field_path to the field the flag is about, e.g. "transaction_date".
+FLAGS — record every inference you make, as a bare code. Each code already
+carries its own severity and the field it concerns, so do not send either.
+<<FLAG_CODES>>
 
 If the document is not an account statement at all, return {"statements": []}.
 
@@ -445,25 +450,34 @@ and filing them here puts one person's money in another account's history.
 
 Return ONLY a valid JSON object of the form
 {"transactions": [ ... ], "securities_transactions_omitted": 0}, in printed
-order. The count is for brokerage accounts and is 0 everywhere else. Each
-transaction has:
-  - transaction_date: "YYYY-MM-DD" or null
-  - posted_date: "YYYY-MM-DD" or null
-  - date_provenance: "printed" if the full date was printed, "derived" if you
-    took the year from the statement period, "unknown" otherwise
-  - description: the printed description as one line
-  - description_lines: the raw printed lines for this entry
-  - counterparty: the merchant or payee with card noise removed, or null
-  - location: trailing "City ST" if present, else null
-  - amount: SIGNED number — see the sign rule below
-  - running_balance: number or null, only if printed per line
-  - check_number: string or null. Set it whenever a check number is printed for
-    the entry, wherever it appears — "ARC CHECK # 2487" in the debit list and a
-    row of the checks table are both checks. As printed, without any trailing
-    asterisk.
-  - physical_page_number: the number from the "<<<PAGE n>>>" marker most
-    recently preceding this transaction
-  - flags: array of {code, severity, field_path, note} objects
+order. The count is for brokerage accounts and is 0 everywhere else.
+
+**OMIT ANY KEY WHOSE VALUE WOULD BE null OR AN EMPTY ARRAY** — a missing key
+and a null mean the same thing here, and the shorter answer is the one that
+finishes. Each transaction has:
+  - date: "YYYY-MM-DD", the transaction date
+  - posted: "YYYY-MM-DD", only if a separate posted date is printed
+  - dprov: "printed" if the full date was printed, "derived" if you took the
+    year from the statement period, "unknown" otherwise
+  - desc: the printed description as one line. Where an entry's text is printed
+    over several lines, join them with single spaces — do not report the
+    individual lines, which carry nothing the joined form does not.
+  - payee: the merchant or payee with card noise removed
+  - loc: trailing "City ST" if present
+  - amt: SIGNED number — see the sign rule below
+  - bal: number, only if a running balance is printed per line
+  - chk: string, whenever a check number is printed for the entry, wherever it
+    appears — "ARC CHECK # 2487" in the debit list and a row of the checks
+    table are both checks. As printed, without any trailing asterisk.
+  - pg: the number from the "<<<PAGE n>>>" marker most recently preceding this
+    transaction
+  - f: array of flag CODES, e.g. ["YEAR_INFERRED"]. Bare strings, not objects.
+    Where you need to say something a code does not already say, use
+    {"c": "CODE", "n": "what you observed"} for that one flag only.
+
+Do NOT report a Bates number. The stamp is read from the page by a separate
+pass that does it exactly, and a number guessed for an unstamped page is a
+citation to a document nobody can find.
 
 SIGN RULE. Sign each amount by how it moves the balance the institution prints:
   * Deposit, credit, interest earned, dividend  -> POSITIVE
@@ -478,6 +492,10 @@ Extract every priced row as a transaction:
   - amount NEGATIVE (a check reduces the balance)
   - check_number set to the number as printed, without any trailing asterisk
   - description "Check 2495" when nothing else is printed for it
+  - a row with a date and an amount but NO serial number is still an ordinary
+    check: extract it, leave the check number off, and flag
+    CHECK_NUMBER_NOT_PRINTED. Its amount is printed plainly, so do not call it
+    unclear.
 
 Two things about that table:
   * It is laid out in COLUMN GROUPS read left to right — typically
@@ -592,9 +610,9 @@ A date column beside an amount column does not make a table a register. Ask
 whether the row moved the balance. A check did; a running balance did not, and
 neither did a purchase counted again for its points.
 
-FLAGS — record every inference. severity "info" for a routine derivation, "warn"
-for something a human should look at. Codes: YEAR_INFERRED, LOCATION_INFERRED,
-SIGN_ASSUMED, AMOUNT_UNCLEAR, DESCRIPTION_TRUNCATED.
+FLAGS — record every inference you make, as a bare code. Each code already
+carries its own severity and the field it concerns, so do not send either.
+<<FLAG_CODES>>
 
 If these pages carry no transactions at all, return
 {"transactions": [], "securities_transactions_omitted": 0}.
@@ -610,18 +628,255 @@ Respond ONLY with the JSON object. No markdown fences, no explanation.\
 # Past this, a PDF is more likely to be a production than a single statement.
 # Only a warning: a combined statement legitimately runs long, and one holding
 # five accounts is ordinary input.
+# =============================================================================
+# THE WIRE SHAPE IS NOT THE STORED SHAPE, AND THE REASON IS CLOCK TIME.
+#
+# Measured three independent ways: the wall clock of a statement read is its
+# OUTPUT TOKENS divided by ~114 per second, and nothing else. A 27-page
+# statement read in one pass emitted 92,027 tokens in 809 seconds — predicted
+# from the token count to the second — and the same document through the
+# chunked path emitted 87,513 in 773 seconds of useful model time. Round trips,
+# input size and parsing are all noise beside that. So the only lever on how
+# long an import takes is how many characters the model is asked to write.
+#
+# Measured on one real 196-line extraction, the old schema spent its payload
+# like this:
+#
+#   flags                23.4%   197 flag objects, 196 of them IDENTICAL
+#   description_lines    16.2%   byte-for-byte redundant, 196 of 196
+#   description          14.6%   the actual content
+#   bates_number          6.2%   196 asks, 6 distinct answers
+#   physical_page_number  4.1%   196 values of one character, under a 20-char key
+#
+# Four of those five are waste, and trimming them takes the payload down by
+# 66.4% — which takes that 809-second pass to about 272 seconds.
+#
+# Three rules hold this together:
+#
+#   * `_FLAG_SPEC` IS THE ONLY PLACE THE CODES ARE WRITTEN DOWN, and the
+#     prompts are BUILT from it. Stating a set in Python and again in English
+#     inside a prompt is exactly how `_CASH_FLOW_ACCOUNTS` drifted: the checks
+#     moved to a new account type and the prompt did not, so a policy statement
+#     was read with bank rules and checked with brokerage rules. The same
+#     mistake here would ask for a code nothing can expand.
+#   * THE READER IS TOLERANT AND NEVER DROPS A FLAG. One chain is three
+#     vendors, they comply with a schema to different degrees, and an answer
+#     recorded against evidence must not lose an inference because it arrived
+#     in last month's shape. A bare code, the short object, and the old long
+#     object all read; an unrecognised code is kept with severity "info"
+#     rather than discarded, the same argument as `stop_reason_class` mapping
+#     an unknown word to `other` instead of guessing at it.
+#   * NOTHING DOWNSTREAM CHANGES. Normalisation restores the canonical keys at
+#     the parse boundary, so `_commit_one`, the date audit, the completeness
+#     check and the stored `flags` jsonb see precisely what they saw before.
+#     The short keys exist on the wire and nowhere else.
+# =============================================================================
+
+#: code -> (severity, field_path, the note that adds nothing to the code).
+#:
+#: `severity` and `field_path` were being asked of the model 196 times a
+#: statement, and both are FUNCTIONS of the code — the prompt defines them that
+#: way, so the model was reading back our own lookup table at 306 tokens a row.
+_FLAG_SPEC: dict[str, tuple[str, Optional[str], str]] = {
+    "YEAR_INFERRED": (
+        "info", "transaction_date",
+        "MM/DD printed; year from statement period",
+    ),
+    "LOCATION_INFERRED": (
+        "info", "location",
+        "a city/state was split off the printed description",
+    ),
+    "SIGN_ASSUMED": (
+        "warn", "amount",
+        "the direction was not explicit and was inferred",
+    ),
+    "AMOUNT_UNCLEAR": (
+        "warn", "amount",
+        "the printed figure is smudged, cut off, or ambiguous",
+    ),
+    # "RAN OFF THE PAGE" WAS READ AS "RAN ONTO A SECOND LINE", AND 27 OF 286
+    # COMPLETE DESCRIPTIONS WERE FLAGGED.
+    #
+    # Dropping `description_lines` from the wire removed the one place a
+    # multi-line entry could be *described*, and the prompt now says to join
+    # those lines silently. With nowhere to record the fact and a code whose
+    # note sounded close enough, the model reached for it — the identical
+    # failure as a checks-table row with no serial number reaching for
+    # AMOUNT_UNCLEAR, one change earlier. A `warn` holds the whole statement,
+    # so 27 false ones is "a warning that is always on" for the third time.
+    #
+    # The note is what the model reads — `_flag_catalog` substitutes it into
+    # both prompts — so the fix is to say what the code is NOT for, at no cost
+    # in payload. Spot-checked against the source: every one of the 27 was
+    # complete, including an entry spanning a page break, which is exactly what
+    # the fenced continuation page in `_slice_body` exists to make whole.
+    "DESCRIPTION_TRUNCATED": (
+        "warn", "description",
+        "printed text is CUT OFF and cannot be recovered — never for an entry "
+        "merely printed on several lines, which you join without flagging",
+    ),
+    # A CODE EXISTS HERE BECAUSE THE NEAREST ONE WAS A LIE.
+    #
+    # A checks table routinely prints a row with a date and an amount and no
+    # serial number — an ARC or electronic check has none to print — and the
+    # row is a perfectly ordinary debit. With no code for it the model reached
+    # for AMOUNT_UNCLEAR and explained itself in the note, which left a
+    # statement carrying a `warn` that asserted a figure was illegible when it
+    # read -6,885.66 on the page. A warn holds the whole statement in the
+    # exceptions queue, so that would have fired on every statement with such a
+    # row: the "warning that is always on" failure, and the same shape as
+    # SECURITIES_NOT_EXTRACTED announcing an omission that never happened.
+    #
+    # `info`, therefore. The observation is worth recording — a check is the
+    # one debit that does not say where the money went, and the number is what
+    # a discovery request asks about — but nobody needs to look at it.
+    "CHECK_NUMBER_NOT_PRINTED": (
+        "info", "check_number",
+        "a checks-table row printed a date and amount but no serial number",
+    ),
+}
+
+
+def _flag_catalog() -> str:
+    """The flag list as the prompts print it, so it cannot drift from the spec."""
+    width = max(len(code) for code in _FLAG_SPEC)
+    return "\n".join(
+        "  - %-*s %s" % (width, code, note)
+        for code, (_severity, _field, note) in _FLAG_SPEC.items()
+    )
+
+
+#: Wire key -> stored key. Short names, never integers: measured, integer keys
+#: bought ~0% over short names (272 chars against 274 on one row) and cost the
+#: one property that makes a wrong answer visible to a person reading the JSON.
+#: A key is abbreviated here only where it stays pronounceable.
+_LINE_ALIASES = {
+    "n": "line_no",
+    "date": "transaction_date",
+    "posted": "posted_date",
+    "dprov": "date_provenance",
+    "desc": "description",
+    "payee": "counterparty",
+    "loc": "location",
+    "amt": "amount",
+    "bal": "running_balance",
+    "pg": "physical_page_number",
+    "chk": "check_number",
+    "f": "flags",
+}
+
+
+def _expand_flag(value: Any) -> Optional[dict[str, Any]]:
+    """
+    One flag, in any shape a vendor might send it, as the stored shape.
+
+    Accepts a bare code, the short ``{"c": code, "n": note}``, and the original
+    four-key object. An unknown code keeps whatever it carried rather than
+    being dropped: a flag records an inference somebody may have to answer for,
+    and losing one silently is worse than storing one nobody recognises.
+    """
+    if isinstance(value, str):
+        code, note, severity, field = value.strip(), None, None, None
+    elif isinstance(value, dict):
+        code = str(value.get("c") or value.get("code") or "").strip()
+        note = value.get("n") or value.get("note")
+        severity = value.get("severity")
+        field = value.get("field_path")
+    else:
+        return None
+    if not code:
+        return None
+
+    spec_severity, spec_field, spec_note = _FLAG_SPEC.get(code, ("info", None, ""))
+    return _flag(
+        code,
+        # An explicitly sent severity wins, because a model that bothered to
+        # disagree with the catalog is making a claim about this row.
+        str(severity).strip() if severity else spec_severity,
+        str(note).strip() if note else spec_note,
+        field if field else spec_field,
+    )
+
+
+def _expand_flags(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [f for f in (_expand_flag(v) for v in value) if f]
+
+
+def _normalize_line(line: Any, bates_by_page: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """
+    One transaction as it arrived, in the keys the rest of this module uses.
+
+    A canonical key already present always wins over its alias: a vendor that
+    answered in the long form is not second-guessed.
+    """
+    if not isinstance(line, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in line.items():
+        canonical = _LINE_ALIASES.get(key, key)
+        if canonical in out and key != canonical:
+            continue
+        out[canonical] = value
+    out["flags"] = _expand_flags(out.get("flags"))
+
+    # A Bates stamp is printed once per PAGE, so it is asked once per page.
+    # Per line it was 196 questions for 6 answers, and `bates_service` discards
+    # every one of them whenever it detects a series of its own.
+    existing = out.get("bates_number")
+    if isinstance(existing, str):
+        existing = existing.strip()
+    if bates_by_page and not existing:
+        page = _page_number(out.get("physical_page_number"))
+        if page is not None:
+            stamp = bates_by_page.get(str(page), bates_by_page.get(page))
+            if stamp:
+                out["bates_number"] = stamp
+    return out
+
+
+def _normalize_lines(lines: Any, bates_by_page: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    if not isinstance(lines, list):
+        return []
+    return [line for line in (_normalize_line(l, bates_by_page) for l in lines) if line]
+
+
+def _normalize_statements(parsed: Any) -> Any:
+    """Normalise every statement's lines in a whole-document answer, in place."""
+    if not isinstance(parsed, dict):
+        return parsed
+    for statement in parsed.get("statements") or []:
+        if not isinstance(statement, dict):
+            continue
+        # Taken off the statement, not stored: the per-line `bates_number`
+        # column is where the stamp lives, and `bates_service` overwrites it
+        # outright when it finds a series.
+        by_page = statement.pop("bates_by_page", None)
+        statement["transactions"] = _normalize_lines(
+            statement.get("transactions"), by_page if isinstance(by_page, dict) else None
+        )
+    return parsed
+
+
+
 # ── Fill the prompt sentinels from the enums ────────────────────────────────
 #
 # Done once, here, rather than per call: the values cannot change at runtime and
 # a prompt rebuilt per request is a prompt that can differ between two requests.
 # `tests/test_statement_prompts.py` asserts no sentinel survives and that every
 # AccountType reaches the model.
-_STATEMENT_SYSTEM = _STATEMENT_SYSTEM.replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
+_STATEMENT_SYSTEM = (
+    _STATEMENT_SYSTEM
+    .replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
+    .replace("<<FLAG_CODES>>", _flag_catalog())
+)
 _METADATA_SYSTEM = _METADATA_SYSTEM.replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
 _TRANSACTIONS_SYSTEM = (
     _TRANSACTIONS_SYSTEM
     .replace("<<ACCOUNT_TYPES>>", _ACCOUNT_TYPES)
     .replace("<<CASH_FLOW_TYPES>>", _CASH_FLOW_NAMES)
+    .replace("<<FLAG_CODES>>", _flag_catalog())
 )
 
 _MANY_PAGES = 30
@@ -1518,6 +1773,9 @@ class StatementService:
             _STATEMENT_SYSTEM, body, "statements", "Could not read the statement",
             passes=passes, label="whole document",
         )
+        # The wire shape becomes the stored shape HERE, at the parse boundary,
+        # so nothing downstream knows the schema was ever abbreviated.
+        parsed = _normalize_statements(parsed)
         parsed["extraction"] = _provenance(passes)
         return parsed
 
@@ -2029,7 +2287,11 @@ class StatementService:
                 "Could not read pages %d-%d" % (start, stop),
                 passes=passes, label="pages %d-%d" % (start, stop),
             )
-            found = answer.get("transactions") or []
+            # Normalised before the date audit, the lookahead de-duplication
+            # and the line numbering see it: all three read `transaction_date`
+            # and `amount` by name, and the chunk prompt does not ask for a
+            # Bates stamp at all — `bates_service` supplies those.
+            found = _normalize_lines(answer.get("transactions"))
             omitted = _count(answer.get("securities_transactions_omitted"))
         except UnparseableResponse as e:
             if stop <= start:

@@ -121,6 +121,32 @@ try:
           rows("select column_name from information_schema.columns "
                "where table_name = 'llm_calls' and column_name like 'stop_reason%' "
                "order by column_name"), [["stop_reason"], ["stop_reason_class"]])
+    migration_049 = open(os.path.join(MIGRATIONS, "049_thinking_measurement.sql"),
+                         encoding="utf-8").read()
+    check("049 applies on top, and can be run a second time",
+          [psql(migration_049).returncode for _ in range(2)], [0, 0])
+    check("and llm_calls carries both thinking-measurement columns",
+          rows("select column_name, data_type from information_schema.columns "
+               "where table_name = 'llm_calls' "
+               "and column_name in ('thinking_chars', 'text_chars') "
+               "order by column_name"),
+          [["text_chars", "integer"], ["thinking_chars", "integer"]])
+    # The partial index is the whole reason to have an index here: once a
+    # non-thinking model serves most calls, the rows worth finding are the few
+    # that thought.
+    check("the thinking index is partial",
+          rows("select indexdef like '%%WHERE (thinking_chars > 0)' from pg_indexes "
+               "where indexname = 'idx_llm_calls_thinking'"), [["t"]])
+    # NULL and 0 must stay distinguishable: a NULL is a call nothing measured,
+    # a 0 is a reply that genuinely carried no thinking. Reading the first as
+    # the second reports a fleet-wide absence of thinking that is an absence of
+    # measurement.
+    check("the columns are nullable, so 'not measured' survives",
+          rows("select column_name, is_nullable from information_schema.columns "
+               "where table_name = 'llm_calls' "
+               "and column_name in ('thinking_chars', 'text_chars') "
+               "order by column_name"),
+          [["text_chars", "YES"], ["thinking_chars", "YES"]])
     # 046 touches no view, so unlike 042 it creates no ordering hazard with 041
     # -- which is checked immediately below and would fail if it had.
     check("and the priced view still prices on the served model",

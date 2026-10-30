@@ -97,6 +97,32 @@ check("Gemini's thinking is ADDED to output, or a thinking model is half-billed"
       gemini["output_tokens"], 1000)
 check("and reported as the reasoning share", gemini["reasoning_tokens"], 700)
 
+# EVERY VENDOR MUST REPORT ITS REASONING SHARE, because that is the only answer
+# to "what did a reasoning model cost us" -- and a reasoning model sits second
+# in both production chains. The fixtures above already carried the field; for
+# every vendor but Gemini nothing asserted it arrived, so a refactor that
+# dropped `completion_tokens_details` from the OpenAI-compatible branch would
+# have passed. Anthropic's was NULL by a mistaken reading until 2026-10-29.
+for _vendor, _usage, _want in (
+    ("anthropic", {"input_tokens": 300, "output_tokens": 1000,
+                   "output_tokens_details": {"thinking_tokens": 700}}, 700),
+    ("openai", {"prompt_tokens": 300, "completion_tokens": 1000,
+                "completion_tokens_details": {"reasoning_tokens": 700}}, 700),
+    ("groq", {"prompt_tokens": 300, "completion_tokens": 1000,
+              "completion_tokens_details": {"reasoning_tokens": 700}}, 700),
+    ("deepseek", {"prompt_tokens": 300, "completion_tokens": 1000,
+                  "completion_tokens_details": {"reasoning_tokens": 700}}, 700),
+    ("gemini", {"prompt_token_count": 300, "candidates_token_count": 300,
+                "thoughts_token_count": 700}, 700),
+):
+    _got = llm_usage.normalize(_vendor, _usage)
+    check("%-9s reports its reasoning share" % _vendor, _got["reasoning_tokens"], _want)
+    # And it is a BREAKDOWN of output, never an addition to it: reasoning is
+    # billed at the output rate on every one of these vendors, so a reasoning
+    # count above the output total would mean the pricing double-counts.
+    check("%-9s output total is at least its reasoning" % _vendor,
+          _got["output_tokens"] >= _got["reasoning_tokens"], True)
+
 print("")
 print("Unreported is None, never zero")
 nothing = llm_usage.normalize("anthropic", None)
@@ -555,6 +581,246 @@ finally:
     else:
         sys.modules["db.repositories.llm_call"] = saved_repo_module
     llm_usage.set_sink(previous_sink)
+
+
+# ── 5. How much of the reply was thinking (049) ──────────────────────────────
+#
+# Measured 2026-10-28: one statement chunk returned 9,774 characters of answer
+# against 28,056 reported output tokens -- 0.35 chars per token, where text runs
+# 2.5 to 3.5, so roughly 88% of the billed output never appeared in the reply.
+# `_call_anthropic` sends no `thinking` parameter; the model reasons anyway.
+#
+# RETRACTED 2026-10-29, and both halves were wrong. `thinking_chars` came back
+# 0 on nine of nine calls -- no thinking blocks at all -- and the 2.5-to-3.5
+# benchmark is PROSE, where this schema's JSON measures 1.29 chars per output
+# token. So 0.35 was a comparison against the wrong constant, not an
+# impossibility. Anthropic DOES break thinking out, in
+# `output_tokens_details.thinking_tokens`; see section 5b. These two columns
+# keep the narrower jobs described in `blocks_of`.
+
+print("")
+print("-- 5. Thinking measurement --")
+
+
+class Block:
+    def __init__(self, kind, **fields):
+        self.type = kind
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+class Reply:
+    def __init__(self, *blocks):
+        self.content = list(blocks)
+
+
+check("a reply measures both halves",
+      llm_usage.blocks_of("anthropic",
+                          Reply(Block("thinking", thinking="x" * 24798),
+                                Block("text", text="y" * 9774))),
+      (24798, 9774))
+
+check("an answer with no thinking is 0, not None",
+      llm_usage.blocks_of("anthropic", Reply(Block("text", text="y" * 500))),
+      (0, 500))
+
+# Encrypted bytes rather than readable text, and still generation that was
+# billed. A reply whose reasoning came back redacted must not read as a reply
+# that did not reason.
+check("redacted thinking counts by its payload length",
+      llm_usage.blocks_of("anthropic",
+                          Reply(Block("redacted_thinking", data="z" * 100),
+                                Block("text", text="a" * 10))),
+      (100, 10))
+
+check("several blocks of each kind add up",
+      llm_usage.blocks_of("anthropic",
+                          Reply(Block("thinking", thinking="ab"),
+                                Block("text", text="cde"),
+                                Block("thinking", thinking="f"),
+                                Block("text", text="gh"))),
+      (3, 5))
+
+# NONE AND ZERO ARE DIFFERENT, as everywhere else in this ledger. A zero would
+# assert that a reply carried no thinking when in fact nothing looked, which
+# across a fleet reports an absence of thinking that is an absence of
+# measurement.
+check("a reply that is not block-shaped measures nothing",
+      llm_usage.blocks_of("gemini", object()), (None, None))
+check("content that is not a list measures nothing",
+      llm_usage.blocks_of("anthropic", type("X", (), {"content": "nope"})()),
+      (None, None))
+check("an empty block list is a measured zero",
+      llm_usage.blocks_of("anthropic", Reply()), (0, 0))
+check("a block whose text attribute is missing counts as empty",
+      llm_usage.blocks_of("anthropic", Reply(Block("text"), Block("thinking"))), (0, 0))
+check("a tool_use block is neither thinking nor answer",
+      llm_usage.blocks_of("anthropic",
+                          Reply(Block("tool_use", input={"a": 1}), Block("text", text="hi"))),
+      (0, 2))
+
+# It must never raise: it runs inside the vendor call, where an exception would
+# fail a call that succeeded and hand the work to the next vendor -- the exact
+# disguise that hid two SDK bugs for a session.
+class BlocksExplode:
+    @property
+    def content(self):
+        raise RuntimeError("boom")
+
+
+llm_usage.begin_attempt()
+llm_usage.note_response("anthropic", BlocksExplode())
+noted = llm_usage._NOTED.get() or {}
+check_true("a response that explodes on .content does not raise",
+           "thinking_chars" in noted)
+check("...and leaves the measurement unreported",
+      (noted.get("thinking_chars"), noted.get("text_chars")), (None, None))
+
+llm_usage.begin_attempt()
+llm_usage.note_response("anthropic", Reply(Block("thinking", thinking="tt"),
+                                           Block("text", text="aaa")))
+noted = llm_usage._NOTED.get() or {}
+check("note_response records the measurement",
+      (noted["thinking_chars"], noted["text_chars"]), (2, 3))
+
+# begin_attempt must clear it, or a call that reports nothing inherits the
+# previous attempt's figures -- the same trap the token counts already had.
+# Read the way `record_attempt` reads it, which is `or _nothing_noted()`: a
+# cleared slot is None, and the defaults are what a timed-out call records.
+llm_usage.begin_attempt()
+check("begin_attempt clears the slot outright", llm_usage._NOTED.get(), None)
+noted = llm_usage._NOTED.get() or llm_usage._nothing_noted()
+check("so a call that never got a response records no measurement",
+      (noted["thinking_chars"], noted["text_chars"]), (None, None))
+
+# A node whose database is behind by this migration must still write the row.
+check("a PGRST204 naming thinking_chars sheds the 049 group",
+      llm_usage._missing_group(
+          Exception("PGRST204 Could not find the 'thinking_chars' column of 'llm_calls'")
+      ).migration,
+      "049_thinking_measurement.sql")
+check("...and text_chars names the same group",
+      llm_usage._missing_group(
+          Exception("PGRST204 Could not find the 'text_chars' column of 'llm_calls'")
+      ).migration,
+      "049_thinking_measurement.sql")
+
+
+# ── 5b. reasoning_tokens IS reported by Anthropic (corrected 2026-10-29) ─────
+#
+# 049 shipped on the belief that Anthropic does not break thinking out of
+# output_tokens. It does: `usage.output_tokens_details.thinking_tokens`, a
+# read-only breakdown, always <= output_tokens, present on non-streaming
+# replies. So `reasoning_tokens` is populated for Anthropic as it already was
+# for Gemini, and THAT is the figure for cost and for the thinking share.
+#
+# Which demotes `thinking_chars`: Anthropic returns thinking SUMMARIZED, and
+# the billing is for the full reasoning, so characters off the blocks
+# systematically understate -- and under `display: "omitted"` would read as zero
+# on a reply that thought hard.
+
+print("")
+print("-- 5b. Anthropic reports its thinking tokens --")
+
+_DOC_USAGE = {"input_tokens": 25, "output_tokens": 348,
+              "output_tokens_details": {"thinking_tokens": 312}}
+check("the shape the docs print maps straight through",
+      llm_usage.normalize("anthropic", _DOC_USAGE)["reasoning_tokens"], 312)
+
+
+class _Details:
+    thinking_tokens = 312
+
+
+class _Usage:
+    input_tokens = 25
+    output_tokens = 348
+    cache_read_input_tokens = 0
+    cache_creation_input_tokens = 0
+    output_tokens_details = _Details()
+
+
+check("and so does the SDK object, read by attribute",
+      llm_usage.normalize("anthropic", _Usage())["reasoning_tokens"], 312)
+check("output_tokens stays the inclusive billing total",
+      llm_usage.normalize("anthropic", _DOC_USAGE)["output_tokens"], 348)
+
+# NULL and 0 again. A reply that genuinely did not think reports 0; a vendor or
+# SDK version that does not carry the breakdown reports nothing, and reading the
+# second as the first would say the fleet stopped thinking.
+for label, usage, want in (
+    ("no details key at all", {"input_tokens": 1, "output_tokens": 2}, None),
+    ("details present but null",
+     {"output_tokens": 2, "output_tokens_details": None}, None),
+    ("thinking_tokens explicitly null",
+     {"output_tokens": 2, "output_tokens_details": {"thinking_tokens": None}}, None),
+    ("a genuine zero survives as zero",
+     {"output_tokens": 2, "output_tokens_details": {"thinking_tokens": 0}}, 0),
+):
+    check(label, llm_usage.normalize("anthropic", usage)["reasoning_tokens"], want)
+
+# Gemini's own path is untouched: thoughts sit BESIDE its output count and must
+# still be added into it, or a thinking model is half-billed.
+_gemini = llm_usage.normalize("gemini", {
+    "prompt_token_count": 100, "cached_content_token_count": 10,
+    "candidates_token_count": 50, "thoughts_token_count": 200})
+check("gemini still adds thoughts into output", _gemini["output_tokens"], 250)
+check("...and reports them as the reasoning share", _gemini["reasoning_tokens"], 200)
+
+
+# ── 6. A node with no credentials says so once ───────────────────────────────
+#
+# `SupabaseManager()` raises ValueError when the URL or the service-role key is
+# empty, and that cannot come right inside the process -- settings are read once
+# at import. It was being retried per row and reported at the 1st, 10th, 100th
+# and every 1000th, which reads as an intermittent database problem rather than
+# "this node is not recording spend at all". Same shape as a missing table, so
+# it gets the same treatment: disable, and say it once at ERROR.
+#
+# Found from a real WARNING in `document_pass_lab.py` output on a machine with
+# no service-role key.
+
+print("")
+print("-- 6. No credentials --")
+
+import db_handler  # noqa: E402
+
+_NO_CREDS = ("Supabase URL and key must be provided either as arguments or via "
+             "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables")
+
+
+class _Row:
+    def model_dump(self, **_kw):
+        return {}
+
+
+_saved_manager = db_handler.SupabaseManager
+try:
+    def _no_creds(*_a, **_k):
+        raise ValueError(_NO_CREDS)
+
+    db_handler.SupabaseManager = _no_creds
+    writer = llm_usage._DatabaseWriter()
+    for _ in range(3):
+        writer.submit(_Row())
+    writer.flush(timeout=5)
+    check_true("a credential-less node disables the ledger", writer._disabled)
+    check("...and counts no failures, because it is a state not a hiccup",
+          writer._failures, 0)
+
+    # A ValueError from somewhere else must stay transient: matched on the
+    # message, not the type, so a real hiccup is still retried and counted.
+    def _other_valueerror(*_a, **_k):
+        raise ValueError("something else entirely")
+
+    db_handler.SupabaseManager = _other_valueerror
+    other = llm_usage._DatabaseWriter()
+    other.submit(_Row())
+    other.flush(timeout=5)
+    check("an unrelated ValueError is still a counted failure",
+          (other._disabled, other._failures), (False, 1))
+finally:
+    db_handler.SupabaseManager = _saved_manager
 
 
 print("")

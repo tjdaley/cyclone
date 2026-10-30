@@ -61,6 +61,18 @@ class LlmCall(BaseModel):
         default=None,
         description="stop_reason reconciled across vendors: complete, truncated, refused, "
                     "or other. What tells 'it ran out of room' from 'it decided it was done'")
+    thinking_chars: Optional[int] = Field(
+        default=None,
+        description="Characters of thinking SUMMARY returned in the reply (049) — NOT a "
+                    "measure of thinking, which is billed in full and returned summarized. "
+                    "Use reasoning_tokens for that. A ZERO MEANS NOTHING: measured 0 on "
+                    "every call of a walk whose reasoning_tokens ran 28-75% of output, "
+                    "because thinking blocks are not returned on that path")
+    text_chars: Optional[int] = Field(
+        default=None,
+        description="Characters of answer in the reply (049). What lets a reply be "
+                    "sanity-checked against its token count: text runs 2.5-3.5 chars per "
+                    "token, so a far lower ratio means most of the output was not the answer")
 
     input_uncached_tokens: Optional[int] = Field(
         default=None, description="Input billed at the full rate. None means not reported")

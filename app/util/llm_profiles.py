@@ -58,6 +58,14 @@ class LLMUnavailableError(RuntimeError):
     """
 
 
+#: Thinking levels a profile may ask for, weakest first. OpenAI takes all five;
+#: Gemini stops at `high` and the service clamps rather than refusing. `none`
+#: and `minimal` are deliberately absent — the models in these chains do not
+#: support them, and an effort of `none` is the only setting under which OpenAI
+#: would still accept temperature.
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
 class LLMCandidate(BaseModel):
     """
     One vendor+model pair inside a profile's failover chain.
@@ -75,6 +83,16 @@ class LLMCandidate(BaseModel):
         default=None,
         description="Overrides the profile/global request deadline",
     )
+    sampling: Optional[bool] = Field(
+        default=None,
+        description="False stops temperature and top_p being SENT to this candidate. A "
+                    "reasoning model rejects them outright (OpenAI) or ignores them "
+                    "(Gemini 4), and neither is a thing to discover by failover")
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="How hard the model should think: low | medium | high | xhigh | max. "
+                    "OpenAI takes it as reasoning_effort, Gemini as thinking_level (which "
+                    "stops at high). Unset sends nothing and takes the vendor default")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -95,6 +113,11 @@ class LLMProfile(BaseModel):
                     "fail, it selects for whichever model gives up soonest, because a short "
                     "answer is the only kind that fits",
     )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="Profile-level thinking effort, overridden per candidate. A task is "
+                    "what decides how hard the thinking should be, so this belongs here "
+                    "as well as on a candidate — but each vendor's own ceiling applies")
     vision: bool = Field(default=False, description="True when this profile serves multimodal calls")
 
 
@@ -108,6 +131,7 @@ class _RawProfile(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     timeout_seconds: Optional[float] = None
+    reasoning_effort: Optional[str] = None
     vision: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -270,6 +294,13 @@ class LLMProfileRegistry:
                     problems.append("%s: no API key configured for vendor '%s'" % (where, candidate.vendor))
                 else:
                     usable += 1
+                # Reported rather than raised, like every other problem here: a
+                # bad effort value costs one vendor's candidate, and refusing to
+                # start the process over it would cost all of them.
+                effort = candidate.reasoning_effort or profile.reasoning_effort
+                if effort is not None and effort not in VALID_EFFORTS:
+                    problems.append("%s: reasoning_effort '%s' is not one of %s"
+                                    % (where, effort, ", ".join(VALID_EFFORTS)))
             if usable == 0:
                 problems.append("profile '%s' has no usable candidates" % name)
         return problems
@@ -348,6 +379,7 @@ def _resolve(
         top_p=inherited(entry.top_p, "top_p"),
         max_tokens=inherited(entry.max_tokens, "max_tokens"),
         timeout_seconds=inherited(entry.timeout_seconds, "timeout_seconds"),
+        reasoning_effort=inherited(entry.reasoning_effort, "reasoning_effort"),
         vision=entry.vision or bool(parent and parent.vision),
     )
     resolved[name] = profile

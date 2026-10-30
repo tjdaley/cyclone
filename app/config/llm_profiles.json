@@ -19,11 +19,13 @@
       },
       {
         "vendor": "openai",
-        "model": "gpt-5.4"
+        "model": "gpt-6.1-sol",
+        "sampling": false
       },
       {
         "vendor": "gemini",
-        "model": "gemini-3.8-flash"
+        "model": "gemini-4-argon",
+        "sampling": false
       }
     ]
   },
@@ -54,11 +56,13 @@
       },
       {
         "vendor": "openai",
-        "model": "gpt-5.4"
+        "model": "gpt-6.1-sol",
+        "sampling": false
       },
       {
         "vendor": "gemini",
-        "model": "gemini-3.8-flash"
+        "model": "gemini-4-argon",
+        "sampling": false
       }
     ]
   },
@@ -140,5 +144,6 @@
     "timeout_seconds": 180
   },
   "_chain_order": "Order is from measured accuracy on a hard extraction, not from price. The same 27-page, 286-transaction statement was run through each vendor by hand: Claude and OpenAI were both complete and correct; Gemini did well on what it produced but stopped after 200 entries; DeepSeek lost and mis-stated amounts and invented JSON keys, so it appears in no chain and must not be added to one that touches evidence.",
+  "_reasoning": "A REASONING MODEL DOES NOT TAKE temperature OR top_p, and the two vendors disagree about how it tells you. OpenAI refuses the request (its migration guidance: remove temperature, top_p and top_logprobs whenever reasoning effort is not 'none' — and gpt-6.1-sol does not support 'none', so there is no setting that makes them acceptable). Gemini 4 Argon IGNORES them, which is worse: nothing raises, and a profile asking for temperature 0.0 quietly samples. Hence \"sampling\": false on those candidates. It is per CANDIDATE and never inferred from the model name: one chain is one task served by three vendors, and sniffing names is the mistake _anthropic_takes_temperature documents. 'reasoning_effort' (low|medium|high|xhigh|max) goes to OpenAI as reasoning_effort and to Gemini as thinking_level, which stops at high and is clamped. Left unset everywhere, so both vendors apply their own default of medium — raising it is a measurement, not a guess, and it is billed as output and counted against max_tokens.",
   "_timeouts": "timeout_seconds overrides the global LLM_TIMEOUT_SECONDS per profile. Set it where the answer is long. A deadline too short for the work does not merely fail: it selects for whichever model gives up soonest, because a short answer is the only kind that fits. On a 27-page statement at the global 90s, the run that \"succeeded\" returned 38 of 286 transactions, and the run where all three vendors tried to finish was killed three times. extract_account_statement gets 300s and ocr_document_page 180s; both run inside background jobs, where a generous deadline costs only patience."
 }
