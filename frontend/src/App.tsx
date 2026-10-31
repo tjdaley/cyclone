@@ -8,6 +8,11 @@ import PortalAccountsPage from './pages/portal/PortalAccountsPage'
 import PortalStatementsHeldPage from './pages/portal/PortalStatementsHeldPage'
 import PortalGuidePage from './pages/portal/PortalGuidePage'
 import AppShell from './components/AppShell'
+import GuestRoute from './components/GuestRoute'
+import GuestShell from './pages/guest/GuestShell'
+import GuestAccountsPage from './pages/guest/GuestAccountsPage'
+import GuestTransactionsPage from './pages/guest/GuestTransactionsPage'
+import GuestInventoryPage from './pages/guest/GuestInventoryPage'
 
 import LandingPage      from './pages/LandingPage'
 import LoginPage        from './pages/LoginPage'
@@ -89,6 +94,18 @@ export default function App() {
                   scripts/sync_user_guide.py. Inside the shell, so reading it
                   does not mean leaving the portal. */}
               <Route path="/portal/:matterId/guide" element={<PortalGuidePage />} />
+            </Route>
+          </Route>
+
+          {/* Protected — a financial professional's consented access (052).
+              Three tabs, read-only but for their own tags, all through
+              /api/v1/guest. */}
+          <Route element={<GuestRoute />}>
+            <Route element={<GuestShell />}>
+              <Route path="/guest" element={<div />} />
+              <Route path="/guest/:matterId/accounts" element={<GuestAccountsPage />} />
+              <Route path="/guest/:matterId/transactions" element={<GuestTransactionsPage />} />
+              <Route path="/guest/:matterId/inventory" element={<GuestInventoryPage />} />
             </Route>
           </Route>
 

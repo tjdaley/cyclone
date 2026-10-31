@@ -24,6 +24,10 @@ class UserRoleType(str, Enum):
     attorney = "attorney"
     paralegal = "paralegal"
     admin = "admin"
+    #: A tracing expert, CPA or similar with consented access to particular
+    #: matters (052). NOT a staff role: staff routes are not matter-scoped, so
+    #: this role must never appear in a staff ``require_role`` list.
+    financial_professional = "financial_professional"
 
 
 # Highest-privilege first. ``primary_role()`` returns the first match.
@@ -32,6 +36,7 @@ _ROLE_PRIORITY: list[UserRoleType] = [
     UserRoleType.attorney,
     UserRoleType.paralegal,
     UserRoleType.client,
+    UserRoleType.financial_professional,
 ]
 
 
@@ -84,6 +89,10 @@ class UserRole(BaseModel):
     client_id: Optional[int] = Field(
         default=None,
         description="Foreign key to the clients table; populated for the client role",
+    )
+    guest_id: Optional[int] = Field(
+        default=None,
+        description="Foreign key to guest_professionals; populated for the financial_professional role",
     )
 
 

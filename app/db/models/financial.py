@@ -75,6 +75,18 @@ class PropertyCharacter(str, Enum):
     no_marital_interest = "no_marital_interest"
 
 
+class InventoryExclusionReason(str, Enum):
+    """
+    Why an account is listed on the inventory but left out of its totals (050).
+
+    ``other`` carries its explanation in ``inventory_exclusion_note``.
+    """
+    stale = "stale"
+    no_ownership_interest = "no_ownership_interest"
+    stipulated_separate_other_party = "stipulated_separate_other_party"
+    other = "other"
+
+
 class AccountOwnership(str, Enum):
     """
     Who holds an account.
@@ -215,6 +227,50 @@ class FinancialAccount(BaseModel):
                     "anyone knows whether it will itself be replaced",
     )
     is_closed: bool = Field(default=False, description="True once the account is known to be closed")
+    currency: str = Field(
+        default="USD",
+        description="ISO 4217 code the account is kept in (051). Amounts are stored as the "
+                    "institution printed them and never converted",
+    )
+    excluded_from_inventory: bool = Field(
+        default=False,
+        description="Listed on the inventory but left out of its totals (050). A person's "
+                    "decision, set only through the attributed exclusion endpoint",
+    )
+    inventory_exclusion_reason: Optional[InventoryExclusionReason] = Field(
+        default=None, description="Why it was excluded; null when nobody said")
+    inventory_exclusion_note: Optional[str] = Field(
+        default=None, description="The explanation, when the reason is 'other'")
+    inventory_excluded_by_staff_id: Optional[int] = Field(
+        default=None, description="Who excluded it. Not a foreign key: the trail outlives the row")
+    inventory_excluded_by: Optional[str] = Field(
+        default=None, description="Their name as it should read in the record")
+    inventory_excluded_at: Optional[datetime] = Field(
+        default=None, description="When it was excluded")
+
+
+class MatterCurrencyRate(BaseModel):
+    """
+    The rate a matter uses to show a foreign balance in dollars on the inventory (051).
+
+    One per currency per matter, entered by a person, with the date it is as of
+    and where it came from — a converted figure on a schedule is only as good as
+    a rate somebody can cite.
+    """
+    matter_id: int = Field(..., description="FK to matters")
+    currency: str = Field(..., description="ISO 4217 code; never USD")
+    usd_per_unit: Decimal = Field(..., description="Dollars per ONE unit of the currency")
+    as_of: date = Field(..., description="The date the rate is as of")
+    source: Optional[str] = Field(default=None, description="Where the rate came from")
+    entered_by_staff_id: Optional[int] = Field(default=None, description="Who entered it")
+    entered_by: Optional[str] = Field(default=None, description="Their name, as the record reads")
+
+
+class MatterCurrencyRateInDB(MatterCurrencyRate):
+    id: int = Field(..., description="Primary key, set by the database")
+    created_at: datetime = Field(..., description="Set by the database")
+    updated_at: Optional[datetime] = Field(default=None)
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FinancialAccountInDB(FinancialAccount):
@@ -456,6 +512,10 @@ class TransactionTag(BaseModel):
     color: Optional[str] = Field(default=None, description="Presentation token, e.g. 'amber'")
     display_order: int = Field(default=0, description="Sort key within its layer")
     is_active: bool = Field(default=True, description="Retire without removing it from tagged lines")
+    guest_id: Optional[int] = Field(
+        default=None,
+        description="Set when the tag belongs to a financial professional (052). Only they "
+                    "apply it; staff see it read-only; no other guest sees it at all")
     client_visible: bool = Field(
         default=False,
         description="Offered to the client in the portal. Opt-IN (044): the firm's list carries "
@@ -475,6 +535,8 @@ class TagSource(str, Enum):
 
     staff = "staff"
     client = "client"
+    #: A financial professional's own tag on their own tag (052).
+    guest = "guest"
 
 
 class TransactionTagLink(BaseModel):
@@ -499,6 +561,8 @@ class TransactionTagLink(BaseModel):
         default=None, description="Staff member who applied it; null on a client tag")
     tagged_by_client_id: Optional[int] = Field(
         default=None, description="Client who applied it; null on a staff tag")
+    tagged_by_guest_id: Optional[int] = Field(
+        default=None, description="Financial professional who applied it (052)")
     cleared_at: Optional[datetime] = Field(
         default=None,
         description="When staff cleared it. A cleared link counts as no tag anywhere — not in "

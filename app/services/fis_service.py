@@ -178,6 +178,25 @@ class FisService:
             scope = sorted(allowed)
 
         warnings: list[str] = []
+        # NOT CONVERTED, NOT MIXED. A line in rupees summed into a category of
+        # dollars produces a sworn monthly figure that is wrong by the exchange
+        # rate, and nothing on its face says so. Until the FIS converts by
+        # transaction date, a foreign account is left out and the warning names it.
+        foreign = [i for i in scope
+                   if (getattr(allowed[i], "currency", None) or "USD").upper() != "USD"]
+        if foreign:
+            scope = [i for i in scope if i not in foreign]
+            codes = sorted({(allowed[i].currency or "").upper() for i in foreign})
+            warnings.append(
+                "%d account%s kept in %s %s not included: the FIS is in dollars and does not "
+                "convert other currencies."
+                % (len(foreign), "" if len(foreign) == 1 else "s", ", ".join(codes),
+                   "is" if len(foreign) == 1 else "are"))
+            if not scope:
+                empty = self._empty(window_start, window_end, window_months)
+                empty["warnings"] = warnings + empty["warnings"]
+                return empty
+
         rows = self._fetch(
             manager, matter_id, scope,
             min(window_start, trailing_start), window_end, warnings,

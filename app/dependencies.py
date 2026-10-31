@@ -164,3 +164,43 @@ def require_client(
     request.state.roles = roles
     request.state.client_id = client_id
     return client_id
+
+
+def require_guest(
+    request: Request,
+    manager: SupabaseManager = Depends(get_db_manager),
+) -> int:
+    """
+    The guest id behind this request, for the financial-professional surface (052).
+
+    **The only way a guest endpoint learns who it is serving**, as
+    ``require_client`` is for the portal: the id comes from ``user_roles``, never
+    from the request. Which matters the guest may see is then decided per
+    request by ``guest_access_service.require_grant`` — this only says who.
+
+    Staff and clients are refused here: each has its own surface, and a response
+    written for an expert must not have to be right for anybody else too.
+
+    :return: The guest id.
+    :raises HTTPException: 401 unauthenticated, 403 when the account is not a
+        financial professional.
+    """
+    uid = getattr(request.state, "supabase_uid", None)
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    records = UserRoleRepository(manager).get_by_uid(uid)
+    if not records:
+        raise HTTPException(status_code=403, detail="No role assigned to this account")
+
+    roles = sorted({r.role.value for r in records})
+    guest_id = next((getattr(r, "guest_id", None) for r in records
+                     if getattr(r, "guest_id", None) is not None), None)
+    if "financial_professional" not in roles or guest_id is None:
+        LOGGER.warning("require_guest: refused uid=%s roles=%s", uid, roles)
+        raise HTTPException(status_code=403, detail="This area is for financial professionals")
+
+    request.state.role = primary_role(roles)
+    request.state.roles = roles
+    request.state.guest_id = guest_id
+    return guest_id

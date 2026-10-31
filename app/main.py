@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 
 from middleware.auth_middleware import AuthMiddleware
-from routers import admin, attorney_lead_responder, auth_flow, bench, billing, category_rules, clients, costs, discovery, financial, fis, health, intake, kb, lead_agent_run, leads, matters, pleading, portal, received, staff
+from routers import admin, attorney_lead_responder, auth_flow, bench, billing, category_rules, clients, costs, discovery, financial, fis, health, intake, kb, guest, lead_agent_run, leads, matters, pleading, portal, received, staff
 from services.llm_service import llm_service
 from util.loggerfactory import LoggerFactory
 from util.config_fingerprint import log_startup_summary
@@ -185,6 +185,11 @@ def create_app() -> FastAPI:
     # The client's own view of their matter. Its own prefix, its own wording,
     # and its own scope resolution — never the staff routes with a filter.
     app.include_router(portal.router)       # /api/v1/portal — client portal
+    # A financial professional's consented view of particular matters (052).
+    # Same reasoning as the portal: never the staff routes, which are not
+    # matter-scoped. staff_router is where staff manage the access.
+    app.include_router(guest.router)        # /api/v1/guest — financial professionals
+    app.include_router(guest.staff_router)  # /api/v1/matters/{id}/guests — managing their access
 
     return app
 

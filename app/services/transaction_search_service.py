@@ -33,7 +33,7 @@ from db.repositories.financial import (
     TransactionTagRepository,
 )
 from db_handler import DatabaseManager
-from services.exhibit_service import Column, Exhibit, caption_lines, money
+from services.exhibit_service import Column, Exhibit, Row, caption_lines, money
 from util import amount_filter
 from util.loggerfactory import LoggerFactory
 
@@ -232,11 +232,14 @@ class TransactionSearchService:
                     link.tag_id for link in links if link.source == TagSource.client],
                 "institution": account.institution if account else None,
                 "account_last4": account.account_number_last4 if account else None,
+                "currency": (getattr(account, "currency", None) or "USD") if account else "USD",
             })
 
         # The page's own total, not the filter's. Summing every match would mean
         # a second full query, and a running total of what is on screen is what
         # an attorney is actually reading against.
+        # Only meaningful in one currency: rupees and dollars do not add, and
+        # the screen says "mixed currencies" rather than printing a sum of them.
         page_sum = sum((r.amount for r in rows), start=_ZERO)
 
         LOGGER.info(
@@ -303,18 +306,22 @@ class TransactionSearchService:
             for c in TransactionCategoryRepository(manager).get_all(include_inactive=True)
         }
 
-        table: list[tuple[str, ...]] = []
-        credits = debits = _ZERO
+        table: list[Row] = []
+        # Totals per currency. Rupees and dollars do not add, and a single
+        # "Total credits" over both is a figure nobody can defend.
+        credits: dict[str, Decimal] = {}
+        debits: dict[str, Decimal] = {}
         undated = 0
         for row in rows:
             amount = Decimal(str(row["amount"]))
+            currency = (row.get("currency") or "USD").upper()
             if amount < 0:
-                debits += -amount
+                debits[currency] = debits.get(currency, _ZERO) - amount
             else:
-                credits += amount
+                credits[currency] = credits.get(currency, _ZERO) + amount
             if not row.get("transaction_date"):
                 undated += 1
-            table.append((
+            table.append(Row(cells=(
                 row.get("transaction_date") or "",
                 row.get("bates_number") or "",
                 _account_label(row),
@@ -322,14 +329,25 @@ class TransactionSearchService:
                 (row.get("description") or "").replace("\n", " ").strip(),
                 categories.get(row.get("category_id")) or "",
                 str(amount),
-            ))
+                currency,
+            ), currency=None if currency == "USD" else currency))
 
-        summary = [
-            ("Transactions", str(len(table))),
-            ("Total credits", money(credits)),
-            ("Total debits", money(debits)),
-            ("Net", money(credits - debits)),
-        ]
+        currencies = sorted(set(credits) | set(debits)) or ["USD"]
+        summary = [("Transactions", str(len(table)))]
+        for currency in currencies:
+            # One currency reads exactly as it always did; several are labelled.
+            suffix = "" if currencies == ["USD"] else " (%s)" % currency
+            up, down = credits.get(currency, _ZERO), debits.get(currency, _ZERO)
+            summary += [
+                ("Total credits" + suffix, money(up, currency)),
+                ("Total debits" + suffix, money(down, currency)),
+                ("Net" + suffix, money(up - down, currency)),
+            ]
+        columns = _EXHIBIT_COLUMNS + (Column("Currency", csv_only=True),)
+        if currencies == ["USD"]:
+            # The CSV keeps the shape it has always had when there is nothing to tell apart.
+            columns = _EXHIBIT_COLUMNS
+            table = [Row(cells=r.cells[:-1]) for r in table]
         if undated:
             # A line with no date still carries its amount into the totals, so
             # the reader needs to know the date column is incomplete.
@@ -340,7 +358,7 @@ class TransactionSearchService:
         return Exhibit(
             name=exhibit_name,
             caption=caption,
-            columns=_EXHIBIT_COLUMNS,
+            columns=columns,
             rows=tuple(table),
             selection=tuple(selection),
             summary=tuple(summary),
@@ -660,6 +678,10 @@ class TransactionSearchService:
             # A matter tag names facts from that case. Applying it elsewhere
             # would put another client's theory of the case on this record.
             raise ValueError("That tag belongs to a different matter")
+        if getattr(tag, "guest_id", None) is not None:
+            # An expert's tag is their assertion. Staff applying or removing it
+            # would put words in their mouth on a record that may be disclosed.
+            raise ValueError("That tag belongs to a financial professional; only they can apply it")
 
         link_repo = TransactionTagLinkRepository(manager)
         verified = self._verify_on_matter(manager, matter_id, transaction_ids)

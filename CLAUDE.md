@@ -72,6 +72,7 @@ cyclone/
 │   │   ├── lead_service.py        # CRM leads; promotion to client + matter
 │   │   ├── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
 │   │   ├── client_portal_service.py # What a client may see, and the one thing they may do — see §11b
+│   │   ├── guest_access_service.py  # A financial professional's consented access to a matter — see §11d
 │   │   ├── inventory_service.py   # Account balances as an inventory: assets, liabilities, totals
 │   │   ├── source_document_service.py     # Receiving a file, and deciding what to do with it — see §11c
 │   │   ├── splitting_bench_service.py     # One received PDF becomes N documents, by hand — §11c
@@ -165,6 +166,9 @@ cyclone/
 │       ├── 047_document_pipeline.sql    # as-produced record, working documents, page ranges, index views
 │       ├── 048_document_survey_job.sql  # a `document_survey` job kind
 │       ├── 049_thinking_measurement.sql # how much of a reply was thinking, in CHARS
+│       ├── 050_inventory_exclusion.sql  # an account listed on the inventory but left out of its totals
+│       ├── 051_account_currency.sql     # financial_accounts.currency + matter_currency_rates (inventory conversion)
+│       ├── 052_financial_guest_access.sql # financial-professional guests, grants, consents, document ledger — see §11d
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -2707,6 +2711,46 @@ database will not catch the mistake.
 
 ---
 
+## 11d. Financial-Professional Guests (`guest_access_service.py`, `routers/guest.py`)
+
+A tracing expert or CPA gets a matter's Accounts, Transactions and Inventory
+with the client's consent, and nothing else (052). The full design and Tom's
+decisions are `docs/specs/financial-guest-access.md`. What must not be relearned:
+
+- **Staff routes are not matter-scoped, so the guest role must never appear in a
+  staff `require_role` list.** One appearance gives an expert retained on one
+  case every matter in the firm. `tests/test_guest_access.py` reads the routers
+  and fails if it does. The guest has its own router (`/api/v1/guest`), its own
+  dependency (`require_guest`) and its own response shapes (`schemas/guest.py`),
+  and every endpoint resolves its scope through `require_grant`. Out of scope
+  answers **404**, as the portal does.
+- **`ProtectedRoute` admitted any role that was not `client`**, which was only
+  true while every other role was staff. It now admits staff roles only.
+- **A grant is re-read on every request**, and `expired` is derived from
+  `expires_at` at that moment, never written by a job. Revocation takes effect
+  on the next click.
+- **Consent is a staff attestation** naming who recorded it. An emailed link is
+  the planned second path. The activation email goes out as a FastAPI background
+  task, so mail never holds the request.
+- **Disclosure is document-level** (Tom: Tex. Fam. Code 301.052(a)(6), TRCP 195),
+  so there is no per-query log. There is a ledger of the statements available
+  under each grant, **not a foreign key**, because a rejected statement is
+  hard-deleted. It is synchronised on each guest request rather than hooked into
+  ingest and delete paths. Sign-ins are recorded separately, for revocation
+  audits.
+- **Guests see only their own tags.** The search decorates lines with every tag,
+  so the guest layer filters the list. "Untagged" is refused, because it would
+  reveal what staff had tagged, and removed lines are never included. Staff see
+  guest tags marked ◆ and can filter on them, but cannot apply, edit or delete
+  them (`apply_tag` and the tag routes refuse). One guest never sees another's.
+- **One login cannot hold a staff role and a guest role.** `invite` refuses an
+  address that already signs in as staff or a client.
+
+Covered by `tests/test_guest_access.py` and `tests/test_guest_sql.py` (real
+Postgres; exits 2 with SKIPPED without Docker).
+
+---
+
 ## 11a. Background Jobs (`job_service.py`, `crm_worker.py`, `jobs` table)
 
 **Anything that can take more than a few seconds must not hold an HTTP request open.** Production sits behind haproxy, whose `timeout server` cuts the connection long before nginx's 300s. The client gets a 504 with *no error in the API log*, because nothing failed — the request was still working. Reading a pleading is one LLM vision call per image-only page plus two more over the text; on a scanned document that is minutes.
@@ -3111,7 +3155,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Export on the undisclosed-accounts report | ✅ Built — its own account-shaped columns; the dagger travels with its footnote |
 | OCR fallback for an account number | ❌ Not started — only for a SINGLE-PAGE statement, where repetition cannot work by construction. `detect()` returns None there by design. On multi-page forms the pattern already carries it: measured 9 of 9 on Chase savings statements where the extraction read the number 0 of 9 times |
 | Large-transaction query (dollar threshold) | ✅ Built — an amount range on the Transactions tab. **Unsigned searches by MAGNITUDE and matches both directions**, which is what pairs a transfer out of one produced account with the same figure arriving in another; a typed `-` or `+` restricts to one side. Both boxes are magnitudes, so the smaller figure goes first either way |
-| Account inventory (balances) | ✅ Built — assets and liabilities with each account's latest statement balance, who holds it, the as-of date and the Bates stamp, totalled and exportable in all four formats |
+| Account inventory (balances) | ✅ Built — assets and liabilities with each account's latest statement balance, who holds it, the as-of date and the Bates stamp, totalled and exportable in all four formats. An account can be **excluded from the totals** (050) — listed in grey, marked † with its reason in every export, attributed to a person; set from the grid in one click or from the account editor with a reason |
+| Foreign-currency accounts | ✅ Built — 051. `financial_accounts.currency` (ISO 4217, default USD); figures shown as printed with the code, never converted in storage. The inventory converts at a per-matter rate a person enters (`matter_currency_rates`, with as-of and source) and annotates the row; no rate means listed and not totalled. The FIS excludes non-USD accounts with a warning; transaction exports total per currency. **Not built:** detecting the currency at ingest (set by hand on the account), online rate lookup, and currency awareness in the undisclosed-accounts report |
 | Inventory &amp; Appraisement | ❌ Not started — the sworn form, which is a different and larger thing than the account inventory above. Ask Tom for the firm's I&amp;A form first |
 | Schema drift check at startup | ✅ Built (`util/schema_check.py`) |
 | Config drift detection across the fleet | ✅ Built — every node publishes a `fleet_hash` on `GET /api/config`; `scripts/check-fleet.sh` diffs them with no SSH and no credential |
@@ -3130,6 +3175,7 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Re-extract / delete a pleading | ❌ Not started — `raw_text` is stored, so re-extraction needs no re-upload |
 | Moving the intake PDF onto the matter at commit | ❌ Not started — lands at `intake/{job_id}.pdf`; `StorageService.move()` exists |
 | Client Portal (separate from staff) | ✅ **Built** — 044. Read-only accounts, statements, transactions and the compliance matrix (the client's own side), plus tagging. Its own shell, its own API prefix, its own wording. Uploads are deliberately NOT supported; see §16a |
+| Financial-professional guest access | ✅ **Built** — 052, §11d, `docs/specs/financial-guest-access.md`. Consented, matter-scoped, expiring access to Accounts, Transactions and Inventory; own tags only; exports carry a "Prepared for" footer. Consent by **staff attestation**; a document-level ledger of what was provided, kept past a statement's deletion. **Not built:** the emailed consent link, an admin page across matters, expiry reminders |
 | — Client tags transactions | ✅ Built — from a tag set the firm publishes. Staff clear what is wrong and the client cannot put it back; the lock stops tagging for hearing prep |
 | — Client re-categorizes their own transactions | ❌ Not started. **Depends on auditing category changes, which does not exist yet** (see below). Staff then review "changes since <date>" — the point is not convenience, it is catching a client who spreads gambling across a dozen categories or parks a disclosable transfer under an off-FIS bucket like Interaccount Transfers |
 | Audit trail for category changes | ⏳ **Half built.** 032 adds `category_source`, `category_rule_id`, and set/reviewed by-whom-and-when, and the rule engine writes them. `set_category` (the manual path) still writes nothing — that is the remaining half, and the one the client portal needs. Was: `set_category` writes `category_id` and nothing else — no flag, no `audit_log` row, no who/when/from/to. `correct_transaction` does all three for a field edit, and a category change is the bigger act: it moves money between lines of a sworn document. Needed before any client touches classification, and worth having for staff regardless |
@@ -3352,6 +3398,17 @@ Two facts from it worth carrying anywhere near the subject:
 
 Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 039 did for `llm_calls`: attribution cannot be backfilled.
+
+### Financial-professional guest access — the three pieces not built
+
+Guest access shipped (052, §11d). These were deliberately left for later, and
+Tom asked on 2026-10-31 that they stay on the pending list:
+
+| # | Item |
+| - | ---- |
+| 1 | **Emailed consent link.** Today consent is a staff attestation only. A link emailed to the client, single-use and expiring, with the client typing their name, is the second path the spec describes. The weakness, a spouse who reads the client's email, was accepted by Tom as low-risk. |
+| 2 | **A page listing every guest across matters.** Grants are managed only on each matter's detail page, so "who outside the firm has access to anything?" has no single answer on screen. Revoking everywhere already exists, from any one matter's row. |
+| 3 | **Reminders before access expires.** Expiry is enforced at request time and needs no job; what is missing is telling the matter's staff, say two weeks ahead, so access does not lapse mid-engagement unnoticed. |
 
 ### Larger, already noted elsewhere
 

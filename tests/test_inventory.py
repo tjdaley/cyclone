@@ -195,6 +195,151 @@ check_true("the documents behind it are named", "prod.pdf" in text)
 check_true("and it carries the verification notice",
            "underlying records must be made available" in text)
 
+# ── 10. Excluded from the totals (050) ───────────────────────────────────
+# Listed, so the reader sees the account was considered; never summed, so a
+# stale balance does not move the estate. Marked in every format.
+print("10. an excluded account is listed and left out of the totals")
+from services.exhibit_service import to_csv, to_pdf  # noqa: E402
+
+ACCOUNTS[1]["excluded_from_inventory"] = True            # BofA savings, 10485.99
+ACCOUNTS[1]["inventory_exclusion_reason"] = "stale"
+ACCOUNTS[4]["excluded_from_inventory"] = True            # Synchrony loan, -1485.99
+ACCOUNTS[4]["inventory_exclusion_reason"] = "other"
+ACCOUNTS[4]["inventory_exclusion_note"] = "Paid off at mediation"
+ACCOUNTS[5]["excluded_from_inventory"] = True            # no usable statement
+
+ex = inventory_service.inventory(None, 1, matter=MATTER)
+savings = next(r for r in ex["assets"] if r["account_number_last4"] == "4331")
+check("still listed, with its balance", savings["balance"], "10485.99")
+check("flagged", savings["excluded"], True)
+check("with the reason in words", savings["exclusion_label"], "Stale")
+check("'other' shows the note", next(r for r in ex["liabilities"]
+      if r["account_number_last4"] == "9331")["exclusion_label"], "Paid off at mediation")
+check("assets total leaves it out", ex["totals"]["assets"], "1252891.99")
+check("liabilities total leaves it out", ex["totals"]["liabilities"], "-1045.45")
+check("so does the net", ex["totals"]["net"], "1251846.54")
+check("and the count is reported", ex["totals"]["excluded"], 3)
+check("an excluded account is not also 'without a balance'",
+      ex["totals"]["without_balance"], 0)
+
+doc = inventory_service.build_exhibit(None, MATTER)
+md = to_markdown(doc).decode("utf-8")
+check_true("the row carries the dagger", "Bank of America †" in md)
+check_true("the footnote explains it, with the reason",
+           "† Bank of America ····4331: listed, not included in the totals (Stale)"
+           in md)
+check_true("the selection says how many", "3 account(s), marked †" in md)
+check_true("who excluded it stays off the exhibit", "excluded by" not in md.lower())
+csv_text = to_csv(doc).decode("utf-8-sig")
+check_true("the CSV has a column to filter on", "Excluded from totals" in csv_text)
+check_true("carrying the reason", "yes: Stale" in csv_text)
+check_true("the PDF still renders", to_pdf(doc)[:4] == b"%PDF")
+
+for i in (1, 4, 5):
+    for key in ("excluded_from_inventory", "inventory_exclusion_reason", "inventory_exclusion_note"):
+        ACCOUNTS[i].pop(key, None)
+
+print("11. setting the exclusion stamps who and when, and 'other' needs a note")
+from db.models.financial import InventoryExclusionReason  # noqa: E402
+
+writes = []
+
+
+class WritableAccounts(FakeAccounts):
+    def select_one(self, condition):
+        return next((a for a in ACCOUNTS if a["id"] == condition["id"]), None)
+
+    def update(self, id, data):
+        writes.append((id, data))
+        return Row(**data)
+
+
+mod.FinancialAccountRepository = lambda m: WritableAccounts()
+inventory_service.set_exclusion(None, 2, True, 7, "Thomas J. Daley")
+check("excluded", writes[-1][1]["excluded_from_inventory"], True)
+check("by name", writes[-1][1]["inventory_excluded_by"], "Thomas J. Daley")
+check_true("and when", writes[-1][1]["inventory_excluded_at"] is not None)
+check("no reason is fine", writes[-1][1]["inventory_exclusion_reason"], None)
+
+try:
+    inventory_service.set_exclusion(None, 2, True, 7, "T", reason=InventoryExclusionReason.other)
+    check("'other' with no note is refused", "accepted", "refused")
+except ValueError:
+    check("'other' with no note is refused", "refused", "refused")
+
+inventory_service.set_exclusion(None, 2, True, 7, "T", reason=InventoryExclusionReason.stale,
+                                note="ignored")
+check("a canned reason drops a stray note", writes[-1][1]["inventory_exclusion_note"], None)
+
+inventory_service.set_exclusion(None, 2, False, 7, "T")
+check("including it again clears the attribution", writes[-1][1]["inventory_excluded_by"], None)
+try:
+    inventory_service.set_exclusion(None, 999, True, 7, "T")
+    check("a missing account is a lookup error", "ok", "LookupError")
+except LookupError:
+    check("a missing account is a lookup error", "LookupError", "LookupError")
+
+# ── 12. Foreign currency (051) ───────────────────────────────────────────
+# Converted on the way out at a rate somebody entered, and said so in words.
+# With no rate the balance is listed in its own currency and kept out of the
+# totals -- a rupee figure in a dollar column is the bug this exists to stop.
+print("12. a foreign balance is converted at the matter's rate, or left out")
+mod.FinancialAccountRepository = lambda m: FakeAccounts()
+ACCOUNTS.append(account(7, "Habib Bank", "5555", AccountType.savings, AccountOwnership.client_sole))
+ACCOUNTS[-1]["currency"] = "PKR"
+STATEMENTS.append(statement(17, 7, "2026-09-30", "10000000.00", bates="777001"))
+
+RATES: dict = {}
+
+
+class FakeRates:
+    def by_matter(self, matter_id):
+        return RATES
+
+
+mod.MatterCurrencyRateRepository = lambda m: FakeRates()
+
+no_rate = inventory_service.inventory(None, 1, matter=MATTER)
+hbl = next(r for r in no_rate["assets"] if r["account_number_last4"] == "5555")
+check("no rate: no dollar balance", hbl["balance"], None)
+check("but the printed figure is kept", hbl["native_balance"], "10000000.00")
+check("and counted as unconverted", no_rate["totals"]["unconverted"], 1)
+check("not as 'no statement'", no_rate["totals"]["without_balance"], 1)
+check("assets unchanged by it", no_rate["totals"]["assets"], "1263377.98")
+check("the matter's foreign currencies are listed", no_rate["currencies"], ["PKR"])
+md_no_rate = to_markdown(inventory_service.build_exhibit(None, MATTER)).decode("utf-8")
+check_true("the exhibit prints it in rupees, never dollars", "PKR 10,000,000.00" in md_no_rate)
+check_true("and says it is not totalled", "1 account(s) are in a currency with no rate" in md_no_rate)
+
+RATES["PKR"] = Row(currency="PKR", usd_per_unit=Decimal("0.0036000000"), as_of=date(2026, 10, 29),
+                   source="State Bank of Pakistan", entered_by="Thomas J. Daley")
+rated = inventory_service.inventory(None, 1, matter=MATTER)
+hbl = next(r for r in rated["assets"] if r["account_number_last4"] == "5555")
+check("converted to dollars", hbl["balance"], "36000.00")
+check("the rate reads as typed", hbl["usd_per_unit"], "0.0036")
+check("annotated in words", hbl["conversion_note"],
+      "Balance of PKR 10,000,000.00 converted to USD at 0.0036 USD/PKR "
+      "(rate as of 10/29/2026; State Bank of Pakistan)")
+check("and now in the total", rated["totals"]["assets"], "1299377.98")
+check("nothing unconverted", rated["totals"]["unconverted"], 0)
+md = to_markdown(inventory_service.build_exhibit(None, MATTER)).decode("utf-8")
+check_true("the row is marked", "Habib Bank ‡" in md)
+check_true("the footnote carries the conversion",
+           "converted to USD at 0.0036 USD/PKR" in md)
+csv_text = to_csv(inventory_service.build_exhibit(None, MATTER)).decode("utf-8-sig")
+check_true("the CSV keeps the printed figure and the rate", "PKR,10000000.00,0.0036" in csv_text)
+
+print("13. an all-dollar matter never reads the rate table")
+ACCOUNTS.pop(); STATEMENTS.pop()
+
+
+def _boom(m):
+    raise AssertionError("rates read on an all-dollar matter")
+
+
+mod.MatterCurrencyRateRepository = _boom
+check("no warning, no read", inventory_service.inventory(None, 1, matter=MATTER)["warnings"], [])
+
 print("")
 print("FAILURES: %d" % len(FAILURES))
 for name in FAILURES:

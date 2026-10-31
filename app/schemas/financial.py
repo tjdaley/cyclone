@@ -13,6 +13,7 @@ from db.models.financial import (
     AccountType,
     DateProvenance,
     ProductionResponsibility,
+    InventoryExclusionReason,
     PropertyCharacter,
     StatementBoundary,
     StatementReviewStatus,
@@ -132,6 +133,27 @@ class FinancialAccountResponse(BaseModel):
     notes: Optional[str]
     antecedent_account_id: Optional[int]
     is_closed: bool
+    currency: str = "USD"
+    excluded_from_inventory: bool = False
+    inventory_exclusion_reason: Optional[InventoryExclusionReason] = None
+    inventory_exclusion_note: Optional[str] = None
+    inventory_excluded_by: Optional[str] = None
+    inventory_excluded_at: Optional[datetime] = None
+
+
+class InventoryExclusionRequest(BaseModel):
+    """
+    Keep an account on the inventory but out of its totals, or put it back.
+
+    Its own request rather than a field on the account PATCH, because the
+    server stamps who did it and when — a judgment that moves the net of an
+    estate needs an author, and a client-supplied name is not one.
+    """
+    excluded: bool = Field(..., description="True to leave the account out of the totals")
+    reason: Optional[InventoryExclusionReason] = Field(
+        default=None, description="Why. Optional; 'other' requires a note")
+    note: Optional[str] = Field(
+        default=None, description="The explanation when the reason is 'other'")
 
 
 class FinancialAccountUpdateRequest(BaseModel):
@@ -157,6 +179,14 @@ class FinancialAccountUpdateRequest(BaseModel):
         description="The account this one succeeds, so a reissued card reads as one history",
     )
     is_closed: Optional[bool] = None
+    currency: Optional[str] = Field(
+        default=None, pattern=r"^[A-Za-z]{3}$",
+        description="ISO 4217 code. Changing it relabels the figures; it converts nothing")
+
+    @field_validator("currency")
+    @classmethod
+    def _upper_currency(cls, value: Optional[str]) -> Optional[str]:
+        return value.upper() if value else value
 
 
 class FinancialAccountCreateRequest(BaseModel):
@@ -414,6 +444,10 @@ class TransactionTagResponse(BaseModel):
     is_active: bool
     client_visible: bool = Field(
         default=False, description="Whether clients are offered this tag in the portal")
+    guest_id: Optional[int] = Field(
+        default=None, description="Set on a financial professional's own tag. Read-only to staff")
+    guest_name: Optional[str] = Field(
+        default=None, description="Whose tag it is, for labelling it on staff screens")
     usage_count: Optional[int] = Field(
         default=None,
         description="Transactions carrying this tag; populated on the tag list, not on writes",
@@ -906,6 +940,22 @@ class InventoryRow(BaseModel):
         default=None, description="Stamp on that statement's first page, where one was detected")
     statement_id: Optional[int] = None
     is_closed: bool = False
+    currency: str = Field(default="USD", description="The account's currency")
+    native_balance: Optional[str] = Field(
+        default=None,
+        description="The balance as printed, in the account's currency, when that is not USD. "
+                    "``balance`` is then the dollar conversion, or None with no rate")
+    usd_per_unit: Optional[str] = Field(default=None, description="The rate used, when converted")
+    rate_as_of: Optional[date] = None
+    conversion_note: Optional[str] = Field(
+        default=None, description="'Balance of PKR 10,000,000.00 converted to USD at 0.0036 "
+                                  "USD/PKR' — or why it could not be")
+    excluded: bool = Field(
+        default=False, description="Listed, but left out of the totals by a person's decision")
+    exclusion_label: Optional[str] = Field(
+        default=None, description="Why, in words — the canned reason or the 'other' note")
+    excluded_by: Optional[str] = None
+    excluded_at: Optional[datetime] = None
 
 
 class InventoryTotals(BaseModel):
@@ -917,6 +967,26 @@ class InventoryTotals(BaseModel):
         ..., description="Accounts with no statement on file. Listed, never totalled — an "
                          "account nobody has produced a statement for is what the reader needs "
                          "to see")
+    excluded: int = Field(
+        default=0, description="Accounts listed but left out of the totals by a person's decision")
+    unconverted: int = Field(
+        default=0, description="Foreign-currency accounts with no rate: listed, not totalled")
+
+
+class CurrencyRateResponse(BaseModel):
+    currency: str
+    usd_per_unit: str = Field(..., description="Exact decimal string")
+    as_of: date
+    source: Optional[str] = None
+    entered_by: Optional[str] = None
+
+
+class CurrencyRateRequest(BaseModel):
+    """A rate for the inventory. Dollars per ONE unit: PKR at 0.0036."""
+
+    usd_per_unit: Decimal = Field(..., gt=0)
+    as_of: date
+    source: Optional[str] = Field(default=None, max_length=300)
 
 
 class InventoryReport(BaseModel):
@@ -930,6 +1000,10 @@ class InventoryReport(BaseModel):
     warnings: list[str] = Field(
         default_factory=list,
         description="What the report could not establish — chiefly a missing client alignment")
+    currencies: list[str] = Field(
+        default_factory=list, description="Foreign currencies held on the matter, needing a rate")
+    rates: list[CurrencyRateResponse] = Field(
+        default_factory=list, description="The rates recorded for them")
 
 
 class ComplianceMatrix(BaseModel):

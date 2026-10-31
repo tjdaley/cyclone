@@ -5,6 +5,7 @@ Ingestion is queued (§11a): a statement PDF is one LLM call per statement over
 a document that may hold several months, which is far too long to hold a
 request open. The upload returns a job id; the worker does the work.
 """
+from decimal import Decimal
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -30,6 +31,7 @@ from db.repositories.financial import (
 from db.repositories.matter import MatterRepository
 from db.repositories.staff import StaffRepository
 from dependencies import get_db_manager, require_role
+from schemas.common import MessageResponse
 from schemas.portal import ClientTagReview
 from schemas.financial import (
     AccountDeletePreview,
@@ -42,6 +44,9 @@ from schemas.financial import (
     ComplianceExportRequest,
     ComplianceMatrix,
     FinancialAccountCreateRequest,
+    CurrencyRateRequest,
+    CurrencyRateResponse,
+    InventoryExclusionRequest,
     InventoryReport,
     MotionTextResponse,
     StatementBalanceRequest,
@@ -522,6 +527,67 @@ def get_inventory(
     return InventoryReport(**inventory_service.inventory(manager, matter_id, matter=matter))
 
 
+@router.put("/matters/{matter_id}/currency-rates/{currency}", response_model=CurrencyRateResponse)
+def set_currency_rate(
+    matter_id: int,
+    currency: str,
+    body: CurrencyRateRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> CurrencyRateResponse:
+    """
+    The rate the inventory uses to show one currency in dollars on this matter.
+
+    Dollars per ONE unit — PKR at 0.0036. Entered by a person with its date and
+    source, because a converted figure on a schedule is only as good as a rate
+    somebody can cite.
+    """
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    staff, staff_name = _staff_and_name(request, manager)
+    try:
+        saved = inventory_service.set_rate(
+            manager, matter_id, currency, body.usd_per_unit, body.as_of,
+            staff.id, staff_name, source=body.source,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="matter_currency_rate_set",
+        entity_type="matter_currency_rates",
+        entity_id=str(saved.id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"matter_id": matter_id, "currency": saved.currency,
+                    "usd_per_unit": str(saved.usd_per_unit), "as_of": saved.as_of.isoformat()},
+    )
+    return CurrencyRateResponse(
+        currency=saved.currency, usd_per_unit=format(Decimal(str(saved.usd_per_unit)).normalize(), "f"),
+        as_of=saved.as_of, source=saved.source, entered_by=saved.entered_by,
+    )
+
+
+@router.delete("/matters/{matter_id}/currency-rates/{currency}", response_model=MessageResponse)
+def delete_currency_rate(
+    matter_id: int,
+    currency: str,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> MessageResponse:
+    """Remove a rate. Foreign balances in that currency then leave the inventory totals."""
+    if not inventory_service.delete_rate(manager, matter_id, currency):
+        raise HTTPException(status_code=404, detail="No rate is recorded for that currency")
+    AuditLogger(manager).log(
+        action="matter_currency_rate_deleted",
+        entity_type="matter_currency_rates",
+        entity_id="%s:%s" % (matter_id, currency.upper()),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"matter_id": matter_id, "currency": currency.upper()},
+    )
+    return MessageResponse(message="Rate removed")
+
+
 @router.post("/matters/{matter_id}/inventory/export")
 def export_inventory(
     matter_id: int,
@@ -988,6 +1054,42 @@ def update_account(
     return FinancialAccountResponse(**repo.update(account_id, updates).model_dump())
 
 
+@router.put("/financial-accounts/{account_id}/inventory-exclusion",
+            response_model=FinancialAccountResponse)
+def set_inventory_exclusion(
+    account_id: int,
+    body: InventoryExclusionRequest,
+    request: Request,
+    manager: Any = Depends(get_db_manager),
+    _=Depends(require_role(_STAFF_ROLES)),
+) -> FinancialAccountResponse:
+    """
+    Keep an account on the inventory but out of its totals, or put it back.
+
+    Separate from the account PATCH so the server, not the caller, says who did
+    it and when: the decision moves the net of an estate.
+    """
+    staff, staff_name = _staff_and_name(request, manager)
+    try:
+        updated = inventory_service.set_exclusion(
+            manager, account_id, body.excluded, staff.id, staff_name,
+            reason=body.reason, note=body.note,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    AuditLogger(manager).log(
+        action="financial_account_inventory_exclusion",
+        entity_type="financial_accounts",
+        entity_id=str(account_id),
+        supabase_uid=request.state.supabase_uid,
+        after_json={"excluded": body.excluded,
+                    "reason": getattr(body.reason, "value", None)},
+    )
+    return FinancialAccountResponse(**updated.model_dump())
+
+
 @router.get("/financial-accounts/{account_id}/merge-preview/{target_account_id}",
             response_model=AccountMergePreview)
 def preview_account_merge(
@@ -1200,17 +1302,25 @@ def delete_statement(
 @router.get("/statements/{statement_id}/transactions", response_model=list[TransactionResponse])
 def list_statement_transactions(
     statement_id: int,
+    include_deleted: bool = False,
     manager: Any = Depends(get_db_manager),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[TransactionResponse]:
-    """One statement's lines, in printed order."""
-    records = FinancialAccountTransactionRepository(manager).get_by_statement(statement_id)
+    """
+    One statement's lines, in printed order.
+
+    ``include_deleted`` is for the drill-down, which shows a removed line greyed
+    out so somebody can see what was taken off and put it back.
+    """
+    records = FinancialAccountTransactionRepository(manager).get_by_statement(
+        statement_id, include_deleted=include_deleted)
     return [TransactionResponse(**r.model_dump()) for r in records]
 
 
 @router.get("/financial-accounts/{account_id}/transactions", response_model=list[TransactionResponse])
 def list_account_transactions(
     account_id: int,
+    include_deleted: bool = False,
     manager: Any = Depends(get_db_manager),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[TransactionResponse]:
@@ -1219,7 +1329,8 @@ def list_account_transactions(
 
     This is the query behind the waste and reimbursement exhibits.
     """
-    records = FinancialAccountTransactionRepository(manager).get_by_account(account_id)
+    records = FinancialAccountTransactionRepository(manager).get_by_account(
+        account_id, include_deleted=include_deleted)
     return [TransactionResponse(**r.model_dump()) for r in records]
 
 
@@ -1519,7 +1630,17 @@ def list_tags(
     """
     repo = TransactionTagRepository(manager)
     tags = repo.available_for_matter(matter_id, include_inactive=include_inactive)
-    return [TransactionTagResponse(**t.model_dump(), usage_count=repo.in_use(t.id)) for t in tags]
+    # A financial professional's tags come back too, carrying whose they are, so
+    # staff can see and filter on what the expert flagged. The screens keep them
+    # out of every picker that applies or edits a tag.
+    names: dict[int, str] = {}
+    if any(t.guest_id is not None for t in tags):
+        from db.repositories.guest import GuestProfessionalRepository
+        names = {g.id: g.full_name
+                 for g in GuestProfessionalRepository(manager).select_many(condition={})[0]}
+    return [TransactionTagResponse(**t.model_dump(), usage_count=repo.in_use(t.id),
+                                   guest_name=names.get(t.guest_id) if t.guest_id else None)
+            for t in tags]
 
 
 @router.post("/matters/{matter_id}/transaction-tags",
@@ -1584,8 +1705,12 @@ def update_tag(
 ) -> TransactionTagResponse:
     """Rename or restyle a tag. Its links to transactions are untouched."""
     repo = TransactionTagRepository(manager)
-    if repo.select_one(condition={"id": tag_id}) is None:
+    held = repo.select_one(condition={"id": tag_id})
+    if held is None:
         raise HTTPException(status_code=404, detail="Tag not found")
+    if held.guest_id is not None:
+        raise HTTPException(status_code=409,
+                            detail="That tag belongs to a financial professional; only they can edit it")
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No fields provided for update")
@@ -1608,8 +1733,12 @@ def delete_tag(
     without a trace. The count in the error is what the caller needs to decide.
     """
     repo = TransactionTagRepository(manager)
-    if repo.select_one(condition={"id": tag_id}) is None:
+    held = repo.select_one(condition={"id": tag_id})
+    if held is None:
         raise HTTPException(status_code=404, detail="Tag not found")
+    if held.guest_id is not None:
+        raise HTTPException(status_code=409,
+                            detail="That tag belongs to a financial professional; only they can delete it")
     in_use = repo.in_use(tag_id)
     if in_use and not force:
         raise HTTPException(

@@ -38,6 +38,7 @@ class PortalAccount(BaseModel):
     account_number_last4: Optional[str] = None
     name_on_account: Optional[str] = None
     is_closed: bool = False
+    currency: str = "USD"
     statements: int = Field(default=0, description="How many statements are held for it")
 
 
@@ -87,6 +88,7 @@ class PortalTransaction(BaseModel):
     bates_number: Optional[str] = None
     institution: Optional[str] = None
     account_last4: Optional[str] = None
+    currency: str = "USD"
     tag_ids: list[int] = Field(default_factory=list, description="Live tags on this line")
     cleared_tag_ids: list[int] = Field(
         default_factory=list,

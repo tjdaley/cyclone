@@ -10,13 +10,13 @@ import {
   queueStatement, awaitStatementJob, retryStatement, setStatementBoundary,
   correctStatementBalances,
   setStatementBates,
-  getFinancialAccounts, updateFinancialAccount,
+  getFinancialAccounts, updateFinancialAccount, setInventoryExclusion,
   getAccountStatements, getStatementExceptions, reviewStatement,
   getStatementTransactions, getAccountTransactions,
   previewAccountMerge, mergeAccounts,
   deleteStatement, previewAccountDelete, deleteAccount,
 } from '../../lib/api'
-import { money, isNegative, formatDate } from '../../lib/money'
+import { money, isNegative, formatDate, formatTimestampDate } from '../../lib/money'
 import TransactionSearchPanel from './TransactionSearchPanel'
 import UndisclosedAccountsPanel from './UndisclosedAccountsPanel'
 import FisPanel from './FisPanel'
@@ -34,7 +34,7 @@ import type {
   AccountMergePreview, AccountDeletePreview,
   AccountStatement, StatementReviewStatus, AccountTransaction,
   StatementIngestSummary, StatementJobStatus, ExtractionFlag, StatementBoundary,
-  ProductionResponsibility,
+  ProductionResponsibility, InventoryExclusionReason, InventoryExclusionPayload,
 } from '../../types'
 
 // Dropdown order: what the money sits in, then what is owed, then what is
@@ -58,6 +58,26 @@ const ACCOUNT_TYPES: AccountType[] = [
  * `no-underline` is what carries it. Opacity alone still reads as a link.
  */
 const linkBusy = 'disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed'
+
+/**
+ * Why an account is left out of the inventory totals. Offered only here, in the
+ * editor: the one-click toggle on the inventory grid records no reason.
+ */
+const EXCLUSION_REASONS: InventoryExclusionReason[] = [
+  'stale', 'no_ownership_interest', 'stipulated_separate_other_party', 'other',
+]
+/** Suggestions only: any three-letter ISO code is accepted. */
+const COMMON_CURRENCIES = [
+  'USD', 'CAD', 'MXN', 'EUR', 'GBP', 'CHF', 'INR', 'PKR', 'CNY', 'JPY', 'KRW', 'PHP',
+  'AED', 'SAR', 'ILS', 'NGN', 'BRL', 'AUD',
+]
+
+const EXCLUSION_LABEL: Record<InventoryExclusionReason, string> = {
+  stale: 'Stale',
+  no_ownership_interest: 'No party has an ownership interest',
+  stipulated_separate_other_party: 'Stipulated separate property of the other party',
+  other: 'Other',
+}
 
 /** Why a row went inert. Shown on hover of anything `busy` disabled. */
 const RETRY_WAIT =
@@ -189,7 +209,7 @@ function Flags({ flags }: { flags: ExtractionFlag[] }) {
 }
 
 /** Reconciliation state as a chip: printed close vs. the sum of the lines. */
-function ReconcileBadge({ statement }: { statement: AccountStatement }) {
+function ReconcileBadge({ statement, currency }: { statement: AccountStatement; currency?: string }) {
   if (statement.reconciled) {
     return <span className="text-xs rounded-full px-2 py-0.5 bg-green-100 text-green-800">reconciled</span>
   }
@@ -198,7 +218,7 @@ function ReconcileBadge({ statement }: { statement: AccountStatement }) {
   }
   return (
     <span className="text-xs rounded-full px-2 py-0.5 bg-red-100 text-red-800 tabular-nums">
-      off by {money(statement.reconciliation_delta)}
+      off by {money(statement.reconciliation_delta, currency)}
     </span>
   )
 }
@@ -277,6 +297,9 @@ export default function MatterFinancialsPage() {
    * whole-account history, where a line has no single document to belong to.
    */
   const viewedStatement = statements.find(s => s.id === openStatementId)
+  /** An account's currency, so its figures print in what the bank printed. */
+  const currencyOf = (accountId: number | null | undefined): string =>
+    accounts.find(a => a.id === accountId)?.currency ?? 'USD'
   const [busy, setBusy] = useState(false)
   // Which statement's Retry is running, so its own row can say so while the
   // others explain why they went quiet. `busy` alone cannot: it is page-wide,
@@ -550,7 +573,7 @@ export default function MatterFinancialsPage() {
     if (openStatementId === statement.id) { setOpenStatementId(null); setTransactions([]); return }
     setOpenStatementId(statement.id); setBusy(true)
     try {
-      setTransactions(await getStatementTransactions(statement.id))
+      setTransactions(await getStatementTransactions(statement.id, true))
       setTxLabel(period(statement))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load transactions')
@@ -561,7 +584,7 @@ export default function MatterFinancialsPage() {
   async function openWholeHistory(account: FinancialAccount) {
     setOpenStatementId(null); setBusy(true)
     try {
-      setTransactions(await getAccountTransactions(account.id))
+      setTransactions(await getAccountTransactions(account.id, true))
       setTxLabel(`all periods · ${accountLabel(account)}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load transactions')
@@ -749,10 +772,14 @@ export default function MatterFinancialsPage() {
     } finally { setBusy(false) }
   }
 
-  async function saveAccount(accountId: number, patch: Record<string, unknown>) {
+  async function saveAccount(
+    accountId: number, patch: Record<string, unknown>, exclusion?: InventoryExclusionPayload,
+  ) {
     setBusy(true)
     try {
-      const updated = await updateFinancialAccount(accountId, patch)
+      let updated = await updateFinancialAccount(accountId, patch)
+      // Its own call, not a PATCH field, so the server stamps who and when.
+      if (exclusion) updated = await setInventoryExclusion(accountId, exclusion)
       setAccounts(prev => prev.map(a => (a.id === updated.id ? updated : a)))
       setEditing(null)
     } catch (err) {
@@ -1173,9 +1200,9 @@ export default function MatterFinancialsPage() {
                     )}
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-3 text-xs text-text-secondary tabular-nums">
-                    <span>opened {money(s.beginning_balance)}</span>
-                    <span>printed close {money(s.ending_balance)}</span>
-                    <span>computed {money(s.computed_ending_balance)}</span>
+                    <span>opened {money(s.beginning_balance, currencyOf(s.financial_account_id))}</span>
+                    <span>printed close {money(s.ending_balance, currencyOf(s.financial_account_id))}</span>
+                    <span>computed {money(s.computed_ending_balance, currencyOf(s.financial_account_id))}</span>
                   </div>
                   <Flags flags={s.flags} />
                 </div>
@@ -1206,6 +1233,7 @@ export default function MatterFinancialsPage() {
       {balancesFor && (
         <StatementBalanceDialog
           statement={balancesFor}
+          currency={currencyOf(balancesFor.financial_account_id)}
           /* The neighbours come from the list already on screen — no fetch.
              Found by period rather than array position, so the hint stays right
              whatever order the list arrives in, and rejected reads are skipped
@@ -1237,7 +1265,7 @@ export default function MatterFinancialsPage() {
             setBatesFor(null)
             // The lines now carry numbers, so anything open on screen is stale.
             if (openStatementId === updated.id) {
-              setTransactions(await getStatementTransactions(updated.id))
+              setTransactions(await getStatementTransactions(updated.id, true))
             }
             await refresh()
           }} />
@@ -1301,8 +1329,14 @@ export default function MatterFinancialsPage() {
         ) : (
           <div className="space-y-2">
             {accounts.map(a => (
-              <div key={a.id} className={`border border-border rounded ${a.is_closed ? 'opacity-60' : ''}`}>
-                <div className="flex flex-wrap items-baseline gap-2 p-3">
+              <div key={a.id} className={`border rounded ${
+                openAccountId === a.id ? 'border-yellow-400' : 'border-border'} ${
+                a.is_closed ? 'opacity-60' : ''}`}>
+                {/* The open account is highlighted, so scrolling back up from a
+                    long transaction list finds it at a glance. Stronger than the
+                    open statement's highlight inside it. */}
+                <div className={`flex flex-wrap items-baseline gap-2 p-3 rounded-t ${
+                  openAccountId === a.id ? 'bg-yellow-200' : ''}`}>
                   <button type="button" className="text-sm font-medium text-navy underline"
                     onClick={() => openAccount(a)}>
                     {accountLabel(a)}
@@ -1329,6 +1363,18 @@ export default function MatterFinancialsPage() {
                     <span className="text-xs text-text-secondary">held by {partyName(a.opposing_party_id)}</span>
                   )}
                   {a.is_closed && <span className="text-xs text-text-secondary">closed</span>}
+                  {a.currency !== 'USD' && (
+                    <span className="text-xs rounded-full px-2 py-0.5 bg-sky-100 text-sky-800 font-mono"
+                      title={`Kept in ${a.currency}. Figures are shown as printed, not converted.`}>
+                      {a.currency}
+                    </span>
+                  )}
+                  {a.excluded_from_inventory && (
+                    <span className="text-xs rounded-full px-2 py-0.5 bg-gray-100 text-text-secondary"
+                      title="Listed on the inventory but left out of its totals">
+                      not in inventory totals
+                    </span>
+                  )}
                   <span className="ml-auto flex gap-3">
                     <button type="button" className="text-xs text-navy underline"
                       onClick={() => openWholeHistory(a)}>All transactions</button>
@@ -1341,7 +1387,7 @@ export default function MatterFinancialsPage() {
 
                 {editing === a.id && (
                   <AccountEditor account={a} parties={parties} accounts={accounts} busy={busy}
-                    onSave={patch => saveAccount(a.id, patch)}
+                    onSave={(patch, exclusion) => saveAccount(a.id, patch, exclusion)}
                     onMerged={async () => {
                       // The merged-away account is gone; close the editor before
                       // refreshing or it re-renders against a row that no longer exists.
@@ -1355,7 +1401,8 @@ export default function MatterFinancialsPage() {
                     {statements.length === 0 ? (
                       <p className="text-sm text-text-secondary">No statements filed against this account.</p>
                     ) : statements.map(s => (
-                      <div key={s.id} className={`flex flex-wrap items-baseline gap-2 text-sm ${
+                      <div key={s.id} className={`flex flex-wrap items-baseline gap-2 text-sm -mx-1.5 px-1.5 py-0.5 rounded ${
+                        openStatementId === s.id ? 'bg-yellow-100' : ''} ${
                         s.review_status === 'rejected' ? 'opacity-50' : ''}`}>
                         <button type="button" className="text-navy underline" onClick={() => openStatement(s)}>
                           {period(s)}
@@ -1368,7 +1415,7 @@ export default function MatterFinancialsPage() {
                         <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${REVIEW_COLOR[s.review_status]}`}>
                           {REVIEW_LABEL[s.review_status]}
                         </span>
-                        <ReconcileBadge statement={s} />
+                        <ReconcileBadge statement={s} currency={a.currency} />
                         {s.bates_first ? (
                           <span className="text-xs text-text-secondary font-mono">
                             {s.bates_first}
@@ -1409,7 +1456,7 @@ export default function MatterFinancialsPage() {
                             title={busy ? RETRY_WAIT
                               : 'Correct a balance the import read wrong'}
                             onClick={() => setBalancesFor(s)}>
-                            {money(s.beginning_balance)} → {money(s.ending_balance)}
+                            {money(s.beginning_balance, a.currency)} → {money(s.ending_balance, a.currency)}
                           </button>
                           <button type="button"
                             className={`text-xs text-red-700 underline ${linkBusy}`}
@@ -1447,7 +1494,10 @@ export default function MatterFinancialsPage() {
                   onClick={() => setAddingTo(viewedStatement)}>Add a line</button>
               )}
               <span className="text-sm text-text-secondary tabular-nums">
-                {transactions.length} lines
+                {transactions.filter(t => t.deleted_at === null).length} lines
+                {transactions.some(t => t.deleted_at !== null) && (
+                  <> · {transactions.filter(t => t.deleted_at !== null).length} removed</>
+                )}
               </span>
             </div>
           </div>
@@ -1465,7 +1515,15 @@ export default function MatterFinancialsPage() {
               </thead>
               <tbody>
                 {transactions.map(t => (
-                  <tr key={t.id} className="border-b border-border/60 align-top">
+                  /* A removed line stays on screen in grey: readable, so
+                     somebody can see what was taken off and put it back, and
+                     plainly not part of the totals. Keyed on deleted_at, not the
+                     MANUAL_DELETION flag — a restored line keeps that flag in
+                     its history. */
+                  <tr key={t.id} className={`border-b border-border/60 align-top ${
+                    t.deleted_at !== null ? 'bg-gray-50 text-gray-400' : ''}`}
+                    title={t.deleted_at !== null
+                      ? 'Removed from the statement — not included in its totals' : undefined}>
                     <td className="py-2 pr-3 whitespace-nowrap tabular-nums">
                       {formatDate(t.transaction_date)}
                       {t.date_provenance !== 'printed' && (
@@ -1480,13 +1538,16 @@ export default function MatterFinancialsPage() {
                       {t.location && <span className="text-xs text-text-secondary"> · {t.location}</span>}
                       {t.flags.length > 0 && <Flags flags={t.flags} />}
                     </td>
-                    <td className="py-2 pr-3 text-text-secondary">{t.counterparty ?? '—'}</td>
-                    <td className={`py-2 pr-3 text-right whitespace-nowrap tabular-nums ${
-                      isNegative(t.amount) ? 'text-text-primary' : 'text-green-700'}`}>
-                      {money(t.amount)}
+                    <td className={`py-2 pr-3 ${t.deleted_at !== null ? '' : 'text-text-secondary'}`}>
+                      {t.counterparty ?? '—'}
                     </td>
-                    <td className="py-2 pr-3 text-right whitespace-nowrap tabular-nums text-text-secondary">
-                      {money(t.running_balance)}
+                    <td className={`py-2 pr-3 text-right whitespace-nowrap tabular-nums ${
+                      t.deleted_at !== null ? '' : isNegative(t.amount) ? 'text-text-primary' : 'text-green-700'}`}>
+                      {money(t.amount, currencyOf(t.financial_account_id))}
+                    </td>
+                    <td className={`py-2 pr-3 text-right whitespace-nowrap tabular-nums ${
+                      t.deleted_at !== null ? '' : 'text-text-secondary'}`}>
+                      {money(t.running_balance, currencyOf(t.financial_account_id))}
                     </td>
                     <td className="py-2 text-right">
                       <button type="button" className="text-xs text-navy underline"
@@ -1500,6 +1561,9 @@ export default function MatterFinancialsPage() {
           <p className="text-xs text-text-secondary mt-3">
             † date derived from the statement period rather than printed on the line.
             Amounts are signed by their effect on the printed balance.
+            {transactions.some(t => t.deleted_at !== null) && (
+              <> Lines in grey were removed from the statement and are not in its totals.</>
+            )}
           </p>
         </div>
       )}
@@ -1520,9 +1584,20 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
   parties: OpposingParty[]
   accounts: FinancialAccount[]
   busy: boolean
-  onSave: (patch: Record<string, unknown>) => void
+  onSave: (patch: Record<string, unknown>, exclusion?: InventoryExclusionPayload) => void
   onMerged: () => Promise<void>
 }) {
+  const [exclusion, setExclusion] = useState({
+    excluded: account.excluded_from_inventory,
+    reason: account.inventory_exclusion_reason,
+    note: account.inventory_exclusion_note ?? '',
+  })
+  const exclusionChanged =
+    exclusion.excluded !== account.excluded_from_inventory
+    || (exclusion.excluded && (exclusion.reason !== account.inventory_exclusion_reason
+        || exclusion.note.trim() !== (account.inventory_exclusion_note ?? '')))
+  const exclusionIncomplete =
+    exclusion.excluded && exclusion.reason === 'other' && !exclusion.note.trim()
   const [draft, setDraft] = useState({
     institution: account.institution,
     account_type: account.account_type,
@@ -1536,6 +1611,7 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
     notes: account.notes ?? '',
     antecedent_account_id: account.antecedent_account_id,
     is_closed: account.is_closed,
+    currency: account.currency,
   })
 
   function set<K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) {
@@ -1555,6 +1631,19 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
           onChange={e => set('account_type', e.target.value as AccountType)}>
           {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{ACCOUNT_TYPE_LABEL[t]}</option>)}
         </select>
+      </div>
+      <div>
+        <label className="label" htmlFor={`cur-${account.id}`}>Currency</label>
+        <input id={`cur-${account.id}`} className="input mt-1 font-mono uppercase" maxLength={3}
+          list="iso-currencies" value={draft.currency}
+          onChange={e => set('currency', e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} />
+        <datalist id="iso-currencies">
+          {COMMON_CURRENCIES.map(c => <option key={c} value={c} />)}
+        </datalist>
+        <p className="text-xs text-text-secondary mt-1">
+          The ISO code the statements are printed in. Changing it relabels the figures; it
+          converts nothing. The inventory converts at a rate set on the Inventory tab.
+        </p>
       </div>
       <div>
         <label className="label" htmlFor={`last4-${account.id}`}>Last four</label>
@@ -1638,20 +1727,66 @@ function AccountEditor({ account, parties, accounts, busy, onSave, onMerged }: {
         <textarea id={`notes-${account.id}`} className="input mt-1" rows={2} value={draft.notes}
           onChange={e => set('notes', e.target.value)} />
       </div>
+      <div className="md:col-span-2 space-y-2">
+        {/* Kept on the inventory, left out of its totals: a stale or closed
+            account whose last balance should not move the net. The reason is
+            optional, and asked for only once the box is ticked. */}
+        <label className="flex items-center gap-2 text-sm text-text-secondary">
+          <input type="checkbox" checked={exclusion.excluded}
+            onChange={e => setExclusion(prev => ({ ...prev, excluded: e.target.checked }))} />
+          Exclude from inventory totals
+        </label>
+        {exclusion.excluded && (
+          <div className="ml-6 grid gap-2 md:grid-cols-2">
+            <div>
+              <label className="label" htmlFor={`excl-${account.id}`}>Why (optional)</label>
+              <select id={`excl-${account.id}`} className="input mt-1"
+                value={exclusion.reason ?? ''}
+                onChange={e => setExclusion(prev => ({
+                  ...prev, reason: (e.target.value || null) as InventoryExclusionReason | null }))}>
+                <option value="">— no reason given —</option>
+                {EXCLUSION_REASONS.map(r => <option key={r} value={r}>{EXCLUSION_LABEL[r]}</option>)}
+              </select>
+            </div>
+            {exclusion.reason === 'other' && (
+              <div>
+                <label className="label" htmlFor={`excl-note-${account.id}`}>Explain</label>
+                <input id={`excl-note-${account.id}`} className="input mt-1" value={exclusion.note}
+                  placeholder="Paid off at mediation, …"
+                  onChange={e => setExclusion(prev => ({ ...prev, note: e.target.value }))} />
+              </div>
+            )}
+            {account.excluded_from_inventory && account.inventory_excluded_by && (
+              <p className="text-xs text-text-secondary md:col-span-2">
+                Excluded by {account.inventory_excluded_by}
+                {account.inventory_excluded_at && <> on {formatTimestampDate(account.inventory_excluded_at)}</>}.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
       <div className="md:col-span-2 flex items-center justify-between">
         <label className="flex items-center gap-2 text-sm text-text-secondary">
           <input type="checkbox" checked={draft.is_closed}
             onChange={e => set('is_closed', e.target.checked)} />
           Account is closed
         </label>
-        <button type="button" className="btn-primary" disabled={busy}
+        <button type="button" className="btn-primary"
+          disabled={busy || exclusionIncomplete || draft.currency.length !== 3}
+          title={exclusionIncomplete ? 'Say why when the reason is Other'
+            : draft.currency.length !== 3 ? 'A currency is a three-letter code, such as USD or PKR'
+            : undefined}
           onClick={() => onSave({
             ...draft,
             account_number_last4: draft.account_number_last4 || null,
             name_on_account: draft.name_on_account || null,
             purpose: draft.purpose || null,
             notes: draft.notes || null,
-          })}>
+          }, exclusionChanged ? {
+            excluded: exclusion.excluded,
+            reason: exclusion.excluded ? exclusion.reason : null,
+            note: exclusion.excluded && exclusion.reason === 'other' ? exclusion.note.trim() : null,
+          } : undefined)}>
           Save
         </button>
       </div>
@@ -1906,8 +2041,9 @@ function sameMoney(a: string | null, b: string | null): boolean {
  * automatically: the authority is the figure printed on the page, and a chain
  * that disagrees does not say WHICH of the two statements is wrong.
  */
-function StatementBalanceDialog({ statement, prior, next, onSaved, onClose }: {
+function StatementBalanceDialog({ statement, currency, prior, next, onSaved, onClose }: {
   statement: AccountStatement
+  currency?: string
   prior?: AccountStatement
   next?: AccountStatement
   onSaved: (updated: AccountStatement) => void | Promise<void>
@@ -1961,7 +2097,7 @@ function StatementBalanceDialog({ statement, prior, next, onSaved, onClose }: {
       <p className={`text-xs mt-1 ${agrees ? 'text-text-secondary' : 'text-amber-700'}`}>
         {agrees ? '✓ ' : '≠ '}
         The {label} statement ({period(neighbour)}) {label === 'previous' ? 'closed' : 'opened'} at{' '}
-        <span className="font-mono tabular-nums">{money(expected)}</span>
+        <span className="font-mono tabular-nums">{money(expected, currency)}</span>
         {!agrees && (
           <>
             {' '}

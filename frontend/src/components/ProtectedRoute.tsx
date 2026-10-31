@@ -2,11 +2,22 @@ import { Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
 /**
- * Wraps routes that require an authenticated session with a staff/admin role.
+ * The roles the staff app is for. Nothing else gets in.
  *
- * A client has their own portal with its own shell, its own wording and its own
- * API prefix, so this sends them there rather than denying them. `/access-denied`
- * now means what it says: a signed-in account with no place to go.
+ * This used to admit any role that was not `client`, which was true only while
+ * every other role was staff. A financial professional (052) is not, and staff
+ * routes are not matter-scoped: letting one in here would show an expert
+ * retained on one case every matter in the firm.
+ */
+const STAFF_ROLES = ['attorney', 'paralegal', 'admin']
+
+/**
+ * Wraps routes that require an authenticated session with a staff role.
+ *
+ * A client has their own portal and a financial professional their own shell,
+ * each with its own API prefix, so this sends them there rather than denying
+ * them. `/access-denied` means what it says: a signed-in account with no place
+ * to go.
  */
 export default function ProtectedRoute() {
   const { session, profile, loading } = useAuth()
@@ -23,17 +34,16 @@ export default function ProtectedRoute() {
     return <Navigate to="/login" replace />
   }
 
-  // Authenticated but no role yet — needs staff correlation
+  // Authenticated but no role yet — needs correlation
   if (!profile) {
     return <Navigate to="/onboarding" replace />
   }
 
-  // Clients belong in the portal. Checked on `roles` rather than the primary
-  // role: somebody who is both a client and staff of the firm is staff here.
+  // Checked on `roles` rather than the primary role: somebody who is both a
+  // client and staff of the firm is staff here.
   const roles = profile.roles ?? [profile.role]
-  if (roles.includes('client') && !roles.some(r => r !== 'client')) {
-    return <Navigate to="/portal" replace />
-  }
-
-  return <Outlet />
+  if (roles.some(r => STAFF_ROLES.includes(r))) return <Outlet />
+  if (roles.includes('client')) return <Navigate to="/portal" replace />
+  if (roles.includes('financial_professional')) return <Navigate to="/guest" replace />
+  return <Navigate to="/access-denied" replace />
 }

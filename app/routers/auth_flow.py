@@ -43,6 +43,8 @@ def _build_profile(supabase_uid: str, records: list[UserRoleInDB]) -> dict[str, 
         "role": primary_role(role_values),
         "staff_id": next((r.staff_id for r in records if r.staff_id is not None), None),
         "client_id": next((r.client_id for r in records if r.client_id is not None), None),
+        "guest_id": next((getattr(r, "guest_id", None) for r in records
+                          if getattr(r, "guest_id", None) is not None), None),
         "auth_email": next((r.auth_email for r in records if r.auth_email is not None), None),
     }
 

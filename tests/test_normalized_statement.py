@@ -257,6 +257,18 @@ except ValueError as e:
     check("refused", str(e), "Statement 999 not found")
 
 print("")
+print("9. a foreign-currency account prints its own code, never a dollar sign")
+rupees = account(AccountType.savings)
+rupees["currency"] = "PKR"
+wire(statement(beginning="10000000.00", ending="9999500.00", computed="9999500.00"),
+     account=rupees, lines=[tx(1, 1, "ATM WITHDRAWAL", "-500.00")])
+pkr_text = exhibit_service.to_markdown(
+    statement_service.build_normalized_exhibit(None, 1)).decode("utf-8")
+check_true("the balance reads in rupees", "PKR 10,000,000.00" in pkr_text)
+check_true("so does a line", "-PKR 500.00" in pkr_text)
+check("and no dollar sign anywhere", "$" in pkr_text, False)
+
+print("")
 print("FAILURES: %d" % len(FAILURES))
 for name in FAILURES:
     print("  - " + name)

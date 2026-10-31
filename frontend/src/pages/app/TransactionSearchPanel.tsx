@@ -92,6 +92,8 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
     () => new Map(categories.map(c => [c.id, c])), [categories],
   )
   const tagById = useMemo(() => new Map(tags.map(t => [t.id, t])), [tags])
+  /** The tags staff may apply or manage: not a financial professional's own. */
+  const staffTags = useMemo(() => tags.filter(t => !t.guest_id), [tags])
 
   const run = useCallback(async (next: TransactionSearchFilter) => {
     setBusy(true); setError(null)
@@ -231,7 +233,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
       </div>
 
       {showTagManager && (
-        <TagManager matterId={matterId} tags={tags} onChanged={refreshTags}
+        <TagManager matterId={matterId} tags={staffTags} onChanged={refreshTags}
           onError={setError} />
       )}
 
@@ -373,13 +375,18 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                   on ? 'bg-navy text-white border-navy' : `${tagClass(t)} hover:opacity-80`}`}
                 title={t.description ?? undefined}
                 onClick={() => patch({ tag_ids: toggleIn(filter.tag_ids, t.id), untagged: false })}>
-                {t.matter_id === null ? t.label : `★ ${t.label}`}
+                {t.guest_id ? `◆ ${t.label} · ${t.guest_name ?? 'guest'}`
+                  : t.matter_id === null ? t.label : `★ ${t.label}`}
                 {t.usage_count ? <span className="ml-1 opacity-70 tabular-nums">{t.usage_count}</span> : null}
               </button>
             )
           })}
         </div>
-        <p className="text-xs text-text-secondary mt-1.5">★ marks a tag that exists only on this matter.</p>
+        <p className="text-xs text-text-secondary mt-1.5">
+          ★ marks a tag that exists only on this matter.
+          {tags.some(t => t.guest_id) && <> ◆ marks a financial professional&rsquo;s own tag: you can
+            filter on it, but only they can apply it.</>}
+        </p>
       </div>
 
       {error && (
@@ -400,7 +407,10 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
           )}
         </span>
         <span className="text-sm text-text-secondary tabular-nums">
-          page total {money(pageSum)}
+          {/* Rupees and dollars do not add, so a mixed page has no total. */}
+          {new Set(rows.map(r => r.currency ?? 'USD')).size > 1
+            ? 'page total: mixed currencies'
+            : `page total ${money(pageSum, rows[0]?.currency)}`}
         </span>
         {isFiltered(filter) && (
           <button type="button" className="text-xs text-navy underline"
@@ -443,13 +453,13 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
           <select className="input py-1 text-sm max-w-xs" value="" disabled={busy}
             onChange={e => { const v = e.target.value; if (v) applyTag(Number(v), false) }}>
             <option value="">Add tag…</option>
-            {tags.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+            {staffTags.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
 
           <select className="input py-1 text-sm max-w-xs" value="" disabled={busy}
             onChange={e => { const v = e.target.value; if (v) applyTag(Number(v), true) }}>
             <option value="">Remove tag…</option>
-            {tags.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+            {staffTags.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
 
           <button type="button" className="text-xs text-navy underline ml-auto"
@@ -523,8 +533,9 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                             const tag = tagById.get(id)
                             if (!tag) return null
                             return (
-                              <span key={id} className={`text-xs rounded-full px-2 py-0.5 border ${tagClass(tag)}`}>
-                                {tag.label}
+                              <span key={id} className={`text-xs rounded-full px-2 py-0.5 border ${tagClass(tag)}`}
+                                title={tag.guest_id ? `Tagged by ${tag.guest_name ?? 'a financial professional'}` : undefined}>
+                                {tag.guest_id ? `◆ ${tag.label}` : tag.label}
                               </span>
                             )
                           })}
@@ -570,7 +581,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                     </td>
                     <td className={`py-2 pr-3 text-right whitespace-nowrap tabular-nums ${
                       isNegative(row.amount) ? 'text-text-primary' : 'text-green-700'}`}>
-                      {money(row.amount)}
+                      {money(row.amount, row.currency)}
                     </td>
                     <td className="py-2 text-right">
                       <button type="button" className="text-xs text-navy underline"

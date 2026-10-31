@@ -385,6 +385,22 @@ with pymupdf.open(stream=pdf, filetype="pdf") as document:
 check_true("in the PDF", "Documents summarized in this exhibit" in text)
 check_true("with its Bates range", "KF000100" in text)
 
+print("currency: totals are kept per currency, and figures carry their code")
+dollars = row(1, Decimal("100.00"))
+rupees = {**row(2, Decimal("-250000.00")), "currency": "PKR", "institution": "Habib Bank"}
+_, mixed_exhibit = build([dollars, rupees])
+mixed_md = to_markdown(mixed_exhibit).decode("utf-8")
+check_true("a rupee line prints in rupees", "-PKR 250,000.00" in mixed_md)
+check_true("the totals are split by currency", "Total debits (PKR)" in mixed_md)
+check("and never summed together", "Net" in dict(mixed_exhibit.summary), False)
+mixed_csv = to_csv(mixed_exhibit).decode("utf-8-sig")
+check_true("the CSV gains a Currency column", mixed_csv.splitlines()[0].endswith("Currency"))
+check_true("and keeps the raw figure", "-250000.00,PKR" in mixed_csv)
+_, plain = build([dollars])
+check("an all-dollar export keeps its old shape",
+      to_csv(plain).decode("utf-8-sig").splitlines()[0].endswith("Currency"), False)
+check("and its old totals", dict(plain.summary).get("Net"), "$100.00")
+
 print("")
 if FAILURES:
     print("%d FAILED: %s" % (len(FAILURES), ", ".join(FAILURES)))

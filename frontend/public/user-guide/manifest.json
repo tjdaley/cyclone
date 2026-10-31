@@ -137,6 +137,13 @@
           "number": "16",
           "title": "Letting a client in",
           "summary": "Switching the portal on, publishing tags, and reviewing what a client marked"
+        },
+        {
+          "slug": "18-financial-professionals",
+          "file": "18-financial-professionals.md",
+          "number": "18",
+          "title": "Letting a financial professional in",
+          "summary": "Giving an expert consented access to one matter's accounts, transactions and inventory, and the list of what they were provided"
         }
       ]
     }

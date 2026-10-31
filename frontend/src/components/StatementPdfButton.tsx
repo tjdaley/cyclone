@@ -16,8 +16,14 @@ export default function StatementPdfButton({
   statementId,
   page,
   label = 'Show statement',
+  opener = openStatementPdf,
 }: {
   statementId: number
+  /**
+   * How to fetch and open the signed URL. The staff route by default; the
+   * guest surface passes its own, because a guest may not call staff routes.
+   */
+  opener?: (statementId: number, page?: number | null) => Promise<void>
   /**
    * Land on this page instead of the statement's first transaction page. A
    * transaction row knows which page its own line is printed on, and that is a
@@ -34,7 +40,7 @@ export default function StatementPdfButton({
     setBusy(true)
     setProblem(null)
     try {
-      await openStatementPdf(statementId, page)
+      await opener(statementId, page)
     } catch (e) {
       // A dead link is the failure this button exists to replace, so the reason
       // has to be readable rather than a console entry. The server distinguishes

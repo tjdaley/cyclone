@@ -152,6 +152,16 @@ class Row:
     #: grids on one sheet should not have to delete a break somebody guessed at.
     #: The PDF is the one output handed across a counsel table as printed.
     page_break: bool = False
+    #: The currency this row's money cells are in, when it is not dollars. The
+    #: exhibit formats print the code; the CSV keeps the raw figure and should
+    #: carry the code in a column of its own.
+    currency: Optional[str] = None
+    #: Draw in grey: listed for completeness, not part of what the table adds up.
+    #:
+    #: Grey in the PDF and the DOCX. Markdown and CSV have no colour, so a row
+    #: that is muted must ALSO carry a mark in its cells and a footnote saying
+    #: what the mark means -- the grey is a courtesy, the mark is the record.
+    muted: bool = False
 
     def __iter__(self):
         return iter(self.cells)
@@ -440,7 +450,7 @@ def _plain(line: Line) -> str:
     return "".join(run.text for run in line.runs)
 
 
-def money(value: Any) -> str:
+def money(value: Any, currency: Optional[str] = None) -> str:
     """
     Format an amount as currency without ever parsing it as a float.
 
@@ -452,6 +462,9 @@ def money(value: Any) -> str:
 
     A negative reads ``-$1,200.00`` rather than the accounting parenthesis: a
     minus sign needs no convention explained to whoever is reading the exhibit.
+
+    ``currency`` other than USD prints the ISO code instead of a dollar sign —
+    ``-PKR 1,200.00`` — because a dollar sign on a rupee figure is the error.
     """
     text = str(value if value is not None else "").strip()
     if not text:
@@ -464,7 +477,8 @@ def money(value: Any) -> str:
         return str(value)
     grouped = "{:,}".format(int(whole))
     cents = (fraction + "00")[:2]
-    return "%s$%s.%s" % ("-" if negative else "", grouped, cents)
+    symbol = "$" if not currency or currency.upper() == "USD" else currency.upper() + " "
+    return "%s%s%s.%s" % ("-" if negative else "", symbol, grouped, cents)
 
 
 def _visible(exhibit: Exhibit) -> list[tuple[int, Column]]:
@@ -479,9 +493,9 @@ def _visible(exhibit: Exhibit) -> list[tuple[int, Column]]:
             if not column.csv_only]
 
 
-def _cell(value: str, column: Column) -> str:
+def _cell(value: str, column: Column, currency: Optional[str] = None) -> str:
     """One table cell, formatted for an exhibit rather than for a spreadsheet."""
-    return money(value) if column.money else (value or "")
+    return money(value, currency) if column.money else (value or "")
 
 
 # ── Renderers ────────────────────────────────────────────────────────────────
@@ -549,7 +563,8 @@ def to_markdown(exhibit: Exhibit) -> bytes:
                     + [""] * (len(visible) - 1)) + " |")
                 continue
             cells = [
-                _md_cell(_cell(row.cells[index] if index < len(row.cells) else "", column))
+                _md_cell(_cell(row.cells[index] if index < len(row.cells) else "", column,
+                               row.currency))
                 for index, column in visible
             ]
             if cells:
@@ -890,8 +905,11 @@ def to_docx(exhibit: Exhibit) -> bytes:
                 cell.text = ""
                 paragraph = cell.paragraphs[0]
                 value = row.cells[index] if index < len(row.cells) else ""
-                _docx_face(paragraph.add_run(_cell(value, column)),
-                           bold=row.heading or row.rule)
+                run = paragraph.add_run(_cell(value, column, row.currency))
+                _docx_face(run, bold=row.heading or row.rule)
+                if row.muted:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
                 if position == 0 and row.depth:
                     paragraph.paragraph_format.left_indent = Inches(0.2 * row.depth)
                 _docx_align(paragraph, column)
@@ -960,6 +978,7 @@ _PDF_STYLE = ("<style>"
               "padding-top:7px;border-bottom:1px solid #999}"
               "td.n,th.n{text-align:right}"
               "td.r{border-top:1px solid #666;border-bottom:0}"
+              "td.m{color:#888}"
               "p{margin:2pt 0}"
               ".c{text-align:center}"
               ".notice{font-size:7.5pt;font-style:italic;color:#333}"
@@ -1030,12 +1049,14 @@ def _pdf_rows(exhibit: Exhibit) -> list[tuple[str, bool, bool]]:
         drawn = []
         for position, (index, column) in enumerate(visible):
             value = row.cells[index] if index < len(row.cells) else ""
-            text = _esc(_cell(value, column))
+            text = _esc(_cell(value, column, row.currency))
             if row.heading or row.rule:
                 text = "<b>%s</b>" % text
             classes = "n" if column.numeric else "c" if column.center else ""
             if row.rule:
                 classes = (classes + " r").strip()
+            if row.muted:
+                classes = (classes + " m").strip()
             style = (' style="padding-left:%dpt"' % (4 + row.depth * 12)
                      if position == 0 and row.depth else "")
             drawn.append('<td class="%s"%s>%s</td>' % (classes, style, text))

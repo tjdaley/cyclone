@@ -3962,6 +3962,16 @@ class StatementService:
         dropped = len(transaction_repo.get_by_statement(
             statement_id, include_deleted=True)) - len(lines)
 
+        # The statement's own currency, printed as its code where it is not
+        # dollars: this document is read beside the original, which says rupees.
+        currency = (getattr(account, "currency", None) or "USD") if account else "USD"
+
+        def cash(value: Any) -> str:
+            return money(value, currency)
+
+        def cash_or_dash(value: Optional[Decimal]) -> str:
+            return "—" if value is None else money(value, currency)
+
         is_liability = (account is not None
                         and account.account_type in _LIABILITY_ACCOUNTS)
         # A card's "charges" raise what is owed and its "payments" lower it; a
@@ -4010,22 +4020,22 @@ class StatementService:
         ups = sum((t.amount for t in lines if t.amount > 0), Decimal("0"))
         downs = sum((t.amount for t in lines if t.amount < 0), Decimal("0"))
         rows.append(Row(cells=cells("", "", "Beginning balance",
-                                    _exhibit_money(statement.beginning_balance), "")))
+                                    cash_or_dash(statement.beginning_balance), "")))
         rows.append(Row(cells=cells("", "", "%s (%d)" % (up_label,
                                                          sum(1 for t in lines if t.amount > 0)),
-                                    money(ups), "")))
+                                    cash(ups), "")))
         rows.append(Row(cells=cells("", "", "%s (%d)" % (down_label,
                                                          sum(1 for t in lines if t.amount < 0)),
-                                    money(downs), "")))
+                                    cash(downs), "")))
         rows.append(Row(cells=cells("", "", "Ending balance (as printed)",
-                                    _exhibit_money(statement.ending_balance), ""), rule=True))
+                                    cash_or_dash(statement.ending_balance), ""), rule=True))
         rows.append(Row(cells=cells("", "", "Ending balance (computed)",
-                                    _exhibit_money(statement.computed_ending_balance), "")))
+                                    cash_or_dash(statement.computed_ending_balance), "")))
         if not statement.reconciled and statement.reconciliation_delta is not None:
             # Said across the face of the document, because somebody reading
             # this beside the original is looking for exactly this number.
             rows.append(banner("DIFFERENCE OF %s — the lines below do not account for the "
-                               "change in balance" % money(statement.reconciliation_delta)))
+                               "change in balance" % cash(statement.reconciliation_delta)))
 
         rows.append(banner("TRANSACTIONS"))
         running = statement.beginning_balance
@@ -4042,12 +4052,12 @@ class StatementService:
                 _short_date(line.transaction_date or line.posted_date),
                 getattr(line, "check_number", None) or "",
                 description,
-                money(line.amount),
-                "" if running is None else money(running),
+                cash(line.amount),
+                "" if running is None else cash(running),
             )))
         rows.append(Row(cells=cells("", "", "TOTAL (%d lines)" % len(lines),
-                                    money(ups + downs),
-                                    _exhibit_money(statement.computed_ending_balance)),
+                                    cash(ups + downs),
+                                    cash_or_dash(statement.computed_ending_balance)),
                         rule=True))
 
         extraction = statement.extraction or {}

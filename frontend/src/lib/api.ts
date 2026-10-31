@@ -24,7 +24,8 @@ import type {
   MatterCounselLinkPayload, MatterCounselLinkUpdatePayload,
   PleadingIngestPreview, PleadingCommitRequest, PleadingCommitResponse,
   MatterIntakePreview, MatterIntakeCommitRequest, MatterIntakeCommitResponse,
-  FinancialAccount, FinancialAccountUpdatePayload, AccountStatement,
+  FinancialAccount, FinancialAccountUpdatePayload, InventoryExclusionPayload, AccountStatement,
+  CurrencyRate, CurrencyRatePayload,
   AccountTransaction, StatementIngestSummary, StatementJobStatus,
   TransactionCategory, TransactionCategoryPayload,
   TransactionTag, TransactionTagPayload,
@@ -41,6 +42,9 @@ import type {
   ComplianceMatrix, StatementBoundary,
   InventoryReport, FinancialAccountCreatePayload, MotionText, StatementBatesResult,
   FisRequest, FisStatement, FisSetting, FisSettingPayload, FisSchedule,
+  GuestGrant, GuestInvitePayload, GuestConsentPayload, GuestDesignation, GuestLedgerEntry,
+  GuestMatter, GuestAccount, GuestStatement, GuestTransaction, GuestTransactionPage,
+  GuestTag, GuestCategory,
 } from '../types'
 
 // Re-export types so existing call sites that import payloads from '../lib/api'
@@ -1175,6 +1179,38 @@ export async function deletePayeeClassification(id: number): Promise<void> {
   await apiFetch<void>(`/api/v1/payee-classifications/${id}`, { method: 'DELETE' })
 }
 
+/** Record the rate the inventory uses for one currency on this matter. */
+export async function setCurrencyRate(
+  matterId: number, currency: string, payload: CurrencyRatePayload,
+): Promise<CurrencyRate> {
+  return apiFetch<CurrencyRate>(
+    `/api/v1/matters/${matterId}/currency-rates/${encodeURIComponent(currency)}`,
+    { method: 'PUT', body: JSON.stringify(payload) },
+  )
+}
+
+/** Remove a rate. That currency's balances then leave the inventory totals. */
+export async function deleteCurrencyRate(matterId: number, currency: string): Promise<void> {
+  await apiFetch<unknown>(
+    `/api/v1/matters/${matterId}/currency-rates/${encodeURIComponent(currency)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/**
+ * Keep an account on the inventory but out of its totals, or put it back. The
+ * server stamps who and when; the reason is optional.
+ */
+export async function setInventoryExclusion(
+  accountId: number,
+  payload: InventoryExclusionPayload,
+): Promise<FinancialAccount> {
+  return apiFetch<FinancialAccount>(`/api/v1/financial-accounts/${accountId}/inventory-exclusion`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function updateFinancialAccount(
   accountId: number,
   payload: FinancialAccountUpdatePayload,
@@ -1322,13 +1358,23 @@ export async function deleteAccount(accountId: number): Promise<AccountDeletePre
   })
 }
 
-export async function getStatementTransactions(statementId: number): Promise<AccountTransaction[]> {
-  return apiFetch<AccountTransaction[]>(`/api/v1/statements/${statementId}/transactions`)
+/**
+ * One statement's lines. The drill-down asks for removed lines too, so it can
+ * show them greyed out rather than have them vanish on the next load.
+ */
+export async function getStatementTransactions(
+  statementId: number, includeDeleted = false,
+): Promise<AccountTransaction[]> {
+  const q = includeDeleted ? '?include_deleted=true' : ''
+  return apiFetch<AccountTransaction[]>(`/api/v1/statements/${statementId}/transactions${q}`)
 }
 
 /** An account's whole history in date order — the waste/reimbursement query. */
-export async function getAccountTransactions(accountId: number): Promise<AccountTransaction[]> {
-  return apiFetch<AccountTransaction[]>(`/api/v1/financial-accounts/${accountId}/transactions`)
+export async function getAccountTransactions(
+  accountId: number, includeDeleted = false,
+): Promise<AccountTransaction[]> {
+  const q = includeDeleted ? '?include_deleted=true' : ''
+  return apiFetch<AccountTransaction[]>(`/api/v1/financial-accounts/${accountId}/transactions${q}`)
 }
 
 // ── Transaction categories (firm-wide chart of accounts) ──────────────
@@ -1934,4 +1980,166 @@ export async function rerouteReceivedDocument(
   sourceDocumentId: number,
 ): Promise<ReceivedUpload> {
   return apiFetch<ReceivedUpload>(`/api/v1/received-documents/${sourceDocumentId}/route`)
+}
+
+// ── Financial-professional guest access (052) ─────────────────────────────
+//
+// Staff manage a guest's access under /matters/{id}/guests. Everything a guest
+// does goes through /api/v1/guest, which resolves its scope from the caller's
+// grants — never from a staff route, because staff routes are not
+// matter-scoped.
+
+export async function getMatterGuests(matterId: number): Promise<GuestGrant[]> {
+  return apiFetch<GuestGrant[]>(`/api/v1/matters/${matterId}/guests`)
+}
+
+export async function inviteGuest(matterId: number, payload: GuestInvitePayload): Promise<GuestGrant> {
+  return apiFetch<GuestGrant>(`/api/v1/matters/${matterId}/guests`, {
+    method: 'POST', body: JSON.stringify(payload),
+  })
+}
+
+/** A staff member attests that the client consented. Opens the access. */
+export async function attestGuestConsent(
+  matterId: number, grantId: number, payload: GuestConsentPayload,
+): Promise<GuestGrant> {
+  return apiFetch<GuestGrant>(`/api/v1/matters/${matterId}/guests/${grantId}/consent`, {
+    method: 'POST', body: JSON.stringify(payload),
+  })
+}
+
+export async function revokeGuest(
+  matterId: number, grantId: number, reason: string | null, everywhere: boolean,
+): Promise<GuestGrant> {
+  return apiFetch<GuestGrant>(`/api/v1/matters/${matterId}/guests/${grantId}/revoke`, {
+    method: 'POST', body: JSON.stringify({ reason, everywhere }),
+  })
+}
+
+export async function renewGuest(matterId: number, grantId: number, days: number): Promise<GuestGrant> {
+  return apiFetch<GuestGrant>(`/api/v1/matters/${matterId}/guests/${grantId}/renew`, {
+    method: 'POST', body: JSON.stringify({ days }),
+  })
+}
+
+export async function setGuestDesignation(
+  matterId: number, grantId: number, designation: GuestDesignation,
+): Promise<GuestGrant> {
+  return apiFetch<GuestGrant>(`/api/v1/matters/${matterId}/guests/${grantId}`, {
+    method: 'PATCH', body: JSON.stringify({ designation }),
+  })
+}
+
+export async function getGuestDocuments(matterId: number, grantId: number): Promise<GuestLedgerEntry[]> {
+  return apiFetch<GuestLedgerEntry[]>(`/api/v1/matters/${matterId}/guests/${grantId}/documents`)
+}
+
+export async function exportGuestDocuments(
+  matterId: number, grantId: number, format: ExportFormat, exhibitName: string,
+): Promise<DownloadedFile> {
+  return apiDownload(`/api/v1/matters/${matterId}/guests/${grantId}/documents/export`,
+    { format, exhibit_name: exhibitName })
+}
+
+/** The guest's app opened. Returns the purpose reminder to show them. */
+export async function openGuestSession(): Promise<string> {
+  const result = await apiFetch<{ message: string }>('/api/v1/guest/session', { method: 'POST' })
+  return result.message
+}
+
+export async function getGuestMatters(): Promise<GuestMatter[]> {
+  return apiFetch<GuestMatter[]>('/api/v1/guest/matters')
+}
+
+export async function getGuestAccounts(matterId: number): Promise<GuestAccount[]> {
+  return apiFetch<GuestAccount[]>(`/api/v1/guest/matters/${matterId}/accounts`)
+}
+
+export async function getGuestStatements(accountId: number): Promise<GuestStatement[]> {
+  return apiFetch<GuestStatement[]>(`/api/v1/guest/accounts/${accountId}/statements`)
+}
+
+export async function getGuestStatementTransactions(statementId: number): Promise<GuestTransaction[]> {
+  return apiFetch<GuestTransaction[]>(`/api/v1/guest/statements/${statementId}/transactions`)
+}
+
+/** Same popup-blocker handling as the staff version: open the tab on the click, then navigate. */
+export async function openGuestStatementPdf(statementId: number, page?: number | null): Promise<void> {
+  const tab = window.open('', '_blank')
+  try {
+    const { url, page: statementPage } = await apiFetch<{
+      url: string; expires_in: number; page: number | null; source_filename: string | null
+    }>(`/api/v1/guest/statements/${statementId}/pdf-url`)
+    const landOn = page ?? statementPage
+    const target = landOn ? `${url}#page=${landOn}` : url
+    if (tab) tab.location.href = target
+    else window.location.href = target
+  } catch (e) {
+    tab?.close()
+    throw e
+  }
+}
+
+export async function searchGuestTransactions(
+  matterId: number, filter: TransactionSearchFilter,
+): Promise<GuestTransactionPage> {
+  return apiFetch<GuestTransactionPage>(`/api/v1/guest/matters/${matterId}/transactions/search`, {
+    method: 'POST', body: JSON.stringify(filter),
+  })
+}
+
+export async function exportGuestTransactions(
+  matterId: number, filter: TransactionSearchFilter, format: ExportFormat, exhibitName: string,
+): Promise<DownloadedFile> {
+  return apiDownload(`/api/v1/guest/matters/${matterId}/transactions/export`,
+    { ...filter, format, exhibit_name: exhibitName })
+}
+
+export async function getGuestInventory(matterId: number): Promise<InventoryReport> {
+  return apiFetch<InventoryReport>(`/api/v1/guest/matters/${matterId}/inventory`)
+}
+
+export async function exportGuestInventory(
+  matterId: number, format: ExportFormat, exhibitName: string,
+): Promise<DownloadedFile> {
+  return apiDownload(`/api/v1/guest/matters/${matterId}/inventory/export`,
+    { format, exhibit_name: exhibitName })
+}
+
+export async function getGuestCategories(): Promise<GuestCategory[]> {
+  return apiFetch<GuestCategory[]>('/api/v1/guest/categories')
+}
+
+export async function getGuestTags(matterId: number): Promise<GuestTag[]> {
+  return apiFetch<GuestTag[]>(`/api/v1/guest/matters/${matterId}/tags`)
+}
+
+export async function createGuestTag(
+  matterId: number, payload: { label: string; description?: string | null; color?: string | null },
+): Promise<GuestTag> {
+  return apiFetch<GuestTag>(`/api/v1/guest/matters/${matterId}/tags`, {
+    method: 'POST', body: JSON.stringify(payload),
+  })
+}
+
+export async function updateGuestTag(
+  tagId: number, payload: { label?: string; description?: string | null; is_active?: boolean },
+): Promise<GuestTag> {
+  return apiFetch<GuestTag>(`/api/v1/guest/tags/${tagId}`, {
+    method: 'PATCH', body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteGuestTag(tagId: number): Promise<void> {
+  await apiFetch<unknown>(`/api/v1/guest/tags/${tagId}`, { method: 'DELETE' })
+}
+
+export async function tagGuestTransactions(
+  matterId: number, transactionIds: number[], tagId: number, remove = false,
+): Promise<number> {
+  const result = await apiFetch<{ changed: number }>(
+    `/api/v1/guest/matters/${matterId}/transactions/tag`,
+    { method: 'POST', body: JSON.stringify({ transaction_ids: transactionIds, tag_id: tagId, remove }) },
+  )
+  return result.changed
 }

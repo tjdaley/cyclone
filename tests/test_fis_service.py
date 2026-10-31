@@ -426,6 +426,23 @@ check("a single-month window divides by one",
       line(one_month, "Mortgage Payment")["monthly"], "-600.00")
 check("and reports one month", one_month["window"]["months"], 1)
 
+print("currency: a foreign account is left out, and the warning names it")
+# An average of rupees and dollars is not a figure. Until the FIS converts by
+# transaction date, the foreign account is out and the warning says which.
+usd, pkr = FakeAccount(1), FakeAccount(2, "Habib Bank", "5555")
+usd.currency, pkr.currency = "USD", "PKR"
+mixed = build([
+    FakeTransaction(1, 1, date(2026, 1, 5), "-600.00", category_id=2),
+    FakeTransaction(2, 2, date(2026, 1, 6), "-500000.00", category_id=2),
+], start=(2026, 1), end=(2026, 1), accounts=[usd, pkr])
+check("only the dollar line counts", line(mixed, "Mortgage Payment")["monthly"], "-600.00")
+check_true("and the warning names the currency",
+           any("PKR" in w and "not included" in w for w in mixed["warnings"]))
+only_pkr = build([FakeTransaction(2, 2, date(2026, 1, 6), "-500000.00", category_id=2)],
+                 start=(2026, 1), end=(2026, 1), accounts=[pkr])
+check_true("all-foreign still says why it is empty",
+           any("PKR" in w for w in only_pkr["warnings"]))
+
 print("")
 if FAILURES:
     print("%d FAILED: %s" % (len(FAILURES), ", ".join(FAILURES)))

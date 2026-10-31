@@ -100,6 +100,7 @@ def my_accounts(
             account_number_last4=account.account_number_last4,
             name_on_account=account.name_on_account,
             is_closed=bool(account.is_closed),
+            currency=getattr(account, "currency", None) or "USD",
             statements=len(held),
         ))
     return out

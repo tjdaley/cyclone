@@ -104,6 +104,25 @@ export interface FinancialAccount {
   /** The account this one succeeds - a reissued card, a bank migration, a rollover. */
   antecedent_account_id: number | null
   is_closed: boolean
+  /** ISO 4217 code the account is kept in (051). Amounts are as printed, never converted. */
+  currency: string
+  /** Listed on the inventory but left out of its totals (050). A person's decision. */
+  excluded_from_inventory: boolean
+  inventory_exclusion_reason: InventoryExclusionReason | null
+  /** The explanation, when the reason is 'other'. */
+  inventory_exclusion_note: string | null
+  inventory_excluded_by: string | null
+  inventory_excluded_at: string | null
+}
+
+/** Why an account is listed on the inventory but left out of its totals. */
+export type InventoryExclusionReason =
+  | 'stale' | 'no_ownership_interest' | 'stipulated_separate_other_party' | 'other'
+
+export interface InventoryExclusionPayload {
+  excluded: boolean
+  reason?: InventoryExclusionReason | null
+  note?: string | null
 }
 
 /** An account added by hand: a scrap of paper, or a row off the undisclosed list. */
@@ -148,6 +167,8 @@ export interface FinancialAccountUpdatePayload {
   notes?: string | null
   antecedent_account_id?: number | null
   is_closed?: boolean
+  /** Relabels the figures; converts nothing. */
+  currency?: string
 }
 
 export interface AccountStatement {
@@ -341,6 +362,12 @@ export interface TransactionTag {
   is_active: boolean
   /** Offered to clients in the portal. Opt-in: the firm's own list carries strategy. */
   client_visible?: boolean
+  /**
+   * Set on a financial professional's own tag (052). Staff see it and can filter
+   * on it, never apply, edit or delete it: it is the expert's assertion.
+   */
+  guest_id?: number | null
+  guest_name?: string | null
   /** Lines carrying this tag — the size of the exhibit it would produce. */
   usage_count: number | null
 }
@@ -395,6 +422,8 @@ export interface TransactionSearchRow extends AccountTransaction {
   client_tag_ids?: number[]
   institution: string | null
   account_last4: string | null
+  /** The account's currency. A page of rupees and dollars has no single total. */
+  currency?: string
 }
 
 export interface TransactionSearchResult {
@@ -789,6 +818,22 @@ export interface InventoryRow {
   bates: string | null
   statement_id: number | null
   is_closed: boolean
+  currency: string
+  /**
+   * The balance as printed, in the account's currency, when that is not USD.
+   * `balance` is then the dollar conversion — or null when no rate is recorded.
+   */
+  native_balance: string | null
+  usd_per_unit: string | null
+  rate_as_of: string | null
+  /** "Balance of PKR 10,000,000.00 converted to USD at 0.0036 USD/PKR …", or why it was not. */
+  conversion_note: string | null
+  /** Listed, but left out of the totals by a person's decision. */
+  excluded: boolean
+  /** Why, in words: the canned reason or the 'other' note. */
+  exclusion_label: string | null
+  excluded_by: string | null
+  excluded_at: string | null
 }
 
 export interface InventoryTotals {
@@ -798,6 +843,25 @@ export interface InventoryTotals {
   accounts: number
   /** Accounts with no statement: listed, never totalled. */
   without_balance: number
+  /** Accounts listed but left out of the totals by a person's decision. */
+  excluded: number
+  /** Foreign-currency accounts with no rate: listed in their own currency, not totalled. */
+  unconverted: number
+}
+
+/** The rate a matter's inventory uses for one currency. Dollars per ONE unit. */
+export interface CurrencyRate {
+  currency: string
+  usd_per_unit: string
+  as_of: string
+  source: string | null
+  entered_by: string | null
+}
+
+export interface CurrencyRatePayload {
+  usd_per_unit: string
+  as_of: string
+  source?: string | null
 }
 
 export interface InventoryReport {
@@ -807,6 +871,9 @@ export interface InventoryReport {
   /** Letter and what it means, for the Held by column. */
   legend: [string, string][]
   warnings: string[]
+  /** Foreign currencies held on the matter — each needs a rate to be totalled. */
+  currencies: string[]
+  rates: CurrencyRate[]
 }
 
 export interface ComplianceMatrix {

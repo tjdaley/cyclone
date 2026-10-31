@@ -250,6 +250,47 @@ Four things to know before you rely on it:
 | **"no statement" is not zero** | An account with nothing on file is listed with no balance and left out of the total. The count sits beneath the table. **Those rows are the ones to chase**, and the [Compliance tab](11-discovery-tracking.md) says which months are missing |
 | **Held by is P, R or J** | Taken from the account's ownership and the matter's client alignment. If the column reads **C and O**, the matter has no alignment recorded — set it on the matter detail page ([Chapter 3](03-matters.md)) |
 
+### Leaving an account out of the totals
+
+A stale account, or a closed one whose last statement is years old, can stay on
+the list without moving the totals. Hover over the row and click the small
+**⊘** at its right-hand end. The row turns grey, the totals and the net are
+recalculated without it, and a line under **Net** says how many grey rows there
+are. Click the ⊘ again to put it back. Hover over it to see who excluded it and
+when.
+
+To record **why**, use **Edit** on the account in the **Accounts** tab and tick
+**Exclude from inventory totals**. The reasons offered are *Stale*, *No party
+has an ownership interest*, *Stipulated separate property of the other party*,
+and *Other*, which asks you to explain. The reason is optional.
+
+The exports carry it: an excluded row is marked **†** (and grey in the PDF and
+Word versions), a footnote names each one with its reason, and the CSV has an
+**Excluded from totals** column to filter on. Who excluded it is not printed on
+the exhibit.
+
+### Accounts in another currency
+
+Every account has a **Currency**, USD unless somebody changes it. A statement in
+another currency is imported **exactly as printed**, and nothing detects the
+currency for you: after importing one, open the account with **Edit** on the
+**Accounts** tab and set **Currency** to its three-letter code (PKR, EUR, MXN…).
+The figures are then shown with that code instead of a dollar sign everywhere
+they appear. Changing the currency relabels the figures; it converts nothing.
+
+On the **Inventory** tab, a matter holding another currency shows a
+**Conversion rates** box above the tables. Enter **USD per 1** unit of that
+currency (Pakistani rupees at about 0.0036, for example), the date the rate is
+as of, and where it came from. Each such balance is then shown in dollars and
+counted in the totals, with the original figure and the rate under it. The
+exports print the conversion in a footnote: *"Balance of PKR 10,000,000.00
+converted to USD at 0.0036 USD/PKR"*. Until a rate is set, the balance is listed
+as printed and left out of the totals.
+
+The **Financial Information Statement** does not convert. Accounts in another
+currency are left out of it, and a warning names them. Transaction exports keep
+a separate total for each currency rather than adding them together.
+
 > ⚠ **This is not the Inventory and Appraisement.** The I&A is a sworn form, and
 > it is not built. This tab is a schedule of account balances — useful for a
 > settlement conference or a temporary-orders hearing, and not the thing you

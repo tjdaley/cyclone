@@ -104,7 +104,7 @@ export default function PortalAccountsPage() {
                       </span>
                       {s.ending_balance !== null && (
                         <span className="text-sm tabular-nums text-text-secondary">
-                          closing {money(s.ending_balance)}
+                          closing {money(s.ending_balance, account.currency)}
                         </span>
                       )}
                       {!s.complete && (

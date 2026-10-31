@@ -7,6 +7,7 @@ from typing import Optional
 from db.models.financial import (
     FinancialAccountInDB,
     FinancialAccountStatementInDB,
+    MatterCurrencyRateInDB,
     FinancialAccountTransactionInDB,
     StatementReviewStatus,
     TransactionCategoryInDB,
@@ -77,6 +78,18 @@ def _apply_amount_range(query, amount_range: AmountRange):
         return query.or_("amount.gte.%s,amount.lte.%s" % (_plain(low), _plain(-low)))
     # A ceiling alone is one window straddling zero, so no `or` is needed.
     return query.gte("amount", _plain(-high)).lte("amount", _plain(high))  # type: ignore[operator]
+
+
+class MatterCurrencyRateRepository(BaseRepository[MatterCurrencyRateInDB]):
+    """CRUD for ``matter_currency_rates`` (051)."""
+
+    def __init__(self, manager: DatabaseManager):
+        super().__init__(manager, "matter_currency_rates", MatterCurrencyRateInDB)
+
+    def by_matter(self, matter_id: int) -> dict[str, MatterCurrencyRateInDB]:
+        """The matter's rates, keyed by currency code."""
+        rows = self.select_many(condition={"matter_id": matter_id})[0]
+        return {r.currency: r for r in rows}
 
 
 class FinancialAccountRepository(BaseRepository[FinancialAccountInDB]):
@@ -623,6 +636,7 @@ class TransactionTagRepository(BaseRepository[TransactionTagInDB]):
         self,
         matter_id: int,
         include_inactive: bool = False,
+        include_guest: bool = True,
     ) -> list[TransactionTagInDB]:
         """
         Every tag offered on a matter: the firm-wide layer plus the case's own.
@@ -637,6 +651,10 @@ class TransactionTagRepository(BaseRepository[TransactionTagInDB]):
         tags = firm + mine
         if not include_inactive:
             tags = [t for t in tags if t.is_active]
+        if not include_guest:
+            # A financial professional's own tags (052). Staff pickers and the
+            # tag manager leave them out: they are the expert's assertions.
+            tags = [t for t in tags if getattr(t, "guest_id", None) is None]
         return tags
 
     def in_use(self, tag_id: int) -> int:

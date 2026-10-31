@@ -17,6 +17,7 @@ import type {
   OpposingCounsel, MatterCounselLink, CounselRole, FullName, ClientAlignment,
 } from '../../types'
 import { CLIENT_ALIGNMENTS } from '../../types'
+import GuestAccessPanel from './GuestAccessPanel'
 
 const STAFF_ROLES: MatterStaffRole[] = ['originating', 'billing_reviewer', 'assigned']
 const COUNSEL_ROLES: CounselRole[] = ['lead', 'co_counsel', 'local_counsel', 'prior_counsel']
@@ -464,6 +465,7 @@ export default function MatterDetailPage() {
 
       <ProductionScopeSection matter={matter} onSaved={setMatter} />
       <ClientPortalSection matter={matter} onSaved={setMatter} />
+      <GuestAccessPanel matterId={matter.id} />
 
       {/* ── Opposing parties ── */}
       <Section title="Opposing parties" count={parties.length}

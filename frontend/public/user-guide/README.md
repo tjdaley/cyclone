@@ -46,6 +46,7 @@ newest chapter sits where its work belongs.)
 | [14. Where leads go](14-lead-routing.md) | How a lead reaches an attorney, who gets notified, and what to check when nobody was |
 | [15. AI costs and prices](15-costs.md) | What the AI work costs, who it was spent on, and how a vendor's price gets entered |
 | [16. Letting a client in](16-client-portal.md) | Switching the portal on, publishing tags, and reviewing what a client marked |
+| [18. Letting a financial professional in](18-financial-professionals.md) | Giving an expert consented access to one matter's accounts, transactions and inventory, and the list of what they were provided |
 
 ---
 

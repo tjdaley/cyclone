@@ -207,7 +207,7 @@ export default function PortalTransactionsPage() {
                 <span className="font-medium text-text-primary">{row.description}</span>
                 <span className={`ml-auto tabular-nums font-medium ${
                   isNegative(row.amount) ? 'text-text-primary' : 'text-green-700'}`}>
-                  {money(row.amount)}
+                  {money(row.amount, row.currency)}
                 </span>
               </div>
               <div className="text-xs text-text-secondary mt-0.5">

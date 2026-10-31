@@ -7,14 +7,21 @@
  * be read into evidence — so these functions never parse.
  */
 
-/** Format a numeric string as US currency. Returns an em dash for null. */
-export function money(value: string | null | undefined): string {
+/**
+ * Format a numeric string as currency. Returns an em dash for null.
+ *
+ * Dollars by default. Any other ISO code prints the code instead of a dollar
+ * sign — `PKR 10,000,000.00` — because a statement in rupees shown with a "$"
+ * makes a household look like millionaires. Nothing is converted here.
+ */
+export function money(value: string | null | undefined, currency?: string | null): string {
   if (value === null || value === undefined || value === '') return '—'
   const negative = value.startsWith('-')
   const [whole, fraction = ''] = value.replace(/^[-+]/, '').split('.')
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const cents = `${fraction}00`.slice(0, 2)
-  return `${negative ? '-' : ''}$${grouped}.${cents}`
+  const symbol = !currency || currency.toUpperCase() === 'USD' ? '$' : `${currency.toUpperCase()} `
+  return `${negative ? '-' : ''}${symbol}${grouped}.${cents}`
 }
 
 /** True when a numeric string is below zero — a debit, or a card payment. */
@@ -28,6 +35,19 @@ export function formatDate(iso: string | null | undefined): string {
   return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, {
     month: 'short', day: 'numeric', year: 'numeric',
   })
+}
+
+/**
+ * The local calendar day of a timestamp — when somebody did something.
+ *
+ * Not `formatDate`, which takes a bare `YYYY-MM-DD` and would read a full
+ * timestamp as an invalid date.
+ */
+export function formatTimestampDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const when = new Date(iso)
+  if (Number.isNaN(when.getTime())) return '—'
+  return when.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
 /**

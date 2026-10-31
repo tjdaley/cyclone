@@ -25,6 +25,7 @@ export interface PortalAccount {
   account_number_last4: string | null
   name_on_account: string | null
   is_closed: boolean
+  currency: string
   statements: number
 }
 
@@ -59,6 +60,7 @@ export interface PortalTransaction {
   bates_number: string | null
   institution: string | null
   account_last4: string | null
+  currency: string
   tag_ids: number[]
   /** Reviewed and removed by the firm. Shown greyed; cannot be re-applied. */
   cleared_tag_ids: number[]

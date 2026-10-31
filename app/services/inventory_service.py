@@ -39,16 +39,43 @@ other side, joint. The exhibit wants a party letter, and the letter depends on
 which side our client is: ``matters.client_alignment``. With no alignment
 recorded the letters fall back to C and O with a warning, because "P" would be
 an assertion about a case nobody has told us the shape of.
+
+KEPT ON THE LIST, LEFT OUT OF THE TOTALS (050)
+────────────────────────────────────────────────────────────────────────────
+A stale account, or one the estate holds no interest in, can be *excluded* by a
+person: still listed — the reader should see it was considered — but its balance
+moves none of the totals. Every format marks it (grey on screen and in the PDF
+and DOCX, a dagger everywhere, a CSV column to filter on), because a figure
+sitting in a column that does not add up to the total beneath it is exactly the
+question nobody wants asked on the stand. The decision carries who made it and
+when; the reason is optional.
+
+FOREIGN CURRENCY (051)
+────────────────────────────────────────────────────────────────────────────
+The inventory is the one report that has to add accounts together, so it is the
+one place a foreign balance is converted — at a rate a person entered for the
+matter, with its date and source, and the row says so in words: "Balance of
+PKR 10,000,000.00 converted to USD at 0.0036 USD/PKR". Nothing stored changes:
+the statement still says what the bank printed. A foreign account with no rate
+is listed in its own currency and left out of the totals, counted, like an
+account with no statement — a rupee figure in a dollar column is the mistake
+this exists to prevent.
 """
 from dataclasses import replace
-from datetime import date
-from decimal import Decimal
+from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 
-from db.models.financial import AccountOwnership, AccountType, PropertyCharacter
+from db.models.financial import (
+    AccountOwnership,
+    AccountType,
+    InventoryExclusionReason,
+    PropertyCharacter,
+)
 from db.repositories.financial import (
     FinancialAccountRepository,
     FinancialAccountStatementRepository,
+    MatterCurrencyRateRepository,
 )
 from db_handler import DatabaseManager
 from services.exhibit_service import Column, Exhibit, Row, caption_lines, money
@@ -82,7 +109,54 @@ _COLUMNS = (
     Column("As of"),
     Column("Balance", numeric=True, money=True),
     Column("Bates"),
+    # The documents mark an excluded row with a dagger and grey; a spreadsheet
+    # needs something it can filter on.
+    Column("Excluded from totals", csv_only=True),
+    # Balance is always dollars once converted; the CSV keeps what was printed.
+    Column("Currency", csv_only=True),
+    Column("Balance as printed", csv_only=True),
+    Column("USD per unit", csv_only=True),
 )
+
+#: The canned reasons, as a reader should see them.
+_EXCLUSION_LABEL = {
+    InventoryExclusionReason.stale: "Stale",
+    InventoryExclusionReason.no_ownership_interest: "No party has an ownership interest",
+    InventoryExclusionReason.stipulated_separate_other_party:
+        "Stipulated separate property of the other party",
+    InventoryExclusionReason.other: "Other",
+}
+
+#: Marks an excluded row in every format, including markdown, which has no grey.
+_EXCLUDED_MARK = "\u2020"
+#: Marks a row whose balance is in, or was converted from, another currency.
+_CURRENCY_MARK = "\u2021"
+_CENT = Decimal("0.01")
+
+
+def _rate_text(rate: Decimal) -> str:
+    """A rate as a person typed it: 0.0036, not 0.0036000000 or 3.6E-3."""
+    text = format(rate.normalize(), "f")
+    return text if "." in text else text + ".0"
+
+
+def _currency(account: Any) -> str:
+    return (getattr(account, "currency", None) or "USD").upper()
+
+
+def _exclusion_label(account: Any) -> Optional[str]:
+    """The reason in words: the 'other' note when there is one, else the canned label."""
+    reason = getattr(account, "inventory_exclusion_reason", None)
+    note = (getattr(account, "inventory_exclusion_note", None) or "").strip()
+    if reason is None:
+        return note or None
+    try:
+        reason = InventoryExclusionReason(getattr(reason, "value", reason))
+    except ValueError:
+        return note or None
+    if reason is InventoryExclusionReason.other:
+        return note or "Other"
+    return _EXCLUSION_LABEL[reason]
 
 
 def _is_liability(account: Any) -> bool:
@@ -122,23 +196,57 @@ class InventoryService:
         statement_repo = FinancialAccountStatementRepository(manager)
 
         letters, warnings = self._letters(matter)
+        # Only asked for when there is something to convert: an all-dollar matter
+        # never touches the table, so a node without 051 behaves as it always did.
+        rates = (self._rates(manager, matter_id, warnings)
+                 if any(_currency(a) != "USD" for a in accounts) else {})
 
         assets: list[dict[str, Any]] = []
         liabilities: list[dict[str, Any]] = []
         no_statement = 0
+        excluded_count = 0
+        unconverted = 0
+        foreign: set[str] = set()
 
         for account in sorted(accounts, key=lambda a: (a.institution or "", a.id)):
             latest = self._latest_statement(statement_repo, account.id)
             liability = _is_liability(account)
 
+            currency = _currency(account)
             balance: Optional[Decimal] = None
+            native: Optional[Decimal] = None
+            rate = None
+            note: Optional[str] = None
             if latest is not None and latest.ending_balance is not None:
                 # Flipped for a liability, and only here. See the module
                 # docstring: the stored figure is what the institution printed.
-                balance = -latest.ending_balance if liability else latest.ending_balance
+                native = -latest.ending_balance if liability else latest.ending_balance
+                if currency == "USD":
+                    balance = native
+                else:
+                    rate = rates.get(currency)
+                    if rate is not None:
+                        balance = (native * Decimal(str(rate.usd_per_unit))).quantize(
+                            _CENT, rounding=ROUND_HALF_UP)
+                        note = "Balance of %s converted to USD at %s USD/%s (rate as of %s%s)" % (
+                            money(native, currency), _rate_text(Decimal(str(rate.usd_per_unit))),
+                            currency, _date(rate.as_of.isoformat()),
+                            "; " + rate.source if rate.source else "")
+                    else:
+                        note = ("Balance of %s. No USD rate is recorded for %s, so it is not "
+                                "included in the totals" % (money(native, currency), currency))
+            if currency != "USD":
+                foreign.add(currency)
 
-            if latest is None or latest.ending_balance is None:
+            excluded = bool(getattr(account, "excluded_from_inventory", False))
+            if excluded:
+                excluded_count += 1
+            elif latest is None or latest.ending_balance is None:
+                # Counted only on included rows: an excluded account is outside
+                # the totals by decision, not for want of a statement.
                 no_statement += 1
+            elif balance is None:
+                unconverted += 1
 
             row = {
                 "account_id": account.id,
@@ -152,6 +260,15 @@ class InventoryService:
                 "bates": self._bates(latest),
                 "statement_id": latest.id if latest is not None else None,
                 "is_closed": bool(account.is_closed),
+                "currency": currency,
+                "native_balance": str(native) if currency != "USD" and native is not None else None,
+                "usd_per_unit": _rate_text(Decimal(str(rate.usd_per_unit))) if rate else None,
+                "rate_as_of": rate.as_of.isoformat() if rate else None,
+                "conversion_note": note,
+                "excluded": excluded,
+                "exclusion_label": _exclusion_label(account) if excluded else None,
+                "excluded_by": getattr(account, "inventory_excluded_by", None) if excluded else None,
+                "excluded_at": getattr(account, "inventory_excluded_at", None) if excluded else None,
             }
             (liabilities if liability else assets).append(row)
 
@@ -162,6 +279,8 @@ class InventoryService:
             "accounts": len(accounts),
             "without_balance": no_statement,
             "outside_estate": outside,
+            "excluded": excluded_count,
+            "unconverted": unconverted,
         }
 
         legend = [("J", "Joint")]
@@ -179,7 +298,84 @@ class InventoryService:
             "totals": totals,
             "legend": legend,
             "warnings": warnings,
+            "currencies": sorted(foreign),
+            "rates": [
+                {"currency": r.currency, "usd_per_unit": _rate_text(Decimal(str(r.usd_per_unit))),
+                 "as_of": r.as_of, "source": r.source, "entered_by": r.entered_by}
+                for code, r in sorted(rates.items()) if code in foreign
+            ],
         }
+
+    @staticmethod
+    def _rates(manager: DatabaseManager, matter_id: int, warnings: list[str]) -> dict[str, Any]:
+        """
+        The matter's conversion rates, keyed by currency.
+
+        A failure to read them never fails the inventory: every foreign row then
+        shows as unconverted, out of the totals, and the warning says why — a
+        visibly incomplete schedule rather than a broken page.
+        """
+        try:
+            return MatterCurrencyRateRepository(manager).by_matter(matter_id)
+        except Exception as e:  # noqa: BLE001 - the schedule still renders without them
+            LOGGER.warning("inventory_service._rates: matter=%s could not read rates: %s",
+                           matter_id, type(e).__name__)
+            warnings.append("Conversion rates could not be read, so no foreign-currency "
+                            "balance is included in the totals. Has migration 051 been run?")
+            return {}
+
+    def set_rate(
+        self,
+        manager: DatabaseManager,
+        matter_id: int,
+        currency: str,
+        usd_per_unit: Decimal,
+        as_of: date,
+        staff_id: int,
+        staff_name: str,
+        source: Optional[str] = None,
+    ) -> Any:
+        """
+        Record the rate the inventory uses for one currency on one matter.
+
+        Replaces any earlier rate for that currency: the inventory states one
+        figure per account, so it needs one rate per currency, and the audit log
+        keeps what it used to be.
+
+        :raises ValueError: For USD, a code that is not three letters, or a rate
+            that is not positive.
+        """
+        code = (currency or "").strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            raise ValueError("A currency is a three-letter ISO code, such as PKR")
+        if code == "USD":
+            raise ValueError("Dollars need no rate")
+        if usd_per_unit is None or usd_per_unit <= 0:
+            raise ValueError("A rate must be greater than zero")
+        repo = MatterCurrencyRateRepository(manager)
+        data = {
+            "matter_id": matter_id,
+            "currency": code,
+            "usd_per_unit": usd_per_unit,
+            "as_of": as_of,
+            "source": (source or "").strip() or None,
+            "entered_by_staff_id": staff_id,
+            "entered_by": staff_name,
+        }
+        held = repo.by_matter(matter_id).get(code)
+        saved = repo.update(held.id, data) if held is not None else repo.insert(data)
+        LOGGER.info("inventory_service.set_rate: matter=%s currency=%s staff=%s",
+                    matter_id, code, staff_id)
+        return saved
+
+    def delete_rate(self, manager: DatabaseManager, matter_id: int, currency: str) -> bool:
+        """Remove a matter's rate for one currency. True when there was one."""
+        repo = MatterCurrencyRateRepository(manager)
+        held = repo.by_matter(matter_id).get((currency or "").strip().upper())
+        if held is None:
+            return False
+        repo.delete(held.id)
+        return True
 
     # ── Pieces ────────────────────────────────────────────────────────────
 
@@ -253,13 +449,74 @@ class InventoryService:
     @staticmethod
     def _sum(rows: list[dict[str, Any]]) -> Decimal:
         """
-        The total of the rows that HAVE a balance.
+        The total of the included rows that HAVE a balance.
 
         Rows without one are not zero — nobody knows what they are — and the
         count of them is reported beside the total so it cannot read as
-        complete.
+        complete. Excluded rows are listed and never summed.
         """
-        return sum((Decimal(r["balance"]) for r in rows if r["balance"] is not None), ZERO)
+        return sum((Decimal(r["balance"]) for r in rows
+                    if r["balance"] is not None and not r.get("excluded")), ZERO)
+
+    # ── Excluding an account from the totals ──────────────────────────────
+
+    def set_exclusion(
+        self,
+        manager: DatabaseManager,
+        account_id: int,
+        excluded: bool,
+        staff_id: int,
+        staff_name: str,
+        reason: Optional[InventoryExclusionReason] = None,
+        note: Optional[str] = None,
+    ) -> Any:
+        """
+        Keep an account on the inventory but out of its totals, or put it back.
+
+        Who and when are stamped here, never taken from the caller. The reason
+        is optional — excluding from the grid in one click records none — but
+        ``other`` without a note says nothing, so it is refused.
+
+        Including an account again clears the reason and the attribution: the
+        audit log keeps the history, and a stale "excluded by" on an included
+        row would contradict the row.
+
+        :return: The updated account.
+        :raises LookupError: If the account does not exist.
+        :raises ValueError: If the reason is ``other`` and there is no note.
+        """
+        repo = FinancialAccountRepository(manager)
+        if repo.select_one(condition={"id": account_id}) is None:
+            raise LookupError("Account not found")
+
+        note = (note or "").strip() or None
+        if excluded:
+            if reason is InventoryExclusionReason.other and note is None:
+                raise ValueError("Say why when the reason is Other")
+            updates = {
+                "excluded_from_inventory": True,
+                "inventory_exclusion_reason": reason,
+                # A note only means something beside "other"; a canned reason
+                # speaks for itself.
+                "inventory_exclusion_note":
+                    note if reason is InventoryExclusionReason.other else None,
+                "inventory_excluded_by_staff_id": staff_id,
+                "inventory_excluded_by": staff_name,
+                "inventory_excluded_at": datetime.now(timezone.utc),
+            }
+        else:
+            updates = {
+                "excluded_from_inventory": False,
+                "inventory_exclusion_reason": None,
+                "inventory_exclusion_note": None,
+                "inventory_excluded_by_staff_id": None,
+                "inventory_excluded_by": None,
+                "inventory_excluded_at": None,
+            }
+        updated = repo.update(account_id, updates)
+        LOGGER.info("inventory_service.set_exclusion: account=%s excluded=%s staff=%s",
+                    account_id, excluded, staff_id)
+        return updated
 
     # ── The exhibit ───────────────────────────────────────────────────────
 
@@ -286,17 +543,33 @@ class InventoryService:
         ):
             if not section:
                 continue
-            rows.append(Row(cells=(title, "", "", "", "", ""), heading=True))
+            rows.append(Row(cells=(title, "", "", "", "", "", "", "", "", ""), heading=True))
             for item in section:
+                foreign_row = item["currency"] != "USD"
+                if item["balance"] is not None:
+                    shown = money(item["balance"])
+                elif item["native_balance"] is not None:
+                    # No rate: the figure in its own currency, out of the total.
+                    shown = money(item["native_balance"], item["currency"])
+                else:
+                    shown = "no statement"
                 rows.append(Row(cells=(
-                    item["institution"] + (" (closed)" if item["is_closed"] else ""),
+                    item["institution"] + (" (closed)" if item["is_closed"] else "")
+                    + (" " + _CURRENCY_MARK if foreign_row and item["native_balance"] else "")
+                    + (" " + _EXCLUDED_MARK if item["excluded"] else ""),
                     item["account_number_last4"] or "—",
                     item["held_by"],
                     _date(item["as_of"]),
-                    money(item["balance"]) if item["balance"] is not None else "no statement",
+                    shown,
                     item["bates"] or "—",
-                )))
-            rows.append(Row(cells=("TOTAL", "", "", "", money(total), ""), rule=True))
+                    ("yes" + (": " + item["exclusion_label"] if item["exclusion_label"] else ""))
+                    if item["excluded"] else "",
+                    item["currency"],
+                    item["native_balance"] or "",
+                    item["usd_per_unit"] or "",
+                ), muted=item["excluded"]))
+            rows.append(Row(cells=("TOTAL", "", "", "", money(total), "", "", "", "", ""),
+                            rule=True))
 
         selection: list[tuple[str, str]] = [
             ("Accounts listed", str(report["totals"]["accounts"])),
@@ -312,6 +585,25 @@ class InventoryService:
                 "%d account(s) on this matter are characterized as outside the marital estate "
                 "and are not part of it" % report["totals"]["outside_estate"],
             ))
+        if report["currencies"]:
+            selection.append((
+                "Currency",
+                "Balances are in US dollars. Accounts kept in %s, marked %s, are converted at "
+                "the rate stated beside each; the statements themselves are in that currency"
+                % (", ".join(report["currencies"]), _CURRENCY_MARK),
+            ))
+        if report["totals"]["unconverted"]:
+            selection.append((
+                "Not converted",
+                "%d account(s) are in a currency with no rate recorded, so they are listed in "
+                "that currency and not included in either total" % report["totals"]["unconverted"],
+            ))
+        if report["totals"]["excluded"]:
+            selection.append((
+                "Excluded",
+                "%d account(s), marked %s, are listed but not included in either total"
+                % (report["totals"]["excluded"], _EXCLUDED_MARK),
+            ))
         if report["totals"]["without_balance"]:
             # Never silent. A schedule that omitted them would read as covering
             # every account, and the ones missing a statement are the ones worth
@@ -324,6 +616,25 @@ class InventoryService:
             ))
 
         footnotes = ["%s = %s" % (letter, meaning) for letter, meaning in report["legend"]]
+        for item in report["assets"] + report["liabilities"]:
+            if item["currency"] == "USD" or not item["conversion_note"]:
+                continue
+            label = item["institution"] + (
+                " \u00b7\u00b7\u00b7\u00b7" + item["account_number_last4"]
+                if item["account_number_last4"] else "")
+            footnotes.append("%s %s: %s" % (_CURRENCY_MARK, label, item["conversion_note"]))
+        # Directly below the table, where somebody meeting the dagger looks. The
+        # reason travels; who excluded it does not -- that is the firm's own
+        # record, not part of a schedule handed across the table.
+        for item in report["assets"] + report["liabilities"]:
+            if not item["excluded"]:
+                continue
+            label = item["institution"] + (
+                " \u00b7\u00b7\u00b7\u00b7" + item["account_number_last4"]
+                if item["account_number_last4"] else "")
+            footnotes.append("%s %s: listed, not included in the totals%s" % (
+                _EXCLUDED_MARK, label,
+                " (%s)" % item["exclusion_label"] if item["exclusion_label"] else ""))
 
         return Exhibit(
             name=exhibit_name,
