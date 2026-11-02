@@ -255,7 +255,7 @@ selection = dict(exhibit.selection)
 check("names the account", selection["Accounts"], "First Financial Bank x9260")
 check("states the period", selection["Period"], "2023-01-01 through 2023-12-31")
 check("names the category", selection["Categories"], "Housing (including sub-categories)")
-check("quotes the text filter", selection["Description contains"], "transfer")
+check("quotes the text filter", selection["Description, payee or location contains"], "transfer")
 check("a filter that was not applied is absent, not listed as none",
       "Tags" in selection, False)
 

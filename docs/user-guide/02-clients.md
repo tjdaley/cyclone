@@ -61,7 +61,7 @@ You get one of two answers:
    | ----- | -------- | ----- |
    | **First name** | Yes | |
    | **Last name** | Yes | |
-   | **Login email (for client portal)** | Yes | The address the client would use to sign in. The client portal is not built yet, so nothing uses this today — but it is required, and it should be right. |
+   | **Login email (for client portal)** | Yes | The Google address the client would sign in with. **Entering it does not let them in**: that takes **Give portal access**, below. It is required, and it should be right. |
    | **Contact email** | Yes | Where you actually write to them. Often the same address. |
    | **Telephone** | Yes | |
    | **Referral type** | Yes | Chosen from a list your firm configures. |
@@ -88,6 +88,9 @@ fields, an existing client also carries:
 | **OK to rehire** | A tick box. Your firm's own answer to whether you would take them back. |
 
 Use the **Search clients…** box to filter the list.
+
+The edit form also holds the **Client portal** panel, which gives and revokes
+the client's sign-in. See [Chapter 16](16-client-portal.md#1-switch-it-on).
 
 ---
 

@@ -1,6 +1,7 @@
 import { useEffect, useState, FormEvent } from 'react'
 import { getClients, getStaff, createClient, updateClient, conflictCheck } from '../../lib/api'
 import type { Client, ClientCreatePayload, ConflictHit, Staff } from '../../types'
+import ClientPortalAccessPanel from './ClientPortalAccessPanel'
 
 function fullName(c: Client) {
   return `${c.name.first_name} ${c.name.last_name}`
@@ -343,6 +344,7 @@ export default function ClientsPage() {
                             <label className="label">Login email (client portal)</label>
                             <input className="input mt-1" type="email" value={edAuthEmail} onChange={e => setEdAuthEmail(e.target.value)} />
                           </div>
+                          <ClientPortalAccessPanel clientId={c.id} savedEmail={c.auth_email} draftEmail={edAuthEmail} />
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                               <label className="label">Contact email</label>

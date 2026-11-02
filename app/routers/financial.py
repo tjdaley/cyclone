@@ -1626,7 +1626,8 @@ def list_tags(
     Every tag offered on this matter: the firm-wide layer plus the case's own.
 
     Usage counts come back with them — the number of lines behind a tag is the
-    size of the exhibit it would produce.
+    size of the exhibit it would produce, so each counts what a search for that
+    tag on THIS matter finds. Deleting a tag still checks the firm-wide total.
     """
     repo = TransactionTagRepository(manager)
     tags = repo.available_for_matter(matter_id, include_inactive=include_inactive)
@@ -1638,7 +1639,8 @@ def list_tags(
         from db.repositories.guest import GuestProfessionalRepository
         names = {g.id: g.full_name
                  for g in GuestProfessionalRepository(manager).select_many(condition={})[0]}
-    return [TransactionTagResponse(**t.model_dump(), usage_count=repo.in_use(t.id),
+    usage = transaction_search_service.tag_usage(manager, matter_id, [t.id for t in tags])
+    return [TransactionTagResponse(**t.model_dump(), usage_count=usage.get(t.id, 0),
                                    guest_name=names.get(t.guest_id) if t.guest_id else None)
             for t in tags]
 
@@ -1668,6 +1670,7 @@ def create_matter_tag(
             description=body.description,
             color=body.color,
             display_order=body.display_order or 500,
+            client_visible=bool(body.client_visible),
         ).model_dump())
     except KeyError as e:
         raise HTTPException(status_code=409, detail="This matter already has a tag with that label") from e
@@ -1690,6 +1693,7 @@ def create_firm_tag(
             description=body.description,
             color=body.color,
             display_order=body.display_order or 500,
+            client_visible=bool(body.client_visible),
         ).model_dump())
     except KeyError as e:
         raise HTTPException(status_code=409, detail="A firm-wide tag with that label exists") from e

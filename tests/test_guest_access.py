@@ -177,6 +177,18 @@ class Fake:
     def find_link(self, transaction_id, tag_id):
         return self.select_one({"transaction_id": transaction_id, "tag_id": tag_id})
 
+    def links_for_tag(self, tag_id, transaction_ids):
+        return {r["transaction_id"]: r for r in self.rows
+                if r["tag_id"] == tag_id and r["transaction_id"] in transaction_ids}
+
+    def insert_many(self, rows):
+        for row in rows:
+            self.insert(row)
+
+    def delete_many(self, ids):
+        for row_id in ids:
+            self.delete(row_id)
+
 
 for attr, table in (
     ("GuestProfessionalRepository", "guest_professionals"),

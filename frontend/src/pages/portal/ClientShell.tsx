@@ -53,8 +53,8 @@ export default function ClientShell() {
         <div className="card p-6 max-w-md text-center">
           <h1 className="font-display text-2xl text-navy mb-2">Nothing to show yet</h1>
           <p className="text-text-secondary">
-            Your attorney's office has not shared a case with you yet. They will let you know
-            when there is something here.
+            There is no case to show on this account right now. Please contact your attorney's
+            office if you expected to see one.
           </p>
         </div>
       </div>

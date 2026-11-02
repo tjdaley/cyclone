@@ -87,6 +87,7 @@ carrying *every* one.
    | **Label** | e.g. `Waste: Sister's Wedding` |
    | **Description** | What this tag means, for whoever tags next |
    | **Colour** | red, amber, blue, purple, green, gray |
+   | **Offer to clients** | Tick to offer this tag to the client in their portal. Off by default, and off again for the next tag. See [Chapter 16](16-client-portal.md#2-choose-which-tags-they-are-offered) |
 
 4. Click **Add tag**.
 
@@ -106,8 +107,8 @@ description, and how many lines carry it, with **Edit** and **Delete**.
 
 **Edit** opens in place — the list does not close underneath you, because tags
 get corrected mid-way through classifying a production and losing your place is
-maddening. You can change the label, description, colour, and whether the tag
-is **active**.
+maddening. You can change the label, description, colour, whether the tag is
+**active**, and whether it is **offered to clients**.
 
 **Retiring** a tag (unticking active) keeps it on the lines that carry it but
 takes it out of circulation for new tagging. Prefer this to deleting when a tag

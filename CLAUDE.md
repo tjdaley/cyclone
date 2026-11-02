@@ -12,7 +12,7 @@
 **Stack:** React 18 (Vite) · FastAPI · Supabase (PostgreSQL + Storage) · Docker  
 **Python:** 3.11+  
 **Node:** 20+  
-**Status:** Active development. Core staff-portal features built: matters, clients, billing (with NL parse), discovery ingestion + editing + Word export, pleading ingestion + claims extraction. Client portal, Stripe, and PDF bill generation are not yet built. See §16 for the full status list.
+**Status:** Active development. Core staff-portal features built: matters, clients, billing (with NL parse), discovery ingestion + editing + Word export, pleading ingestion + claims extraction, client portal, financial-professional guests. Stripe and PDF bill generation are not yet built. See §16 for the full status list.
 
 ---
 
@@ -72,6 +72,7 @@ cyclone/
 │   │   ├── lead_service.py        # CRM leads; promotion to client + matter
 │   │   ├── conflict_service.py    # Phase 1 substring match; Phase 2 pg_trgm ready
 │   │   ├── client_portal_service.py # What a client may see, and the one thing they may do — see §11b
+│   │   ├── portal_access_service.py # Giving and revoking a client's sign-in — see §11b
 │   │   ├── guest_access_service.py  # A financial professional's consented access to a matter — see §11d
 │   │   ├── inventory_service.py   # Account balances as an inventory: assets, liabilities, totals
 │   │   ├── source_document_service.py     # Receiving a file, and deciding what to do with it — see §11c
@@ -169,6 +170,7 @@ cyclone/
 │       ├── 050_inventory_exclusion.sql  # an account listed on the inventory but left out of its totals
 │       ├── 051_account_currency.sql     # financial_accounts.currency + matter_currency_rates (inventory conversion)
 │       ├── 052_financial_guest_access.sql # financial-professional guests, grants, consents, document ledger — see §11d
+│       ├── 053_matter_portal_access.sql # matters.client_portal_enabled — hide one matter from the client's portal
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -579,7 +581,7 @@ class MyEntityInDB(MyEntity):
 - `user_roles` is the **auth entry point**. It has `supabase_uid` (nullable) and `auth_email` (nullable). Login lookup: `user_roles WHERE supabase_uid = <jwt sub>` — single query.
 - `staff.supabase_uid` is also nullable and gets populated during correlation, but is **not** the auth lookup path.
 - `GET /api/v1/auth/me` returns **404** when no role is found. The frontend treats 404 as "needs correlation" and redirects to `/onboarding`.
-- `POST /api/v1/auth/correlate-staff` matches `user_roles.auth_email` to the JWT email (where `supabase_uid IS NULL`), then writes `supabase_uid` into both `user_roles` and `staff`. It is idempotent.
+- `POST /api/v1/auth/correlate-staff` matches `user_roles.auth_email` to the JWT email (where `supabase_uid IS NULL`), then writes `supabase_uid` into `user_roles` (and `staff`, for a staff row). It is idempotent. Despite the name it serves clients and guests too.
 - `auth_flow.py` routes do NOT use `require_role()` — any authenticated user can access them.
 - Read `auth_flow.py`, `AuthCallbackPage.tsx`, and `OnboardingPage.tsx` for the actual implementation.
 
@@ -2695,13 +2697,42 @@ database will not catch the mistake.
   delete: suppression is always somebody's recorded decision.
 - **A client tag is useful and it is a guess**, and the two must never be
   indistinguishable — tags drive Rule 1006 exhibits. `source` says which without
-  a join, search results carry `client_tag_ids`, and `ClientTagReviewPanel` is
-  where staff tell them apart.
+  a join, search results carry `client_tag_ids`, and a line's chip reads **· client**.
+  The separate review panel was removed (Tom, Nov 2026): a client's marks are
+  worked one tag at a time from the chips. **Its routes and `review_list` are
+  still there and unused**, and nothing on screen lists a cleared mark.
 - **The hearing-prep lock is per matter.** Tags reach exhibits, so the set has
   to stop moving before anybody argues from it. The client is *told* it is
   paused rather than finding dead controls — the same reasoning as the greyed
   cleared tag, and as *"a disabled button looks exactly like one nobody
   pressed"*.
+- **A LOGIN EMAIL GRANTS NOTHING; ACCESS IS THE ROLE ROW** (`portal_access_service`).
+  `clients.auth_email` is required and 020 backfilled it from the contact email,
+  so deriving access from it would open the portal to every client the firm has
+  had. Staff press **Give portal access**, which writes the `client` row that
+  correlation looks for; nothing else does. This shipped with no way in at all:
+  every client's sign-in answered "No account is awaiting activation".
+- **One address, one person.** Correlation links every unlinked row for an
+  address and `require_client` serves the first `client_id` it finds, so an
+  address shared by two clients would show one the other's matters. An address
+  held by anyone else is refused, and the login email cannot change, nor the
+  client be deleted, while access exists. Revoking deletes the row; no migration
+  was needed.
+- **Publication governs what can be APPLIED, not what can be read.** The filter
+  comes from `readable_tags`: what is published plus what this client applied. A
+  mark under an unpublished or retired tag otherwise drops out of the filter and
+  reads as the office's. A `tag_id` outside that set is refused, because asking
+  which lines carry a private tag maps the firm's work product.
+- **A guest's tags never reach a client** (Tom's call): search decorates a line
+  with every tag, so the portal strips them, and "Not yet marked" ignores them
+  through `untagged_ignoring`. Otherwise a consulting expert's interest would show
+  as "marked by your attorney's office", which is also untrue.
+- **Hiding a matter is per matter; access is per person** (053,
+  `client_portal_enabled`). Closing asks whether to turn it off, because a later
+  modification may want the old accounts back. `matters()` is the one filter, so
+  a hidden matter is out of scope for every read and write. **Reopening does not
+  turn it back on, and it does not touch a guest's grant.** Only `MattersPage`
+  changes status, which is why the prompt is there.
 - **`client_tag_counts` is a coaching signal**, not bookkeeping: a client
   cleared forty times is mis-tagging systematically, and nobody would otherwise
   see it.
@@ -2928,7 +2959,7 @@ Used **only** for auth session management (`src/lib/supabaseClient.ts`). Do not 
 
 - Public routes: `/`, `/login`, `/auth/callback`, `/onboarding`, `/access-denied`, `/privacy`, `/terms`, `/guide`, `/guide/:slug`
 - Protected routes: `/app/*` wrapped in `ProtectedRoute` → `AppShell`
-- `ProtectedRoute` redirects to `/login` (no session), `/onboarding` (no role), or `/access-denied` (client role — client portal not yet built)
+- `ProtectedRoute` redirects to `/login` (no session), `/onboarding` (no role), `/portal` (client), `/guest` (financial professional), or `/access-denied` (none of those)
 - Admin-only nav items filtered by role in `AppShell`
 
 ### Dual-Density Layout
@@ -3463,6 +3494,11 @@ Tom asked on 2026-10-31 that they stay on the pending list:
 
 | Don't | Do Instead |
 | ------- | ----------- |
+| Build a PostgREST `or` from typed text without double-quoting it | A comma or a bracket is `or` syntax, so "McKinney, TX" is refused. `_apply_text`, tested against real PostgREST |
+| Show a firm-wide tag's `in_use` as a count on a matter's screen | It counts every matter and cleared tags, so the chip disagrees with what clicking it finds and hints at other cases. `tag_usage`. `in_use` is for the Delete guard |
+| Write a bulk action as a loop of single-row calls | 100 lines was 100 UPDATEs, or 200 calls for a tag, and the screen sat still for seconds. `update_many`, `insert_many`, `delete_many`, `links_for_tag` in `repositories/financial.py`. Show `BulkProgress` too: a disabled dropdown looks like one nobody touched |
+| Treat `clients.auth_email` as permission to sign in | Every client has one. Access is the `client` row in `user_roles`, written only by `portal_access_service.give` |
+| Leave a model field out of its response schema | It reads as absent, not as an error. `client_tagging_enabled` could be switched on and never off, because the checkbox always read false |
 | Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |
 | Call `logging.getLogger()` directly | `LoggerFactory.create_logger(__name__)` |
 | Fix a logging import cycle with a lazy import alone | It breaks the cycle at module scope and not inside it. A module reached *through* `loggerfactory` still gets `ImportError` from a partially initialized module. Fall back to stderr and cache only the real logger |

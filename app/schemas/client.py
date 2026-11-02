@@ -1,7 +1,7 @@
 """
 app/schemas/client.py - Request and response schemas for client endpoints.
 """
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,15 @@ class ClientResponse(BaseModel):
     ok_to_rehire: bool
     ending_ar_balance: float
     notes: Optional[str]
+
+
+class PortalAccessResponse(BaseModel):
+    """Whether a client can sign in to the portal."""
+    client_id: int = Field(..., description="The client this describes")
+    status: Literal["none", "awaiting_sign_in", "active"] = Field(
+        ..., description="none, given but not yet signed in, or signed in and linked")
+    auth_email: Optional[str] = Field(
+        default=None, description="The address access was given to, when there is access")
 
 
 class ConflictCheckRequest(BaseModel):

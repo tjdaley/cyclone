@@ -106,7 +106,9 @@ The full order Cyclone uses to decide a rate:
 
 Expand a matter in the list and click **Edit** to reach:
 
-**Status** — `intake`, `conflict review`, `active`, `closed`, `archived`.
+**Status** — `intake`, `conflict review`, `active`, `closed`, `archived`. Moving a
+matter to `closed` or `archived` asks whether to turn off the client's portal
+access to it ([Chapter 16](16-client-portal.md#hide-one-matter)).
 **Retainer**, **Fee agreement signed**, **Opened date**, **Closed date**, and
 **Notes**.
 

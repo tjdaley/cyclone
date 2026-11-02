@@ -676,19 +676,20 @@ class GuestAccessService:
             raise GuestDenied("No access") from e
 
         link_repo = TransactionTagLinkRepository(manager)
-        changed = 0
-        for transaction_id in verified:
-            existing = link_repo.find_link(transaction_id, tag_id)
-            if remove:
-                if existing is not None:
-                    link_repo.delete(existing.id)
-                    changed += 1
-            elif existing is None:
-                link_repo.insert(TransactionTagLink(
+        existing = link_repo.links_for_tag(tag_id, verified)
+        if remove:
+            link_repo.delete_many([link.id for link in existing.values()])
+            changed = len(existing)
+        else:
+            to_add = [t for t in verified if t not in existing]
+            link_repo.insert_many([
+                TransactionTagLink(
                     transaction_id=transaction_id, tag_id=tag_id,
                     source=TagSource.guest, tagged_by_guest_id=guest_id,
-                ).model_dump())
-                changed += 1
+                ).model_dump(mode="json")
+                for transaction_id in to_add
+            ])
+            changed = len(to_add)
         LOGGER.info("guest_access.apply_tag: matter=%s tag=%s guest=%s %s=%d",
                     matter_id, tag_id, guest_id, "removed" if remove else "applied", changed)
         return changed

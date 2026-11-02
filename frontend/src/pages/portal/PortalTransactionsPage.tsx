@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import {
   applyPortalTag, getPortalAccounts, getPortalTags, getPortalTransactions, removePortalTag,
 } from '../../lib/api'
+import { amountProblem } from '../../lib/amountRange'
+import { partyLine } from '../../lib/transactionLine'
 import { money, isNegative, formatDate } from '../../lib/money'
 import type {
   PortalAccount, PortalMatter, PortalTag, PortalTransaction,
@@ -40,6 +42,8 @@ export default function PortalTransactionsPage() {
   const [text, setText] = useState('')
   const [minDraft, setMinDraft] = useState('')
   const [maxDraft, setMaxDraft] = useState('')
+  const [amountMin, setAmountMin] = useState<string | null>(null)
+  const [amountMax, setAmountMax] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
   const PAGE = 100
 
@@ -50,39 +54,54 @@ export default function PortalTransactionsPage() {
     getPortalTags(matter.id).then(setTags).catch(() => setTags([]))
   }, [matter.id])
 
-  // Amounts and text are debounced together, and an amount is only sent once it
-  // is a whole figure — typing "-" on the way to "-500" must not flash an error.
-  const amountReady = (draft: string) =>
-    draft.trim() === '' || /^[+-]?\s*\$?\s*\d[\d,]*(\.\d{0,2})?$/.test(draft.trim())
-  const amountsReady = amountReady(minDraft) && amountReady(maxDraft)
+  // An amount range is only sent once it makes sense, and after a pause: typing
+  // "2" on the way to "25000" must not search, or report a backwards range.
+  const amountHint = amountProblem(minDraft, maxDraft)
+
+  useEffect(() => {
+    if (amountHint) return
+    const handle = setTimeout(() => {
+      setAmountMin(minDraft.trim() || null)
+      setAmountMax(maxDraft.trim() || null)
+    }, 300)
+    return () => clearTimeout(handle)
+  }, [minDraft, maxDraft, amountHint])
 
   useEffect(() => {
     const handle = setTimeout(() => setText(textDraft), 300)
     return () => clearTimeout(handle)
   }, [textDraft])
 
+  // Only the newest search may touch the screen. An older one answering late
+  // would otherwise put back its rows, or an error nothing then clears.
+  const latestSearch = useRef(0)
+
   const load = useCallback(async () => {
-    if (!amountsReady) return
+    const thisSearch = ++latestSearch.current
     setBusy(true); setError(null)
     try {
       const page = await getPortalTransactions(matter.id, {
         account_id: accountId, tag_id: tagId, untagged,
         text: text || null,
-        amount_min: minDraft.trim() || null,
-        amount_max: maxDraft.trim() || null,
+        amount_min: amountMin,
+        amount_max: amountMax,
         limit: PAGE, offset,
       })
+      if (thisSearch !== latestSearch.current) return
       setRows(page.items)
       setTotal(page.total)
     } catch (e) {
+      if (thisSearch !== latestSearch.current) return
       setError(e instanceof Error ? e.message : 'Could not load your transactions')
-    } finally { setBusy(false) }
-  }, [matter.id, accountId, tagId, untagged, text, minDraft, maxDraft, offset, amountsReady])
+    } finally {
+      if (thisSearch === latestSearch.current) setBusy(false)
+    }
+  }, [matter.id, accountId, tagId, untagged, text, amountMin, amountMax, offset])
 
   useEffect(() => { void load() }, [load])
 
   // Any change of criteria invalidates the page you were on.
-  useEffect(() => { setOffset(0) }, [accountId, tagId, untagged, text, minDraft, maxDraft])
+  useEffect(() => { setOffset(0) }, [accountId, tagId, untagged, text, amountMin, amountMax])
 
   const tagged = rows.filter(r => r.tag_ids.length > 0).length
 
@@ -126,7 +145,7 @@ export default function PortalTransactionsPage() {
 
         <div className="grid gap-3 md:grid-cols-4 mt-4">
           <div className="md:col-span-2">
-            <label className="label" htmlFor="p-text">Search the description</label>
+            <label className="label" htmlFor="p-text">Search the description, payee or location</label>
             <input id="p-text" className="input mt-1" value={textDraft}
               placeholder="target, transfer, cash…"
               onChange={e => setTextDraft(e.target.value)} />
@@ -138,14 +157,13 @@ export default function PortalTransactionsPage() {
           </div>
           <div>
             <label className="label" htmlFor="p-max">Amount at most</label>
-            <input id="p-max" className="input mt-1 font-mono" placeholder="-25000"
+            <input id="p-max" className="input mt-1 font-mono" placeholder="25000"
               value={maxDraft} onChange={e => setMaxDraft(e.target.value)} />
           </div>
           <div className="md:col-span-2">
-            <p className={`text-xs ${amountsReady ? 'text-text-secondary' : 'text-amber-700'}`}>
-              {amountsReady
-                ? 'No sign finds both directions — 5000 finds money in and money out. Use -5000 for money out only.'
-                : 'Type a figure, such as 5000 or -5000.'}
+            <p className={`text-xs ${amountHint ? 'text-amber-700' : 'text-text-secondary'}`}>
+              {amountHint
+                ?? 'Leave a box empty for no limit. No sign finds both directions: 5000 finds money in and money out. Use -5000 for money out only.'}
             </p>
           </div>
           <div>
@@ -210,6 +228,11 @@ export default function PortalTransactionsPage() {
                   {money(row.amount, row.currency)}
                 </span>
               </div>
+              {partyLine(row.description, row.counterparty, row.location) && (
+                <div className="text-sm text-text-secondary mt-0.5">
+                  {partyLine(row.description, row.counterparty, row.location)}
+                </div>
+              )}
               <div className="text-xs text-text-secondary mt-0.5">
                 {row.institution}{row.account_last4 ? ` ····${row.account_last4}` : ''}
                 {row.check_number ? ` · check ${row.check_number}` : ''}
@@ -219,6 +242,10 @@ export default function PortalTransactionsPage() {
                 {tags.map(tag => {
                   const on = row.tag_ids.includes(tag.id)
                   const cleared = row.cleared_tag_ids.includes(tag.id)
+                  // Offered only where it can be used. While tagging is paused
+                  // the line shows just what is on it, so a mark reads as a
+                  // mark and not as one dim option among many.
+                  if (!on && !cleared && !(matter.tagging_enabled && tag.can_apply)) return null
                   return (
                     <button key={tag.id} type="button"
                       disabled={cleared || !matter.tagging_enabled}
@@ -232,7 +259,7 @@ export default function PortalTransactionsPage() {
                           : on
                             ? 'border-navy bg-navy text-white'
                             : 'border-border text-text-secondary hover:border-navy hover:text-navy'
-                      } ${!matter.tagging_enabled && !cleared ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                      } ${!matter.tagging_enabled && !cleared ? 'cursor-default' : ''}`}>
                       {tag.label}
                     </button>
                   )

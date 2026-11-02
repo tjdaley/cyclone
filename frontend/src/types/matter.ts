@@ -73,6 +73,11 @@ export interface Matter {
    * before anybody argues from it. Staff tagging is unaffected.
    */
   client_tagging_enabled?: boolean
+  /**
+   * Whether a client with portal access may see this matter. Staff are asked
+   * when a matter is closed; a later modification may want it back on.
+   */
+  client_portal_enabled?: boolean
 }
 
 /**

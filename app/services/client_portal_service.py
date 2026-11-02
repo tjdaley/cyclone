@@ -73,12 +73,16 @@ class ClientPortalService:
     @staticmethod
     def matters(manager: DatabaseManager, client_id: int) -> list[Any]:
         """
-        Every matter this client is the client on.
+        Every matter this client is the client on and may currently see.
+
+        A matter staff turned off (053) is out of scope everywhere, because every
+        other method resolves through here: to the client it does not exist.
 
         :param client_id: From ``user_roles``, never from the request body.
         """
-        return MatterRepository(manager).select_many(
+        rows = MatterRepository(manager).select_many(
             condition={"client_id": client_id}, sort_by="id")[0]
+        return [m for m in rows if m.client_portal_enabled is not False]
 
     def matter_ids(self, manager: DatabaseManager, client_id: int) -> set[int]:
         """The ids of those matters — the boundary every other method checks."""
@@ -155,12 +159,51 @@ class ClientPortalService:
         tag simply vanished re-applies it, is refused, and reports a bug.
         """
         self.require_matter(manager, client_id, matter_id)
-        result = transaction_search_service.search(manager, matter_id, **filters)
+        # A tag id is a question about which lines carry it. Asked of a tag the
+        # firm never published, the answer maps its private work product.
+        hidden = self.guest_tag_ids(manager, matter_id)
+        wanted = filters.get("tag_ids") or []
+        if wanted:
+            readable = {t.id for t in self.readable_tags(manager, client_id, matter_id)}
+            if not set(wanted) <= readable:
+                raise PortalDenied("That tag is not available on this matter")
+        result = transaction_search_service.search(
+            manager, matter_id, untagged_ignoring=hidden, **filters)
         ids = [row["id"] for row in result["items"]]
         cleared = TransactionTagLinkRepository(manager).cleared_for_transactions(ids)
         for row in result["items"]:
             row["cleared_tag_ids"] = cleared.get(row["id"], [])
+            row["tag_ids"] = [t for t in row["tag_ids"] if t not in hidden]
         return result
+
+    @staticmethod
+    def guest_tag_ids(manager: DatabaseManager, matter_id: int) -> set[int]:
+        """
+        A financial professional's own tags on this matter, which a client never
+        learns about, not even as "marked by your attorney's office". What a
+        consulting expert is looking at is work product, and that label would
+        also be false: nobody at the office made the mark.
+        """
+        return {
+            tag.id for tag in TransactionTagRepository(manager).available_for_matter(
+                matter_id, include_inactive=True)
+            if tag.guest_id is not None
+        }
+
+    def tag_state(
+        self, manager: DatabaseManager, client_id: int, transaction_id: int,
+    ) -> tuple[list[int], list[int]]:
+        """
+        One line's tags as the client may see them: ``(live, cleared)``.
+
+        :raises PortalDenied: If the line is not on one of their matters.
+        """
+        _, matter_id = self.require_transaction(manager, client_id, transaction_id)
+        hidden = self.guest_tag_ids(manager, matter_id)
+        repo = TransactionTagLinkRepository(manager)
+        live = repo.for_transactions([transaction_id]).get(transaction_id, [])
+        cleared = repo.cleared_for_transactions([transaction_id]).get(transaction_id, [])
+        return ([t for t in live if t not in hidden], [t for t in cleared if t not in hidden])
 
     def tags(self, manager: DatabaseManager, client_id: int, matter_id: int) -> list[Any]:
         """
@@ -173,6 +216,26 @@ class ClientPortalService:
         return [
             tag for tag in TransactionTagRepository(manager).available_for_matter(matter_id)
             if tag.client_visible
+        ]
+
+    def readable_tags(self, manager: DatabaseManager, client_id: int, matter_id: int) -> list[Any]:
+        """
+        The tags this client may filter by: what is published now, plus any they
+        have themselves applied.
+
+        Publication governs what can be APPLIED. It must not take away somebody's
+        view of their own marks: unpublish or retire a tag and the mark is still
+        on the line, and without this it can no longer be searched for and reads
+        as the office's rather than theirs. The hearing lock changes neither.
+        """
+        self.require_matter(manager, client_id, matter_id)
+        links, _ = TransactionTagLinkRepository(manager).select_many(
+            condition={"tagged_by_client_id": client_id, "cleared_at": None})
+        mine = {link.tag_id for link in links}
+        return [
+            tag for tag in TransactionTagRepository(manager).available_for_matter(
+                matter_id, include_inactive=True)
+            if tag.id in mine or (tag.is_active and tag.client_visible)
         ]
 
     # ── The one write ─────────────────────────────────────────────────────
@@ -339,11 +402,15 @@ class ClientPortalService:
         if not links:
             return []
 
+        # The links span the whole firm, so the lookup goes in chunks that fit a URL.
         transaction_repo = FinancialAccountTransactionRepository(manager)
-        transactions = {
-            t.id: t for t in transaction_repo.select_many(
-                condition={"id": [link.transaction_id for link in links]})[0]
-        }
+        ids = sorted({link.transaction_id for link in links})
+        transactions: dict[int, Any] = {}
+        for start in range(0, len(ids), 200):
+            transactions.update(
+                (t.id, t) for t in transaction_repo.select_many(
+                    condition={"id": ids[start:start + 200]})[0])
+        rejected = set(FinancialAccountStatementRepository(manager).rejected_ids(matter_id))
         labels = {t.id: t.label for t in TransactionTagRepository(manager)
                   .available_for_matter(matter_id, include_inactive=True)}
 
@@ -351,6 +418,10 @@ class ClientPortalService:
         for link in links:
             transaction = transactions.get(link.transaction_id)
             if transaction is None or transaction.financial_account_id not in account_by_id:
+                continue
+            # The same lines a search would find. A mark on a removed line or a
+            # rejected statement is on nothing anybody can open or act on.
+            if transaction.deleted_at is not None or transaction.statement_id in rejected:
                 continue
             account = account_by_id[transaction.financial_account_id]
             out.append({

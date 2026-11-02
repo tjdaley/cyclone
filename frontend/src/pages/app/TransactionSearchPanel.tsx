@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   searchTransactions, getTransactionCategories, getTransactionTags,
   categorizeTransactions, tagTransactions,
@@ -10,6 +10,9 @@ import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import ExportButtons from '../../components/ExportButtons'
 import StatementPdfButton from '../../components/StatementPdfButton'
 import TagManager, { tagClass } from './TagManager'
+import BulkProgress, { lineCount } from '../../components/BulkProgress'
+import { partyLine } from '../../lib/transactionLine'
+import { amountProblem as findAmountProblem } from '../../lib/amountRange'
 import type {
   FinancialAccount, TransactionCategory, TransactionTag,
   TransactionSearchFilter, TransactionSearchRow,
@@ -41,28 +44,6 @@ function isFiltered(f: TransactionSearchFilter): boolean {
   )
 }
 
-/**
- * Is this draft a figure yet?
- *
- * Amounts are debounced into the filter like the description, and a half-typed
- * "-" or "$" would otherwise be sent and come back 422 while somebody is still
- * typing. Blank means "no bound", which is always ready.
- *
- * A regex rather than `Number()`: money is a string end to end here, and the
- * only question being asked is whether the characters form a figure.
- */
-function amountReady(draft: string): boolean {
-  const text = draft.trim()
-  if (!text) return true
-  return /^[+-]?\s*\$?\s*\d[\d,]*(\.\d{0,2})?$/.test(text)
-}
-
-/** Which side a draft asks for, or '' for either. Used to catch -500 to +900. */
-function amountSide(draft: string): string {
-  const text = draft.trim()
-  return text.startsWith('-') ? '-' : text.startsWith('+') ? '+' : ''
-}
-
 export default function TransactionSearchPanel({ matterId, accounts }: {
   matterId: number
   accounts: FinancialAccount[]
@@ -73,6 +54,8 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
   const [pageSum, setPageSum] = useState('0.00')
   const [categories, setCategories] = useState<TransactionCategory[]>([])
   const [tags, setTags] = useState<TransactionTag[]>([])
+  const [bulkWork, setBulkWork] = useState<string | null>(null)
+  const [bulkDone, setBulkDone] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -95,17 +78,25 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
   /** The tags staff may apply or manage: not a financial professional's own. */
   const staffTags = useMemo(() => tags.filter(t => !t.guest_id), [tags])
 
+  // Only the newest search may touch the screen; an older one can answer late.
+  const latestSearch = useRef(0)
+
   const run = useCallback(async (next: TransactionSearchFilter) => {
+    const thisSearch = ++latestSearch.current
     setBusy(true); setError(null)
     try {
       const result = await searchTransactions(matterId, next)
+      if (thisSearch !== latestSearch.current) return
       setRows(result.items)
       setTotal(result.total)
       setPageSum(result.sum_amount)
       setSelected(new Set())
     } catch (err) {
+      if (thisSearch !== latestSearch.current) return
       setError(err instanceof Error ? err.message : 'Search failed')
-    } finally { setBusy(false) }
+    } finally {
+      if (thisSearch === latestSearch.current) setBusy(false)
+    }
   }, [matterId])
 
   useEffect(() => {
@@ -134,14 +125,8 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
     return () => clearTimeout(handle)
   }, [textDraft])
 
-  // The two amount boxes commit together, and only when both are whole figures
-  // asking for the same direction. The server validates all of this again and
-  // is the authority; this is what keeps a 422 off the screen mid-keystroke.
-  const amountProblem = !amountReady(minDraft) || !amountReady(maxDraft)
-    ? 'Type a figure: 5000, -5000 for money out, or +5000 for money in.'
-    : (amountSide(minDraft) && amountSide(maxDraft) && amountSide(minDraft) !== amountSide(maxDraft))
-      ? 'One direction at a time — use the same sign in both boxes, or no sign at all.'
-      : null
+  // The two amount boxes commit together, and only when the range makes sense.
+  const amountProblem = findAmountProblem(minDraft, maxDraft)
 
   useEffect(() => {
     if (amountProblem) return
@@ -182,26 +167,31 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
 
   async function applyCategory(categoryId: number | null) {
     if (selected.size === 0) return
-    setBusy(true); setError(null)
+    const count = lineCount(selected.size)
+    setBusy(true); setError(null); setBulkDone(null)
+    setBulkWork(`${categoryId === null ? 'Clearing the category on' : 'Filing'} ${count}…`)
     try {
       await categorizeTransactions(matterId, [...selected], categoryId)
       await run(filter)
+      setBulkDone(`${categoryId === null ? 'Cleared the category on' : 'Filed'} ${count}.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not categorize')
       setBusy(false)
-    }
+    } finally { setBulkWork(null) }
   }
 
   async function applyTag(tagId: number, remove: boolean) {
     if (selected.size === 0) return
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setBulkDone(null)
+    setBulkWork(`${remove ? 'Removing the tag from' : 'Tagging'} ${lineCount(selected.size)}…`)
     try {
-      await tagTransactions(matterId, [...selected], tagId, remove)
+      const { changed } = await tagTransactions(matterId, [...selected], tagId, remove)
       await Promise.all([run(filter), refreshTags()])
+      setBulkDone(`${remove ? 'Removed the tag from' : 'Tagged'} ${lineCount(changed)}.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not tag')
       setBusy(false)
-    }
+    } finally { setBulkWork(null) }
   }
 
   const showing = rows.length
@@ -240,7 +230,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
       {/* ── Filters ── */}
       <div className="grid gap-3 md:grid-cols-4">
         <div className="md:col-span-2">
-          <label className="label" htmlFor="tx-text">Description contains</label>
+          <label className="label" htmlFor="tx-text">Description, payee or location</label>
           <input id="tx-text" className="input mt-1" value={textDraft} placeholder="pilot point, wedding, transfer…"
             onChange={e => setTextDraft(e.target.value)} />
         </div>
@@ -276,13 +266,13 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
         <div>
           <label className="label" htmlFor="tx-amount-max">Amount at most</label>
           <input id="tx-amount-max" className="input mt-1 font-mono" inputMode="text"
-            placeholder="-25000" value={maxDraft}
+            placeholder="25000" value={maxDraft}
             onChange={e => setMaxDraft(e.target.value)} />
         </div>
         <div className="md:col-span-2 flex items-end">
           <p className={`text-xs ${amountProblem ? 'text-warning' : 'text-text-secondary'}`}>
             {amountProblem ?? (
-              <>No sign matches <strong>either direction</strong>, so $5,000 finds both sides
+              <>Leave a box empty for no limit. No sign matches <strong>either direction</strong>, so $5,000 finds both sides
               of an offsetting pair. Use <span className="font-mono">-5000</span> for money
               out, <span className="font-mono">+5000</span> for money in.</>
             )}
@@ -462,9 +452,14 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
             {staffTags.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
 
-          <button type="button" className="text-xs text-navy underline ml-auto"
-            onClick={() => setSelected(new Set())}>Clear selection</button>
+          {bulkWork && <BulkProgress message={bulkWork} />}
+
+          <button type="button" className="text-xs text-navy underline ml-auto disabled:no-underline disabled:opacity-40"
+            disabled={busy} onClick={() => setSelected(new Set())}>Clear selection</button>
         </div>
+      )}
+      {bulkDone && !bulkWork && (
+        <p role="status" className="text-sm text-text-secondary">{bulkDone}</p>
       )}
 
       {/* ── Results ── */}
@@ -475,7 +470,7 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
             : 'No transactions yet — ingest a statement and they will appear here.'}
         </p>
       ) : (
-        <div className="overflow-x-auto">
+        <div className={`overflow-x-auto ${bulkWork ? 'opacity-50' : ''}`}>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs uppercase tracking-wide text-text-secondary border-b border-border">
@@ -526,16 +521,25 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
                           </span>
                         )}
                       </div>
-                      {row.location && <span className="text-xs text-text-secondary">{row.location}</span>}
+                      {partyLine(row.description, row.counterparty, row.location) && (
+                        <span className="text-xs text-text-secondary">
+                          {partyLine(row.description, row.counterparty, row.location)}
+                        </span>
+                      )}
                       {row.tag_ids.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-1">
                           {row.tag_ids.map(id => {
                             const tag = tagById.get(id)
                             if (!tag) return null
+                            // A client's mark is a guess that can reach an exhibit, so
+                            // the line has to say whose it is.
+                            const byClient = (row.client_tag_ids ?? []).includes(id)
                             return (
                               <span key={id} className={`text-xs rounded-full px-2 py-0.5 border ${tagClass(tag)}`}
-                                title={tag.guest_id ? `Tagged by ${tag.guest_name ?? 'a financial professional'}` : undefined}>
+                                title={tag.guest_id ? `Tagged by ${tag.guest_name ?? 'a financial professional'}`
+                                  : byClient ? 'Marked by the client' : undefined}>
                                 {tag.guest_id ? `◆ ${tag.label}` : tag.label}
+                                {byClient && <span className="ml-1 opacity-70">· client</span>}
                               </span>
                             )
                           })}

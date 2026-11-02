@@ -6,11 +6,10 @@ import { correlateStaff } from '../lib/api'
 type State = 'pending' | 'success' | 'not_found' | 'error'
 
 /**
- * First-login page for staff members.
+ * First-login page for staff, clients and guests alike.
  *
- * Calls POST /api/v1/auth/correlate-staff which matches the authenticated
- * user's email against the `auth_email` column in the staff table and creates
- * a user_roles record if a match is found.
+ * Calls POST /api/v1/auth/correlate-staff, which matches the authenticated
+ * user's email against unlinked `user_roles` rows and links them.
  */
 export default function OnboardingPage() {
   const { refreshProfile, signOut } = useAuth()
@@ -31,7 +30,7 @@ export default function OnboardingPage() {
         setTimeout(() => navigate('/app/dashboard', { replace: true }), 1500)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        if (msg.toLowerCase().includes('no staff record') || msg.includes('404')) {
+        if (msg.toLowerCase().includes('awaiting activation')) {
           setState('not_found')
         } else {
           setDetail(msg)
@@ -60,7 +59,7 @@ export default function OnboardingPage() {
             <>
               <div className="mx-auto mb-4 animate-spin w-10 h-10 border-4 border-navy/20 border-t-navy rounded-full" />
               <h1 className="font-display text-xl text-navy mb-2">Setting up your account…</h1>
-              <p className="text-text-secondary text-sm">Linking your Google account to your firm profile.</p>
+              <p className="text-text-secondary text-sm">Linking your Google account to your Cyclone account.</p>
             </>
           )}
 
@@ -84,10 +83,10 @@ export default function OnboardingPage() {
                     d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                 </svg>
               </div>
-              <h1 className="font-display text-xl text-navy mb-2">No firm account found</h1>
+              <h1 className="font-display text-xl text-navy mb-2">No account found</h1>
               <p className="text-text-secondary text-sm mb-6">
-                We couldn't find a staff record for your email address. Please contact your firm
-                administrator to ensure your work email has been added to the system.
+                No account is waiting for this Google address. Please contact the firm to confirm
+                which address they set up for you, and that your access has been switched on.
               </p>
               <button onClick={handleSignOut} className="btn-primary text-sm">
                 Sign out and try again

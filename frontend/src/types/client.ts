@@ -44,6 +44,13 @@ export interface ClientCreatePayload {
   notes?: string
 }
 
+/** Mirrors PortalAccessResponse in app/schemas/client.py */
+export interface PortalAccess {
+  client_id: number
+  status: 'none' | 'awaiting_sign_in' | 'active'
+  auth_email: string | null
+}
+
 /** Single hit row from POST /api/v1/clients/conflict-check */
 export interface ConflictHit {
   id: number

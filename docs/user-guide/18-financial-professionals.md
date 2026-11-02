@@ -52,8 +52,10 @@ exists to use the transaction database on the client's behalf and solely for
 the client's benefit. The same reminder sits at the top of every screen they
 see.
 
-They sign in at the usual login page with that email address, with Google or a
-link sent to their email. They see only the matters they have been given.
+They sign in at the usual login page with **Continue with Google**, so the address
+must be a Google account. They land on their own screens, not the staff app:
+**Accounts**, **Transactions** and **Inventory**, for only the matters they have
+been given.
 
 ## Renewing, changing and withdrawing access
 
@@ -87,7 +89,11 @@ A professional's tags appear on your **Transactions** tab marked **◆** with
 their name. You can filter on them to see what the expert flagged. You cannot
 apply, edit or delete them: they are the expert's own assertions. And one
 professional never sees another's tags, even on the same matter, so a
-consulting expert's work never reaches a testifying expert this way.
+consulting expert's work never reaches a testifying expert this way. Clients do
+not see them either.
+
+Closing a matter does not end a professional's access. That runs until it expires
+or you revoke it.
 
 ---
 

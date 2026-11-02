@@ -86,14 +86,18 @@ That is all. There is no password to set, no invitation email to find, and no
 activation link. The linking happens on the first sign-in and never needs to be
 repeated.
 
+Clients and financial professionals sign in the same way and land on their own
+screens instead of the dashboard: [Chapter 16](16-client-portal.md) and
+[Chapter 18](18-financial-professionals.md).
+
 ---
 
 ## When sign-in does not work
 
 | What you see | What it means | What to do |
 | ------------ | ------------- | ---------- |
-| **"No account is awaiting activation for this email address."** | No staff record has a **Sign-in email** matching the Google account you just used. | Ask the administrator to check the sign-in email on your staff record against the Google address you actually signed in with. A typo, or a personal Gmail used instead of the firm address, is almost always the cause. |
-| **Access denied** page | You signed in successfully and Cyclone knows who you are, but you hold the `client` role. | The client portal is not built yet. A `client` role currently cannot use the application. |
+| **"No account found" page** | Nothing is waiting for the Google account you just used. | Staff: ask the administrator to check the sign-in email on your staff record against the Google address you actually signed in with. A typo, or a personal Gmail used instead of the firm address, is almost always the cause. A client or a financial professional sees this too, usually because access has not been given yet or went to a different address ([Chapter 16](16-client-portal.md), [Chapter 18](18-financial-professionals.md)). |
+| **Access denied** page | You signed in successfully, but your account holds no role that opens any part of Cyclone. | Ask the administrator to check your roles ([Chapter 12](12-user-roles.md)). |
 | You reach the dashboard but menu items are missing | You hold a role, but not one that includes those areas. | See [Chapter 12](12-user-roles.md). **Leads** needs attorney, paralegal or admin; **Admin** needs admin. |
 
 ---

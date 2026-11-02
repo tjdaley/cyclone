@@ -12,9 +12,12 @@ figure, or a document. The office reviews everything you mark.
 
 | Page | What is on it |
 | ---- | ------------- |
-| **Accounts** | Every account in your case, and what the office holds for each one |
-| **Statements held** | Which months are on file, and which months are still missing |
-| **Transactions** | Every line from every statement, with a search |
+| **Transactions** | Every line from every statement, with who it was paid to and where when the office has that, and a search |
+| **Accounts & statements** | Every account in your case, the statements the office holds for each one, and a link to open each document |
+| **What is still needed** | Which months are on file, and which months are still missing |
+
+If you have more than one case, choose between them from the list at the top of
+the page. The office may stop showing a case here once it has closed.
 
 **You will see the other side's accounts too**, where their statements have been
 produced in your case. That is intended.
@@ -31,7 +34,7 @@ If you see something your attorney should look at, mark it.
 
 **What happens then:**
 
-- The office sees what you marked, in a list of its own.
+- The office can see what you marked, and that the mark is yours.
 - Nothing in the record changes. **A tag is a note.**
 - The tags you can choose from are set by the office. You cannot add your own.
 
@@ -55,7 +58,8 @@ attorney's office** — they can restore it.
 The office has turned marking off for now. This is normal before a hearing: the
 set of marked transactions has to stop changing before anybody argues from it.
 
-**Nothing you marked is lost.** Reading still works as usual.
+**Nothing you marked is lost.** Reading still works as usual, your marks stay on
+the transactions, and you can still use **Show** to list the lines you marked.
 
 ---
 
@@ -74,6 +78,10 @@ sign to find money **in and out**.
 account. Type `5000` with no sign, and you get the money that left *and* the
 $5,000 that arrived somewhere else — which is usually the thing you are
 actually arguing about.
+
+Leave a box empty for no limit in that direction: `5000` in **Amount at least**
+alone finds $5,000 or more, and `5000` in **Amount at most** alone finds $5,000 or
+less.
 
 Type the smaller figure in **Amount at least**. The search refuses a range that
 mixes `-` and `+`; leave both signs off instead.

@@ -4,22 +4,28 @@
 
 ---
 
-## The four roles
+## The five roles
 
 | Role | Who holds it |
 | ---- | ------------ |
 | **attorney** | Lawyers |
 | **paralegal** | Paralegals and legal assistants |
 | **admin** | Whoever administers Cyclone for the firm |
-| **client** | A client of the firm, given a read-only view of their own matter — see [Chapter 16](16-client-portal.md) |
+| **client** | A client of the firm, given a read-only view of their own matters — see [Chapter 16](16-client-portal.md) |
+| **financial_professional** | A tracing expert, CPA or similar, given consented access to particular matters — see [Chapter 18](18-financial-professionals.md) |
 
 **A person can hold more than one.** Each ticked role is a separate record, so
 someone can be an attorney *and* an admin, and holds the combined access of
 both. Access is granted if **any** role held allows the action.
 
-> **A client lands in the portal, not in Cyclone.** Somebody holding only the
-> `client` role signs in and is taken to their own three pages — accounts,
-> statements held, transactions — with their own menu and wording.
+> **Clients and financial professionals are not set up on the Admin page.** You
+> give and revoke their access where the work is: on the client's edit form
+> ([Chapter 16](16-client-portal.md)) and on the matter's detail page
+> ([Chapter 18](18-financial-professionals.md)).
+>
+> **Neither lands in the staff app.** A client is taken to their own portal, and
+> a financial professional to their own screens, each with its own menu and
+> wording.
 >
 > **Somebody who holds `client` *and* a staff role is treated as staff here.**
 > That is deliberate: an attorney who is also a client of the firm should not be
@@ -33,7 +39,9 @@ both. Access is granted if **any** role held allows the action.
 
 ## What each role can do
 
-Everything below assumes the person has signed in successfully.
+Everything below assumes the person has signed in successfully, and covers the
+three staff roles. What a client or a financial professional can do is in their
+own chapters.
 
 ### Visible in the menu
 
@@ -72,8 +80,10 @@ Everything below assumes the person has signed in successfully.
 | Delete a matter or a client | — | — | ✅ |
 | Create staff, grant and revoke roles | — | — | ✅ |
 | Read AI spend, and enter or correct a price ([Chapter 15](15-costs.md)) | — | — | ✅ |
-| Let a client tag transactions on a matter ([Chapter 16](16-client-portal.md)) | ✅ | — | ✅ |
+| Give or revoke a client's portal access ([Chapter 16](16-client-portal.md)) | ✅ | ✅ | ✅ |
+| Let a client tag on a matter, or show or hide a matter in their portal ([Chapter 16](16-client-portal.md)) | ✅ | — | ✅ |
 | Offer a tag to clients, and clear or restore a client's tag | ✅ | ✅ | ✅ |
+| Give, renew or revoke a financial professional's access ([Chapter 18](18-financial-professionals.md)) | ✅ | ✅ | ✅ |
 | Knowledge base articles | — | — | ✅ |
 | Read the audit log | — | — | ✅ |
 
@@ -119,9 +129,10 @@ User roles panel does that.
 
 ## What roles do *not* do
 
-**Roles are firm-wide, not per matter.** Anyone holding attorney, paralegal, or
+**Staff roles are firm-wide, not per matter.** Anyone holding attorney, paralegal, or
 admin can see **every matter in the firm** and every client, statement, and
-transaction in it. There is no way to restrict a person to a subset of matters.
+transaction in it. There is no way to restrict a staff member to a subset of matters. Clients and
+financial professionals are the opposite: each sees only their own matters.
 
 Assigning someone to a matter does not grant them access, and removing them does
 not take it away. That is [Chapter 13](13-matter-staff.md), and it is worth

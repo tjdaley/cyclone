@@ -12,6 +12,7 @@ import type {
   FisScheduleTransaction, TransactionCategory,
 } from '../../types'
 import { FIS_RECURRENCES, SUB_MONTHLY } from '../../types'
+import BulkProgress, { lineCount } from '../../components/BulkProgress'
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -70,6 +71,7 @@ export default function FisPanel({ matterId, accounts }: {
   const [rows, setRows] = useState<FisScheduleTransaction[]>([])
   const [rowsBusy, setRowsBusy] = useState(false)
   const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [refiling, setRefiling] = useState<string | null>(null)
   const [editingSchedule, setEditingSchedule] = useState(false)
   const [exhibitName, setExhibitName] = useState('Financial Information Statement')
   // Statement or the detail behind it. A toggle rather than a separate tab,
@@ -138,6 +140,7 @@ export default function FisPanel({ matterId, accounts }: {
   async function refile(categoryId: number | null) {
     if (!picked.size) return
     setRowsBusy(true)
+    setRefiling(`Re-filing ${lineCount(picked.size)}…`)
     try {
       await categorizeTransactions(matterId, [...picked], categoryId)
       setPicked(new Set())
@@ -149,6 +152,7 @@ export default function FisPanel({ matterId, accounts }: {
       setError(e instanceof Error ? e.message : 'Could not re-file those transactions')
     } finally {
       setRowsBusy(false)
+      setRefiling(null)
     }
   }
 
@@ -357,28 +361,32 @@ export default function FisPanel({ matterId, accounts }: {
                   onError={setError} />
               )}
 
+              {refiling && picked.size === 0 && (
+                <div className="my-3 p-2"><BulkProgress message={refiling} /></div>
+              )}
               {picked.size > 0 && (
                 <div className="my-3 p-2 rounded bg-navy/5 border border-navy/20 flex flex-wrap
                                 items-center gap-2 text-sm">
                   <span className="font-medium">{picked.size} selected</span>
-                  <select className="input text-sm py-1" defaultValue=""
+                  <select className="input text-sm py-1" defaultValue="" disabled={rowsBusy}
                     aria-label="Re-file as"
                     onChange={e => {
                       const value = e.target.value
                       e.target.value = ''
-                      void refile(value ? Number(value) : null)
+                      if (value) void refile(Number(value))
                     }}>
                     <option value="">Re-file as…</option>
                     {categories.map(c => (
                       <option key={c.id} value={c.id}>{categoryLabel(c)}</option>
                     ))}
                   </select>
+                  {refiling && <BulkProgress message={refiling} />}
                   <button type="button" className="text-xs text-navy underline"
                     onClick={() => setPicked(new Set())}>Clear</button>
                 </div>
               )}
 
-              {rowsBusy && <p className="text-sm text-text-secondary py-3">Loading…</p>}
+              {rowsBusy && !refiling && <p className="text-sm text-text-secondary py-3">Loading…</p>}
 
               {!rowsBusy && rows.length === 0 && (
                 <p className="text-sm text-text-secondary py-3">

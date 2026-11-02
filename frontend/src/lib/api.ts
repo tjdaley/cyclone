@@ -10,7 +10,7 @@ import type {
   FinishResult,
   AppConfig,
   UserProfile,
-  Client, ClientCreatePayload,
+  Client, ClientCreatePayload, PortalAccess,
   Matter, MatterCreatePayload, RateOverride,
   MatterStaff, MatterStaffPayload, MatterStaffUpdatePayload, OpposingParty,
   Staff,
@@ -34,7 +34,6 @@ import type {
   TransactionAddPayload,
   PortalMatter, PortalAccount, PortalStatement, PortalTag,
   PortalTransactionPage, PortalTransactionFilter, PortalTagResult,
-  ClientTagReview,
   TransactionCorrectionPayload, TransactionCorrectionResult,
   StatementReviewResult, StatementRejectResult, AccountDeletePreview,
   UndisclosedReport, ExportFormat, DownloadedFile,
@@ -310,6 +309,18 @@ export async function createClient(payload: ClientCreatePayload): Promise<Client
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export async function getPortalAccess(clientId: number): Promise<PortalAccess> {
+  return apiFetch<PortalAccess>(`/api/v1/clients/${clientId}/portal-access`)
+}
+
+export async function givePortalAccess(clientId: number): Promise<PortalAccess> {
+  return apiFetch<PortalAccess>(`/api/v1/clients/${clientId}/portal-access`, { method: 'POST' })
+}
+
+export async function revokePortalAccess(clientId: number): Promise<PortalAccess> {
+  return apiFetch<PortalAccess>(`/api/v1/clients/${clientId}/portal-access`, { method: 'DELETE' })
 }
 
 export async function updateClient(clientId: number, payload: Record<string, unknown>): Promise<Client> {
@@ -1809,32 +1820,15 @@ export async function removePortalTag(
 export async function openPortalStatementPdf(statementId: number): Promise<void> {
   const tab = window.open('', '_blank')
   try {
-    const { url } = await apiFetch<{ url: string }>(
+    const { url, page } = await apiFetch<{ url: string; page: number | null }>(
       `/api/v1/portal/statements/${statementId}/pdf-url`)
-    if (tab) tab.location.href = url
-    else window.location.href = url
+    const target = page ? `${url}#page=${page}` : url
+    if (tab) tab.location.href = target
+    else window.location.href = target
   } catch (e) {
     tab?.close()
     throw e
   }
-}
-
-// ── Client tags, as staff review them ────────────────────────────────────────
-
-export async function getClientTags(
-  matterId: number, includeCleared = false,
-): Promise<ClientTagReview[]> {
-  return apiFetch<ClientTagReview[]>(
-    `/api/v1/matters/${matterId}/client-tags?include_cleared=${includeCleared}`)
-}
-
-/** Remove a client's tag. They cannot put it back; staff can. */
-export async function clearClientTag(linkId: number): Promise<ClientTagReview> {
-  return apiFetch<ClientTagReview>(`/api/v1/client-tags/${linkId}/clear`, { method: 'POST' })
-}
-
-export async function restoreClientTag(linkId: number): Promise<ClientTagReview> {
-  return apiFetch<ClientTagReview>(`/api/v1/client-tags/${linkId}/restore`, { method: 'POST' })
 }
 
 // ── The splitting bench ───────────────────────────────────────────────────────

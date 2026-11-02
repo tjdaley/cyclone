@@ -41,11 +41,11 @@ newest chapter sits where its work belongs.)
 
 | | |
 | - | - |
-| [12. User roles](12-user-roles.md) | The four roles, what each can do, and how to change them |
+| [12. User roles](12-user-roles.md) | The five roles, what each can do, and how to change them |
 | [13. Assigning staff to a matter](13-matter-staff.md) | What assignment does — and what it does not |
 | [14. Where leads go](14-lead-routing.md) | How a lead reaches an attorney, who gets notified, and what to check when nobody was |
 | [15. AI costs and prices](15-costs.md) | What the AI work costs, who it was spent on, and how a vendor's price gets entered |
-| [16. Letting a client in](16-client-portal.md) | Switching the portal on, publishing tags, and reviewing what a client marked |
+| [16. Letting a client in](16-client-portal.md) | Giving and revoking portal access, publishing tags, and reviewing what a client marked |
 | [18. Letting a financial professional in](18-financial-professionals.md) | Giving an expert consented access to one matter's accounts, transactions and inventory, and the list of what they were provided |
 
 ---

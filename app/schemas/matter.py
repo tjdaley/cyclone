@@ -61,6 +61,10 @@ class MatterUpdateRequest(BaseModel):
         description="Whether the client may tag transactions in the portal. Turned off for "
                     "hearing prep: tags go into exhibits, so the set has to stop moving",
     )
+    client_portal_enabled: Optional[bool] = Field(
+        default=None,
+        description="Whether a client with portal access may see this matter",
+    )
 
 
 class MatterResponse(BaseModel):
@@ -76,6 +80,8 @@ class MatterResponse(BaseModel):
     retainer_amount: float
     refresh_trigger_pct: float
     is_pro_bono: bool
+    client_tagging_enabled: bool = False
+    client_portal_enabled: bool = True
     fee_agreement_signed_date: Optional[date]
     opened_date: Optional[date]
     closed_date: Optional[date]

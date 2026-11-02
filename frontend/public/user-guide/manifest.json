@@ -108,7 +108,7 @@
           "file": "12-user-roles.md",
           "number": "12",
           "title": "User roles",
-          "summary": "The four roles, what each can do, and how to change them"
+          "summary": "The five roles, what each can do, and how to change them"
         },
         {
           "slug": "13-matter-staff",
@@ -136,7 +136,7 @@
           "file": "16-client-portal.md",
           "number": "16",
           "title": "Letting a client in",
-          "summary": "Switching the portal on, publishing tags, and reviewing what a client marked"
+          "summary": "Giving and revoking portal access, publishing tags, and reviewing what a client marked"
         },
         {
           "slug": "18-financial-professionals",

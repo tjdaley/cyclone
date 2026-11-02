@@ -65,12 +65,16 @@ class PortalStatement(BaseModel):
 
 
 class PortalTag(BaseModel):
-    """A tag the firm has published to clients."""
+    """A tag the firm has published to clients, or one this client already used."""
 
     id: int
     label: str
     description: Optional[str] = None
     color: Optional[str] = None
+    can_apply: bool = Field(
+        default=True,
+        description="False for the client's own mark under a tag since retired or unpublished: "
+                    "still readable and searchable, but not available for new lines")
 
 
 class PortalTransaction(BaseModel):
@@ -82,6 +86,7 @@ class PortalTransaction(BaseModel):
     transaction_date: Optional[date] = None
     description: str
     counterparty: Optional[str] = None
+    location: Optional[str] = None
     amount: Decimal
     check_number: Optional[str] = None
     physical_page_number: Optional[int] = None

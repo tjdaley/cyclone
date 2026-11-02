@@ -18,10 +18,32 @@ from db.models.financial import (
     PayeeClassificationInDB,
 )
 from db_handler import BaseRepository, DatabaseManager, NotNull
+from postgrest.types import ReturnMethod
 from util.amount_filter import AmountRange, AmountSide
 from util.loggerfactory import LoggerFactory
 
 LOGGER = LoggerFactory.create_logger(__name__)
+
+
+def _apply_text(query, text: Optional[str]):
+    """
+    Restrict a transaction query to lines mentioning this text.
+
+    Looks in the description, the payee and the location, which is everything a
+    line shows. A check prints only its number, so the payee is what somebody
+    would search for.
+
+    The value is double-quoted because a comma or a bracket is ``or`` syntax, and
+    this box gets typed into: "McKinney, TX" would otherwise be refused.
+    """
+    if not text:
+        return query
+    # A literal % or _ typed into the search box matches itself, not everything.
+    pattern = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    quoted = pattern.replace("\\", "\\\\").replace('"', '\\"')
+    return query.or_(",".join(
+        '%s.ilike."*%s*"' % (column, quoted)
+        for column in ("description", "counterparty", "location")))
 
 
 def _chunks(items: list[int], size: int) -> list[list[int]]:
@@ -321,6 +343,23 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
     def __init__(self, manager: DatabaseManager):
         super().__init__(manager, "financial_account_transactions", FinancialAccountTransactionInDB)
 
+    def update_many(self, transaction_ids: list[int], patch: dict) -> None:
+        """
+        Write one change to many lines, in one request per chunk.
+
+        For a bulk action, where a request per line is what a person sits and
+        watches. Nothing is returned, because nothing needs reading back.
+
+        :param patch: JSON-safe values; this does not pass through ``json_safe``.
+        """
+        for chunk in _chunks(transaction_ids, 200):
+            (
+                self.manager.client.table(self.table_name)
+                .update(patch, returning=ReturnMethod.minimal)
+                .in_("id", chunk)
+                .execute()
+            )
+
     def get_by_statement(
         self,
         statement_id: int,
@@ -434,7 +473,7 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             is expressed: naming the tagged lines to skip, rather than listing
             the complement. Tagging is manual, so the tagged set is small and
             bounded while the complement is the whole production.
-        :param text: Case-insensitive substring of the description.
+        :param text: Case-insensitive substring of the description, payee or location.
         :param check_number: One check, by number. A check is the only debit
             that does not say where the money went, so this is how a payment
             gets traced back to the instrument that made it.
@@ -488,11 +527,7 @@ class FinancialAccountTransactionRepository(BaseRepository[FinancialAccountTrans
             query = _apply_amount_range(query, amount_range)
         if not include_deleted:
             query = query.is_("deleted_at", "null")
-        if text:
-            # Escape the pattern wildcards so a literal % or _ typed into the
-            # search box matches itself rather than everything.
-            escaped = text.replace("%", "\\%").replace("_", "\\_")
-            query = query.ilike("description", "*" + escaped + "*")
+        query = _apply_text(query, text)
 
         query = (
             query
@@ -674,6 +709,49 @@ class TransactionTagLinkRepository(BaseRepository[TransactionTagLinkInDB]):
 
     def __init__(self, manager: DatabaseManager):
         super().__init__(manager, "financial_account_transaction_tags", TransactionTagLinkInDB)
+
+    def links_for_tag(self, tag_id: int, transaction_ids: list[int]) -> dict[int, TransactionTagLinkInDB]:
+        """One tag's links on these lines, cleared ones included, by transaction."""
+        found: dict[int, TransactionTagLinkInDB] = {}
+        for chunk in _chunks(transaction_ids, 200):
+            for link in self.select_many(condition={"tag_id": tag_id, "transaction_id": chunk})[0]:
+                found[link.transaction_id] = link
+        return found
+
+    def insert_many(self, rows: list[dict]) -> None:
+        """
+        Add many links at once. A pair that already exists is left exactly as it
+        is, so a double click neither fails nor revives a cleared tag.
+
+        :param rows: JSON-safe rows, all with the same keys.
+        """
+        for start in range(0, len(rows), 500):
+            (
+                self.manager.client.table(self.table_name)
+                .upsert(rows[start:start + 500], on_conflict="transaction_id,tag_id",
+                        ignore_duplicates=True, returning=ReturnMethod.minimal)
+                .execute()
+            )
+
+    def update_many(self, link_ids: list[int], patch: dict) -> None:
+        """Write one change to many links. ``patch`` must be JSON-safe."""
+        for chunk in _chunks(link_ids, 200):
+            (
+                self.manager.client.table(self.table_name)
+                .update(patch, returning=ReturnMethod.minimal)
+                .in_("id", chunk)
+                .execute()
+            )
+
+    def delete_many(self, link_ids: list[int]) -> None:
+        """Delete many links."""
+        for chunk in _chunks(link_ids, 200):
+            (
+                self.manager.client.table(self.table_name)
+                .delete(returning=ReturnMethod.minimal)
+                .in_("id", chunk)
+                .execute()
+            )
 
     def for_transactions(self, transaction_ids: list[int]) -> dict[int, list[int]]:
         """

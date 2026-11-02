@@ -154,10 +154,14 @@ def my_statement_pdf(
         raise HTTPException(
             status_code=404,
             detail="The original document for this statement is not stored in the system.")
-    url = StorageService().get_signed_url(statement.storage_path)
+    url = StorageService(manager).get_signed_url(statement.storage_path, expires_in=300)
     if not url:
         raise HTTPException(status_code=502, detail="The document store could not be reached.")
-    return {"url": url, "page": None}
+    # One upload can hold a whole production, so open where this statement starts.
+    return {
+        "url": url,
+        "page": FinancialAccountTransactionRepository(manager).first_page(statement_id),
+    }
 
 
 @router.get("/matters/{matter_id}/compliance", response_model=ComplianceMatrix)
@@ -183,9 +187,10 @@ def my_tags(
     client_id: int = Depends(require_client),
     manager: Any = Depends(get_db_manager),
 ) -> list[PortalTag]:
-    """The tags the firm has published to clients on this matter."""
-    tags = _guard(lambda: client_portal_service.tags(manager, client_id, matter_id))
-    return [PortalTag(id=t.id, label=t.label, description=t.description, color=t.color)
+    """The tags this client can filter by; ``can_apply`` says which they may still use."""
+    tags = _guard(lambda: client_portal_service.readable_tags(manager, client_id, matter_id))
+    return [PortalTag(id=t.id, label=t.label, description=t.description, color=t.color,
+                      can_apply=bool(t.is_active and t.client_visible))
             for t in tags]
 
 
@@ -242,7 +247,7 @@ def tag_transaction(
     """
     outcome = _guard(lambda: client_portal_service.apply_tag(
         manager, client_id, transaction_id, body.tag_id))
-    return _tag_state(manager, transaction_id, outcome)
+    return _tag_state(manager, client_id, transaction_id, outcome)
 
 
 @router.delete("/transactions/{transaction_id}/tags/{tag_id}", response_model=PortalTagResult)
@@ -255,16 +260,11 @@ def untag_transaction(
     """Take back one of their own tags. Never one the firm applied."""
     outcome = _guard(lambda: client_portal_service.remove_tag(
         manager, client_id, transaction_id, tag_id))
-    return _tag_state(manager, transaction_id, outcome)
+    return _tag_state(manager, client_id, transaction_id, outcome)
 
 
-def _tag_state(manager: Any, transaction_id: int, outcome: str) -> PortalTagResult:
+def _tag_state(manager: Any, client_id: int, transaction_id: int, outcome: str) -> PortalTagResult:
     """The line's tagging state after a change, so the UI never has to guess."""
-    from db.repositories.financial import TransactionTagLinkRepository
-
-    repo = TransactionTagLinkRepository(manager)
-    return PortalTagResult(
-        outcome=outcome,
-        tag_ids=repo.for_transactions([transaction_id]).get(transaction_id, []),
-        cleared_tag_ids=repo.cleared_for_transactions([transaction_id]).get(transaction_id, []),
-    )
+    live, cleared = _guard(lambda: client_portal_service.tag_state(
+        manager, client_id, transaction_id))
+    return PortalTagResult(outcome=outcome, tag_ids=live, cleared_tag_ids=cleared)

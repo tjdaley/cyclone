@@ -6,6 +6,7 @@ import {
 import { money, formatDate } from '../../lib/money'
 import { categoryLabel } from '../../lib/categories'
 import ExportButtons from '../../components/ExportButtons'
+import BulkProgress, { lineCount } from '../../components/BulkProgress'
 import type {
   FisRequest, FisSchedule, FisScheduleGroup, FisScheduleTransaction,
   TransactionCategory,
@@ -33,6 +34,7 @@ export default function FisSchedulePanel({ matterId, request, exhibitName }: {
   const [schedule, setSchedule] = useState<FisSchedule | null>(null)
   const [categories, setCategories] = useState<TransactionCategory[]>([])
   const [busy, setBusy] = useState(false)
+  const [working, setWorking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [picked, setPicked] = useState<Set<number>>(new Set())
   const [open, setOpen] = useState<Set<string>>(new Set())
@@ -81,15 +83,18 @@ export default function FisSchedulePanel({ matterId, request, exhibitName }: {
     [schedule],
   )
 
-  async function act(run: () => Promise<unknown>) {
+  async function act(message: string, run: () => Promise<unknown>) {
     setBusy(true)
     setError(null)
+    setWorking(message)
     try {
       await run()
       await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That did not work')
       setBusy(false)
+    } finally {
+      setWorking(null)
     }
   }
 
@@ -144,11 +149,13 @@ export default function FisSchedulePanel({ matterId, request, exhibitName }: {
                           items-center gap-2 text-sm">
             <span className="font-medium">{picked.size} selected</span>
             <select className="input text-sm py-1" defaultValue="" aria-label="Re-file as"
+              disabled={busy}
               onChange={e => {
                 const value = e.target.value
                 e.target.value = ''
                 if (value) {
-                  void act(() => categorizeTransactions(matterId, [...picked], Number(value)))
+                  void act(`Re-filing ${lineCount(picked.size)}…`,
+                    () => categorizeTransactions(matterId, [...picked], Number(value)))
                 }
               }}>
               <option value="">Re-file as…</option>
@@ -159,9 +166,11 @@ export default function FisSchedulePanel({ matterId, request, exhibitName }: {
             {/* Confirming leaves the category alone. Agreeing with a rule is not
                 the same act as filing a line. */}
             <button type="button" className="btn-secondary text-xs px-3 py-1" disabled={busy}
-              onClick={() => void act(() => markTransactionsReviewed(matterId, [...picked]))}>
+              onClick={() => void act(`Marking ${lineCount(picked.size)} checked…`,
+                () => markTransactionsReviewed(matterId, [...picked]))}>
               Mark checked
             </button>
+            {working && <BulkProgress message={working} />}
             <button type="button" className="text-xs text-navy underline"
               onClick={() => setPicked(new Set())}>Clear</button>
           </div>

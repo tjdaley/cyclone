@@ -1057,11 +1057,12 @@ function ClientPortalSection({ matter, onSaved }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const enabled = matter.client_tagging_enabled ?? false
+  const visible = matter.client_portal_enabled ?? true
 
-  async function toggle() {
+  async function save(patch: Record<string, unknown>) {
     setBusy(true); setError(null)
     try {
-      onSaved(await updateMatter(matter.id, { client_tagging_enabled: !enabled }))
+      onSaved(await updateMatter(matter.id, patch))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save')
     } finally { setBusy(false) }
@@ -1076,14 +1077,27 @@ function ClientPortalSection({ matter, onSaved }: {
         moving before anybody argues from it.
       </p>
 
+      <label className="flex items-start gap-3 text-sm mb-3">
+        <input type="checkbox" className="mt-0.5" checked={visible} disabled={busy}
+          onChange={() => void save({ client_portal_enabled: !visible })} />
+        <span>
+          <span className="font-medium text-text-primary">Show this matter in the client&rsquo;s portal</span>
+          <span className="block text-xs text-text-secondary">
+            {visible
+              ? 'On. A client with portal access can read this matter. Access itself is given on the client\'s record.'
+              : 'Off. The client cannot see this matter at all. Their marks are kept, and turning this back on restores it.'}
+          </span>
+        </span>
+      </label>
+
       <label className="flex items-start gap-3 text-sm">
         <input type="checkbox" className="mt-0.5" checked={enabled} disabled={busy}
-          onChange={() => void toggle()} />
+          onChange={() => void save({ client_tagging_enabled: !enabled })} />
         <span>
           <span className="font-medium text-text-primary">Let the client tag transactions</span>
           <span className="block text-xs text-text-secondary">
             {enabled
-              ? 'On. Their tags appear for review on the Financials page, marked as theirs.'
+              ? 'On. Their tags appear on the Financials page, on the tag chips and marked as theirs on each line.'
               : 'Off. The client sees a note saying tagging is paused; what they already marked is kept.'}
           </span>
         </span>

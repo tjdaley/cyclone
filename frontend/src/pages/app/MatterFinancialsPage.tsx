@@ -27,7 +27,6 @@ import StatementPdfButton from '../../components/StatementPdfButton'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import TransactionAddDialog from './TransactionAddDialog'
 import AccountAddDialog from './AccountAddDialog'
-import ClientTagReviewPanel from './ClientTagReviewPanel'
 import type {
   Matter, OpposingParty,
   FinancialAccount, AccountType, PropertyCharacter, AccountOwnership,
@@ -1295,14 +1294,9 @@ export default function MatterFinancialsPage() {
           }} />
       )}
 
-      {tab === 'transactions' && (<>
+      {tab === 'transactions' && (
         <TransactionSearchPanel matterId={matterId} accounts={accounts} />
-        {/* Below the search, not beside it: reviewing what the client marked is
-            its own pass through the data, done when somebody sits down to it. */}
-        <div className="mt-6">
-          <ClientTagReviewPanel matterId={matterId} />
-        </div>
-      </>)}
+      )}
 
       {tab === 'inventory' && <InventoryPanel matterId={matterId} />}
 

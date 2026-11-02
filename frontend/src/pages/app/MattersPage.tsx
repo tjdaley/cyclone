@@ -102,6 +102,7 @@ export default function MattersPage() {
   const [edShortName, setEdShortName]     = useState('')
   const [edName, setEdName]               = useState('')
   const [edStatus, setEdStatus]           = useState('')
+  const [closePrompt, setClosePrompt]     = useState(false)
   const [edProBono, setEdProBono]         = useState(false)
   const [edState, setEdState]             = useState('')
   const [edCounty, setEdCounty]           = useState('')
@@ -184,9 +185,22 @@ export default function MattersPage() {
     setEditError(null)
   }
 
-  async function handleSaveEdit(e: FormEvent) {
+  function handleSaveEdit(e: FormEvent) {
     e.preventDefault()
     if (editId === null) return
+    const current = matters.find(m => m.id === editId)
+    // Only on the way INTO closed, and only if there is still something to turn
+    // off: re-saving a closed matter's notes must not ask again.
+    if (current && isClosed(edStatus) && !isClosed(current.status)
+        && (current.client_portal_enabled ?? true)) {
+      setClosePrompt(true)
+      return
+    }
+    void saveEdit()
+  }
+
+  async function saveEdit(extra: Record<string, unknown> = {}) {
+    setClosePrompt(false)
     setSaving(true); setEditError(null)
     try {
       const payload: Record<string, unknown> = {
@@ -203,8 +217,9 @@ export default function MattersPage() {
         closed_date: edClosedDate || null,
         retainer_amount: parseFloat(edRetainer) || 0,
         notes: edNotes.trim() || null,
+        ...extra,
       }
-      const updated = await updateMatter(editId, payload)
+      const updated = await updateMatter(editId!, payload)
       setMatters(prev => prev.map(m => m.id === editId ? updated : m))
       setEditId(null)
     } catch (err) {
@@ -608,6 +623,33 @@ export default function MattersPage() {
           </table>
         )}
       </div>
+
+      {closePrompt && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4"
+          role="dialog" aria-modal="true" aria-label="Portal access for this matter"
+          onClick={e => { if (e.target === e.currentTarget) setClosePrompt(false) }}>
+          <div className="card p-5 w-full max-w-lg my-16 bg-white">
+            <h3 className="font-semibold text-navy">Turn off portal access to this matter?</h3>
+            <p className="text-sm text-text-secondary mt-1">
+              You are closing this matter. If the client has portal access, they can keep reading
+              its accounts and transactions unless you turn it off. You can turn it back on later
+              from the matter&rsquo;s page, for a modification or an enforcement.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2 mt-4">
+              <button type="button" className="btn-secondary" onClick={() => setClosePrompt(false)}>
+                Keep editing
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => void saveEdit()}>
+                Close and leave it on
+              </button>
+              <button type="button" className="btn-primary"
+                onClick={() => void saveEdit({ client_portal_enabled: false })}>
+                Close and turn it off
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

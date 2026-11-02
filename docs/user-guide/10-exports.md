@@ -74,6 +74,11 @@ Fields the matter cannot supply are printed as a blank rule and reported to you
 
 ### 2. The table
 
+On a transaction export, the **Description** column also carries the line's payee
+and location, for example `Check 2072 — Blue Bee Construction; McKinney, TX`. This
+applies to the CSV as well, in the same column. Most check payees are typed in by
+hand, so a check with none reads as just its number.
+
 ### 3. Findings
 
 Prose, where the report has any — the compliance matrix puts its gap list here.

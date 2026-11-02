@@ -154,6 +154,9 @@ class FakeLinks:
         rows = self.rows
         if "source" in condition:
             rows = [r for r in rows if r["source"] == condition["source"]]
+        if "tagged_by_client_id" in condition:
+            rows = [r for r in rows
+                    if r.get("tagged_by_client_id") == condition["tagged_by_client_id"]]
         if "cleared_at" in condition and condition["cleared_at"] is None:
             rows = [r for r in rows if not r.get("cleared_at")]
         return rows, len(rows)
@@ -268,6 +271,9 @@ check("and it works again when staff turn it back on",
 
 # ── 6. What staff see of it ──────────────────────────────────────────────
 print("6. the review screen")
+REJECTED_STATEMENTS: list[int] = []
+mod.FinancialAccountStatementRepository = lambda m: type(
+    "FakeStatements", (), {"rejected_ids": lambda self, matter_id: REJECTED_STATEMENTS})()
 review = client_portal_service.review_list(None, MY_MATTER)
 check("one row to review", len(review), 1)
 check("naming the line and the tag",
@@ -275,9 +281,150 @@ check("naming the line and the tag",
       (1000, "Client: possible waste"))
 check("scoped to the matter's accounts — not every case's client tags",
       client_portal_service.review_list(None, OTHER_MATTER), [])
+TRANSACTIONS[0]["deleted_at"] = datetime.now(timezone.utc)
+check("a mark on a removed line is left out, as a search leaves it out",
+      client_portal_service.review_list(None, MY_MATTER), [])
+TRANSACTIONS[0]["deleted_at"] = None
+REJECTED_STATEMENTS.append(1)
+check("so is one on a rejected statement", client_portal_service.review_list(None, MY_MATTER), [])
+REJECTED_STATEMENTS.clear()
+check("and it returns when the line does", len(client_portal_service.review_list(None, MY_MATTER)), 1)
 counts = client_portal_service.client_tag_counts(None, OURS)
 check("counted", counts["applied"], 1)
 check("with the coaching signal: how many staff removed", counts["cleared"], 0)
+
+# ── 7. Reading your own marks ────────────────────────────────────────────
+print("7. a client can always read and search their own marks")
+
+
+def read():
+    return [t["id"] for t in client_portal_service.readable_tags(None, OURS, MY_MATTER)]
+
+
+check("the published tag, and not the firm's private one", read(), [7])
+MATTERS[0]["client_tagging_enabled"] = False
+check("the hearing lock does not take the filter away", read(), [7])
+MATTERS[0]["client_tagging_enabled"] = True
+TAGS[0]["client_visible"] = False
+check("unpublished: their own mark stays readable", read(), [7])
+denied("but an unpublished tag cannot be applied",
+       lambda: client_portal_service.apply_tag(None, OURS, 1000, 7))
+link = links.find_link(1000, 7)
+TAGS[0]["is_active"] = False
+check("retired: still readable", read(), [7])
+TAGS[0]["is_active"] = True
+links.update(link["id"], {"cleared_at": datetime.now(timezone.utc)})
+check("a mark the firm cleared does not keep an unpublished tag alive", read(), [])
+TAGS[0]["client_visible"] = True
+denied("a tag the firm never published cannot be searched by",
+       lambda: client_portal_service.search(None, OURS, MY_MATTER, tag_ids=[8]))
+
+# ── 8. Opening the document ──────────────────────────────────────────────
+print("8. every router builds StorageService with its manager")
+routers = os.path.join(ROOT, "app", "routers")
+bare = [f for f in os.listdir(routers) if f.endswith(".py")
+        and "StorageService()" in open(os.path.join(routers, f), encoding="utf-8").read()]
+check("no bare StorageService() (the portal's Open the document was a 500)", bare, [])
+
+# ── 9. The staff switch can see its own state ────────────────────────────
+print("9. the matter response carries every matter field")
+from db.models.matter import Matter  # noqa: E402
+from schemas.matter import MatterResponse  # noqa: E402
+
+check("nothing a staff screen reads is dropped on the way out "
+      "(the tagging switch could be turned on and never off)",
+      sorted(set(Matter.model_fields) - set(MatterResponse.model_fields)), [])
+
+# ── 10. Offering a tag when it is created ────────────────────────────────
+print("10. a new tag can be offered to clients in one step, and is private by default")
+import routers.financial as financial  # noqa: E402
+from schemas.financial import TransactionTagWriteRequest  # noqa: E402
+
+
+class FakeTagWrites:
+    def __init__(self, manager):
+        pass
+
+    def insert(self, data):
+        return Row(data, model_dump=lambda: {
+            "id": 1, "created_at": datetime.now(timezone.utc), **data})
+
+
+class FakeMatterLookup:
+    def __init__(self, manager):
+        pass
+
+    def select_one(self, condition):
+        return Row(id=condition["id"])
+
+
+financial.TransactionTagRepository = FakeTagWrites
+financial.MatterRepository = FakeMatterLookup
+make = lambda **body: financial.create_matter_tag(  # noqa: E731
+    MY_MATTER, TransactionTagWriteRequest(label="Waste", **body), None, None)
+check("ticked at creation, the tag is offered", make(client_visible=True).client_visible, True)
+check("left alone, it stays private", make().client_visible, False)
+firm = financial.create_firm_tag(
+    TransactionTagWriteRequest(label="Firm", client_visible=True), None, None)
+check("the firm-wide route honours it too", firm.client_visible, True)
+
+# ── 11. A matter staff turned off ────────────────────────────────────────
+print("11. a matter turned off is out of scope everywhere, and comes back")
+MATTERS[0]["client_portal_enabled"] = False
+check("gone from their matters", client_portal_service.matters(None, OURS), [])
+denied("its accounts are refused",
+       lambda: client_portal_service.accounts(None, OURS, MY_MATTER))
+denied("its statements are refused", lambda: client_portal_service.statements(None, OURS, 100))
+denied("its lines are refused",
+       lambda: client_portal_service.require_transaction(None, OURS, 1000))
+MATTERS[0]["client_portal_enabled"] = True
+check("turned back on, it returns", client_portal_service.matter_ids(None, OURS), {MY_MATTER})
+
+# ── 12. A financial professional's tags ──────────────────────────────────
+print("12. a client never learns about a financial professional's tags")
+TAGS.append(Row(id=9, matter_id=MY_MATTER, label="Expert: trace this", description=None,
+                color="gray", is_active=True, client_visible=False, guest_id=3))
+GUEST_ON_LINE = Row(id=900, transaction_id=1000, tag_id=9, source="guest", cleared_at=None)
+links.rows.append(GUEST_ON_LINE)
+SEARCH_CALLS = []
+
+
+class FakeSearch:
+    @staticmethod
+    def search(manager, matter_id, **filters):
+        SEARCH_CALLS.append(filters)
+        return {"total": 1, "items": [{"id": 1000, "tag_ids": [7, 8, 9]}]}
+
+
+real_search = mod.transaction_search_service
+mod.transaction_search_service = FakeSearch
+row = client_portal_service.search(None, OURS, MY_MATTER, untagged=True)["items"][0]
+mod.transaction_search_service = real_search
+check("off the line's tags, while the firm's remains as before", row["tag_ids"], [7, 8])
+check("and a line carrying only theirs still reads as not yet marked",
+      SEARCH_CALLS[0]["untagged_ignoring"], {9})
+check("off the state returned after a change",
+      9 in client_portal_service.tag_state(None, OURS, 1000)[0], False)
+denied("and it cannot be searched by",
+       lambda: client_portal_service.search(None, OURS, MY_MATTER, tag_ids=[9]))
+check("not in the filter list", 9 in read(), False)
+
+import services.transaction_search_service as search_mod  # noqa: E402
+
+
+class CandidateLinks:
+    @staticmethod
+    def transactions_with_tags(tag_ids, match_all):
+        # Line 1000 carries the guest's tag 9; nothing else is tagged.
+        return [1000] if 9 in tag_ids else []
+
+
+search_mod.TransactionTagRepository = lambda m: FakeTags()
+search_mod.TransactionTagLinkRepository = lambda m: CandidateLinks()
+search_mod.FinancialAccountTransactionRepository = lambda m: FakeTransactions()
+tagged = search_mod.TransactionSearchService._tagged_ids
+check("staff still count that line as tagged", tagged(None, MY_MATTER, [100]), [1000])
+check("the client's view does not", tagged(None, MY_MATTER, [100], {9}), [])
 
 print("")
 print("FAILURES: %d" % len(FAILURES))

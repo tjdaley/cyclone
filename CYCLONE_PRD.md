@@ -5,7 +5,7 @@
 **Last updated:** 2026-04-13
 **Repo:** <https://github.com/tjdaley/cyclone.git>
 **Stack:** React (Vite) · FastAPI · Supabase (PostgreSQL + Storage) · Docker
-**Status:** Active development — staff portal features substantially built; client portal, Stripe, and PDF bill generation deferred.
+**Status:** Active development — staff portal, client portal and financial-professional access built; Stripe and PDF bill generation deferred.
 
 ---
 
@@ -93,10 +93,11 @@ Lookup on every request: `user_roles WHERE supabase_uid = <jwt sub>` — single 
 
 | Role | Portal | Description |
 |------|--------|-------------|
-| `client` | Client Portal | Will see only their own matters, bills, events, and discovery tasks. **Not yet implemented** — currently redirects to `/access-denied` |
+| `client` | Client Portal | Reads their own matters' accounts, statements, transactions and missing months, and tags transactions where allowed. Access is given per client by staff. Bills, events and discovery tasks are not built |
 | `attorney` | Staff Portal | Full billing, matter management, discovery, and pleading access |
 | `paralegal` | Staff Portal | Same as attorney except cannot create matters or approve bills |
 | `admin` | Staff Portal | Full system access: staff management, rate overrides, user roles |
+| `financial_professional` | Guest screens | A tracing expert or CPA with consented, expiring access to particular matters' accounts, transactions and inventory |
 
 ---
 
@@ -131,7 +132,7 @@ Staff members exist in the system before they have a Supabase Auth account. Admi
 ### 4.1 Client Management
 
 **4.1.1 Client Intake**
-- Attorneys, paralegals, and admins can create clients with: name (FullName), auth_email (for future portal login), contact email, telephone, referral type (from `settings.referral_types`), referral source, referred-to staff, prior counsel, OK-to-rehire flag, ending A/R balance
+- Attorneys, paralegals, and admins can create clients with: name (FullName), auth_email (the Google address used if portal access is given), contact email, telephone, referral type (from `settings.referral_types`), referral source, referred-to staff, prior counsel, OK-to-rehire flag, ending A/R balance
 - Clients have a `status` lifecycle: `prospect` → `pending_conflict_check` → `conflict_flagged` → `active` → `inactive`
 
 **4.1.2 Conflict Check**
@@ -755,7 +756,6 @@ cd frontend && npm install && npm run dev
 
 ### Not Yet Implemented
 
-- **Client Portal** — `client` role exists but currently redirects to `/access-denied`
 - **Fee agreement templates and electronic signature** — model exists, no UI
 - **PDF bill generation** (WeasyPrint)
 - **Stripe checkout and webhooks** — keys configured, no handlers

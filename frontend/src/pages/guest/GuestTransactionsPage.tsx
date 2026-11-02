@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   createGuestTag, deleteGuestTag, exportGuestTransactions, getGuestAccounts, getGuestCategories,
@@ -8,6 +8,9 @@ import {
 import { formatDate, isNegative, money } from '../../lib/money'
 import ExportButtons from '../../components/ExportButtons'
 import StatementPdfButton from '../../components/StatementPdfButton'
+import BulkProgress, { lineCount } from '../../components/BulkProgress'
+import { amountProblem } from '../../lib/amountRange'
+import { partyLine } from '../../lib/transactionLine'
 import type {
   GuestAccount, GuestCategory, GuestTag, GuestTransaction, TransactionSearchFilter,
 } from '../../types'
@@ -26,7 +29,6 @@ function emptyFilter(): TransactionSearchFilter {
 }
 
 /** A whole figure, optionally signed — anything else stays out of the request. */
-const FIGURE = /^[+-]?\d+(\.\d{1,2})?$/
 
 /**
  * Search the matter's transactions, tag them, export them.
@@ -49,6 +51,8 @@ export default function GuestTransactionsPage() {
   const [tags, setTags] = useState<GuestTag[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
+  const [bulkWork, setBulkWork] = useState<string | null>(null)
+  const [bulkDone, setBulkDone] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [newTag, setNewTag] = useState('')
   /** Said when "Add" is pressed with no name, rather than doing nothing visible. */
@@ -65,14 +69,22 @@ export default function GuestTransactionsPage() {
       .catch(e => setError(e instanceof Error ? e.message : 'Could not load the matter'))
   }, [matterId])
 
+  // Only the newest search may touch the screen; an older one can answer late.
+  const latestSearch = useRef(0)
+
   const run = useCallback(async (next: TransactionSearchFilter) => {
+    const thisSearch = ++latestSearch.current
     setBusy(true); setError(null)
     try {
       const result = await searchGuestTransactions(matterId, next)
+      if (thisSearch !== latestSearch.current) return
       setRows(result.items); setTotal(result.total); setSelected(new Set())
     } catch (e) {
+      if (thisSearch !== latestSearch.current) return
       setError(e instanceof Error ? e.message : 'Search failed')
-    } finally { setBusy(false) }
+    } finally {
+      if (thisSearch === latestSearch.current) setBusy(false)
+    }
   }, [matterId])
 
   useEffect(() => { run(filter) }, [filter, run])
@@ -81,11 +93,15 @@ export default function GuestTransactionsPage() {
     setFilter(prev => ({ ...prev, ...changes, offset: 0 }))
   }
 
+  const amountHint = amountProblem(minDraft, maxDraft)
+
   function applyDrafts() {
+    // Not searched without the bad figure: that would answer a different question.
+    if (amountHint) return
     patch({
       text: textDraft.trim() || null,
-      amount_min: FIGURE.test(minDraft.trim()) ? minDraft.trim() : null,
-      amount_max: FIGURE.test(maxDraft.trim()) ? maxDraft.trim() : null,
+      amount_min: minDraft.trim() || null,
+      amount_max: maxDraft.trim() || null,
     })
   }
 
@@ -103,10 +119,15 @@ export default function GuestTransactionsPage() {
 
   async function apply(tagId: number, remove: boolean) {
     if (selected.size === 0) return
-    setBusy(true)
-    try { await tagGuestTransactions(matterId, [...selected], tagId, remove); await run(filter) }
+    setBusy(true); setBulkDone(null)
+    setBulkWork(`${remove ? 'Removing the tag from' : 'Tagging'} ${lineCount(selected.size)}…`)
+    try {
+      const changed = await tagGuestTransactions(matterId, [...selected], tagId, remove)
+      await run(filter)
+      setBulkDone(`${remove ? 'Removed the tag from' : 'Tagged'} ${lineCount(changed)}.`)
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not tag the lines') }
-    finally { setBusy(false) }
+    finally { setBusy(false); setBulkWork(null) }
   }
 
   const allOnPage = rows.length > 0 && rows.every(r => selected.has(r.id))
@@ -120,7 +141,7 @@ export default function GuestTransactionsPage() {
 
       <div className="card p-4 space-y-3">
         <div className="flex flex-wrap gap-2 items-end">
-          <input className="input py-1 text-sm flex-1 min-w-48" placeholder="Description contains…"
+          <input className="input py-1 text-sm flex-1 min-w-48" placeholder="Description, payee or location…"
             value={textDraft} onChange={e => setTextDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') applyDrafts() }} />
           <input className="input py-1 text-sm w-28" placeholder="Amount from" value={minDraft}
@@ -131,6 +152,7 @@ export default function GuestTransactionsPage() {
             onKeyDown={e => { if (e.key === 'Enter') applyDrafts() }} />
           <button type="button" className="btn-secondary py-1 text-sm" onClick={applyDrafts}>Search</button>
         </div>
+        {amountHint && <p className="text-xs text-amber-700">{amountHint}</p>}
         <div className="flex flex-wrap gap-2 items-center text-sm">
           <select className="input py-1 text-sm max-w-xs" value={filter.account_ids?.[0] ?? ''}
             onChange={e => patch({ account_ids: e.target.value ? [Number(e.target.value)] : null })}>
@@ -200,10 +222,12 @@ export default function GuestTransactionsPage() {
       <div className="card p-4">
         <div className="flex flex-wrap items-center gap-3 mb-3 text-sm">
           <span>
-            {busy ? 'Searching…' : <><span className="font-medium tabular-nums">{total}</span> matching lines</>}
+            {bulkWork ? <BulkProgress message={bulkWork} />
+              : busy ? 'Searching…' : <><span className="font-medium tabular-nums">{total}</span> matching lines</>}
             {total > PAGE_SIZE && <span className="text-text-secondary"> · showing {from}–{to}</span>}
           </span>
           {mixed && <span className="text-xs text-text-secondary">mixed currencies</span>}
+          {bulkDone && !bulkWork && <span role="status" className="text-text-secondary">{bulkDone}</span>}
           {selected.size > 0 && (
             <>
               <span className="text-text-secondary">{selected.size} selected</span>
@@ -270,6 +294,11 @@ export default function GuestTransactionsPage() {
                   </td>
                   <td className="py-2 pr-3">
                     {row.description}
+                    {partyLine(row.description, row.counterparty, row.location) && (
+                      <div className="text-xs text-text-secondary">
+                        {partyLine(row.description, row.counterparty, row.location)}
+                      </div>
+                    )}
                     {row.tag_ids.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1">
                         {row.tag_ids.map(id => tagById.get(id) && (

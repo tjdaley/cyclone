@@ -41,7 +41,7 @@ There are two places to do it. They write the same thing.
 
    | Filter | Notes |
    | ------ | ----- |
-   | **Description contains** | `pilot point`, `wedding`, `transfer`… |
+   | **Description, payee or location** | `pilot point`, `Blue Bee`, `McKinney`, `transfer`… |
    | **Check #** | An exact check number |
    | **From** / **To** | A date window |
    | **Amount at least** / **Amount at most** | A money range. Read [the sign rule](#finding-large-transactions) before you use it |

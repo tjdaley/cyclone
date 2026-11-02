@@ -228,6 +228,12 @@ class Matter(BaseModel):
                     "and turned off again for hearing prep: tags go into exhibits, so the set has "
                     "to stop moving. Staff tagging is unaffected — the lock is about the client",
     )
+    client_portal_enabled: bool = Field(
+        default=True,
+        description="Whether a client with portal access may see this matter (053). Staff are "
+                    "asked when a matter is closed. Separate from the client's access, which "
+                    "is per person, so one old case can be hidden and later shown again",
+    )
     fee_agreement_signed_date: Optional[date] = Field(
         default=None,
         description="Date the fee agreement was signed by the client",

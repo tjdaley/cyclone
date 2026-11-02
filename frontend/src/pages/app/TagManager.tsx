@@ -41,6 +41,7 @@ export default function TagManager({ matterId, tags, onChanged, onError }: {
   const [label, setLabel] = useState('')
   const [description, setDescription] = useState('')
   const [color, setColor] = useState('gray')
+  const [clientVisible, setClientVisible] = useState(false)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<number | null>(null)
 
@@ -50,8 +51,10 @@ export default function TagManager({ matterId, tags, onChanged, onError }: {
     try {
       await createMatterTag(matterId, {
         label: label.trim(), description: description.trim() || null, color,
+        client_visible: clientVisible,
       })
-      setLabel(''); setDescription(''); setColor('gray')
+      // Back to off every time: offering the next tag has to be its own decision.
+      setLabel(''); setDescription(''); setColor('gray'); setClientVisible(false)
       await onChanged()
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not create the tag')
@@ -178,6 +181,12 @@ export default function TagManager({ matterId, tags, onChanged, onError }: {
           <button type="button" className="btn-primary" disabled={busy || !label.trim()}
             onClick={() => void create()}>Add tag</button>
         </div>
+        <label className="text-xs text-text-secondary flex items-center gap-1.5 w-fit"
+          title="Offer this tag to the client in their portal. They can apply and remove it; your staff can clear a tag the client got wrong, and the client cannot put it back.">
+          <input type="checkbox" checked={clientVisible}
+            onChange={e => setClientVisible(e.target.checked)} />
+          Offer to clients
+        </label>
         <p className="text-xs text-text-secondary">
           Write the description for the person who tags next — six months on, &ldquo;Waste&rdquo;
           means nothing without one.

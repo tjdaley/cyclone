@@ -87,6 +87,22 @@ def _bates_key(value: str) -> tuple[int, str]:
     return (int(found.group(1)) if found else 10 ** 9, value or "")
 
 
+def _exhibit_description(row: dict[str, Any]) -> str:
+    """
+    A line's description for an exhibit, with its payee and location.
+
+    "Check 2072" alone does not say where the money went. A counterparty the
+    description already spells out is left off, as it is on screen.
+    """
+    description = (row.get("description") or "").replace("\n", " ").strip()
+    party = (row.get("counterparty") or "").strip()
+    if party and party.upper() in description.upper():
+        party = ""
+    place = (row.get("location") or "").strip()
+    detail = "; ".join(part for part in (party, place) if part)
+    return "%s — %s" % (description, detail) if detail else description
+
+
 class TransactionSearchService:
     """Filtered search over a matter's transactions, plus tagging and categorizing."""
 
@@ -105,6 +121,7 @@ class TransactionSearchService:
         tag_ids: Optional[list[int]] = None,
         tag_match_all: bool = False,
         untagged: bool = False,
+        untagged_ignoring: Optional[set[int]] = None,
         text: Optional[str] = None,
         check_number: Optional[str] = None,
         checks_only: bool = False,
@@ -131,6 +148,9 @@ class TransactionSearchService:
         :param tag_ids: Tags to filter on.
         :param tag_match_all: Require every tag rather than any of them.
         :param untagged: Only lines carrying no tag at all.
+        :param untagged_ignoring: Tags that do not count as tagging for that test:
+            a line carrying only these is still untagged. For a viewer who must
+            not be able to infer them.
         :param text: Case-insensitive substring of the description.
         :param check_number: One check, by number.
         :param checks_only: Every check on the account and nothing else — the
@@ -183,7 +203,7 @@ class TransactionSearchService:
             # The complement is the whole production and would neither fit in a
             # PostgREST URL nor survive its max-rows cap; the tagged set is
             # manual work and stays small.
-            exclude_ids = self._tagged_ids(manager, matter_id, scope)
+            exclude_ids = self._tagged_ids(manager, matter_id, scope, untagged_ignoring)
         elif tag_ids:
             restrict_ids = link_repo.transactions_with_tags(tag_ids, match_all=tag_match_all)
 
@@ -326,7 +346,7 @@ class TransactionSearchService:
                 row.get("bates_number") or "",
                 _account_label(row),
                 row.get("check_number") or "",
-                (row.get("description") or "").replace("\n", " ").strip(),
+                _exhibit_description(row),
                 categories.get(row.get("category_id")) or "",
                 str(amount),
                 currency,
@@ -515,7 +535,7 @@ class TransactionSearchService:
             described.append(("Amount", amounts))
 
         if filters.get("text"):
-            described.append(("Description contains", filters["text"]))
+            described.append(("Description, payee or location contains", filters["text"]))
         if filters.get("check_number"):
             described.append(("Check number", filters["check_number"]))
         elif filters.get("checks_only"):
@@ -536,6 +556,7 @@ class TransactionSearchService:
         manager: DatabaseManager,
         matter_id: int,
         account_ids: list[int],
+        ignoring: Optional[set[int]] = None,
     ) -> list[int]:
         """
         Transactions *in this scope* that carry at least one tag.
@@ -555,7 +576,8 @@ class TransactionSearchService:
         link_repo = TransactionTagLinkRepository(manager)
         transaction_repo = FinancialAccountTransactionRepository(manager)
 
-        every_tag = [t.id for t in tag_repo.available_for_matter(matter_id, include_inactive=True)]
+        every_tag = [t.id for t in tag_repo.available_for_matter(matter_id, include_inactive=True)
+                     if t.id not in (ignoring or ())]
         candidates = link_repo.transactions_with_tags(every_tag, match_all=False)
         if not candidates:
             return []
@@ -599,9 +621,9 @@ class TransactionSearchService:
             if category is None:
                 raise ValueError("No such category")
 
-        transaction_repo = FinancialAccountTransactionRepository(manager)
-        for transaction_id in self._verify_on_matter(manager, matter_id, transaction_ids):
-            transaction_repo.update(transaction_id, {"category_id": category_id})
+        verified = self._verify_on_matter(manager, matter_id, transaction_ids)
+        FinancialAccountTransactionRepository(manager).update_many(
+            verified, {"category_id": category_id})
 
         LOGGER.info(
             "transaction_search.set_category: matter=%s count=%d category=%s",
@@ -632,13 +654,11 @@ class TransactionSearchService:
         :rtype: int
         :raises ValueError: If any transaction is not on this matter.
         """
-        transaction_repo = FinancialAccountTransactionRepository(manager)
-        now = datetime.now(timezone.utc)
-        for transaction_id in self._verify_on_matter(manager, matter_id, transaction_ids):
-            transaction_repo.update(transaction_id, {
-                "category_reviewed_at": now,
-                "category_reviewed_by_staff_id": staff_id,
-            })
+        verified = self._verify_on_matter(manager, matter_id, transaction_ids)
+        FinancialAccountTransactionRepository(manager).update_many(verified, {
+            "category_reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "category_reviewed_by_staff_id": staff_id,
+        })
         LOGGER.info("transaction_search.mark_reviewed: matter=%s count=%d staff=%s",
                     matter_id, len(transaction_ids), staff_id)
         return len(transaction_ids)
@@ -686,49 +706,94 @@ class TransactionSearchService:
         link_repo = TransactionTagLinkRepository(manager)
         verified = self._verify_on_matter(manager, matter_id, transaction_ids)
 
-        changed = 0
-        now = datetime.now(timezone.utc).isoformat()
-        for transaction_id in verified:
-            existing = link_repo.find_link(transaction_id, tag_id)
-            if remove:
-                if existing is None or existing.cleared_at is not None:
-                    continue
-                if existing.source == TagSource.client:
-                    # CLEARING, NOT DELETING. A client's tag that staff remove
-                    # must stay removed: the row holds the pair, so the client's
-                    # next attempt lands on it and is refused (044). Deleting
-                    # would free the pair and the next click would recreate it.
-                    link_repo.update(existing.id, {
-                        "cleared_at": now, "cleared_by_staff_id": staff_id})
-                else:
-                    # Staff removing their own tag is an ordinary correction,
-                    # not a suppression of somebody else's assertion.
-                    link_repo.delete(existing.id)
-                changed += 1
-            elif existing is None:
-                link_repo.insert(TransactionTagLink(
+        # Read every existing link once and write each outcome as one group: a
+        # lookup and a write per line is what kept people watching a still screen.
+        existing = link_repo.links_for_tag(tag_id, verified)
+        if remove:
+            live = [link for link in existing.values() if link.cleared_at is None]
+            # CLEARING, NOT DELETING. A client's tag that staff remove must stay
+            # removed: the row holds the pair, so the client's next attempt lands
+            # on it and is refused (044). Deleting would free the pair and the
+            # next click would recreate it.
+            to_clear = [link.id for link in live if link.source == TagSource.client]
+            # Staff removing their own tag is an ordinary correction, not a
+            # suppression of somebody else's assertion.
+            to_delete = [link.id for link in live if link.source != TagSource.client]
+            link_repo.update_many(to_clear, {
+                "cleared_at": datetime.now(timezone.utc).isoformat(),
+                "cleared_by_staff_id": staff_id,
+            })
+            link_repo.delete_many(to_delete)
+            changed = len(live)
+        else:
+            to_add = [transaction_id for transaction_id in verified
+                      if transaction_id not in existing]
+            link_repo.insert_many([
+                TransactionTagLink(
                     transaction_id=transaction_id,
                     tag_id=tag_id,
                     source=TagSource.staff,
                     tagged_by_staff_id=staff_id,
-                ).model_dump())
-                changed += 1
-            elif existing.cleared_at is not None:
-                # Staff CAN put back what staff cleared — the asymmetry with the
-                # client is the whole point — and it becomes a staff tag,
-                # because applying it is now their judgment.
-                link_repo.update(existing.id, {
-                    "cleared_at": None, "cleared_by_staff_id": None,
-                    "source": TagSource.staff.value,
-                    "tagged_by_staff_id": staff_id, "tagged_by_client_id": None,
-                })
-                changed += 1
+                ).model_dump(mode="json")
+                for transaction_id in to_add
+            ])
+            # Staff CAN put back what staff cleared — the asymmetry with the
+            # client is the whole point — and it becomes a staff tag, because
+            # applying it is now their judgment.
+            to_restore = [link.id for link in existing.values() if link.cleared_at is not None]
+            link_repo.update_many(to_restore, {
+                "cleared_at": None, "cleared_by_staff_id": None,
+                "source": TagSource.staff.value,
+                "tagged_by_staff_id": staff_id, "tagged_by_client_id": None,
+            })
+            changed = len(to_add) + len(to_restore)
 
         LOGGER.info(
             "transaction_search.apply_tag: matter=%s tag=%s %s=%d",
             matter_id, tag_id, "removed" if remove else "applied", changed,
         )
         return changed
+
+    # ── Counting ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def tag_usage(
+        manager: DatabaseManager,
+        matter_id: int,
+        tag_ids: list[int],
+    ) -> dict[int, int]:
+        """
+        How many lines on THIS matter each tag is live on.
+
+        Applies the same exclusions as a search, so the number on a chip is the
+        number clicking it finds: a firm-wide tag's marks on other matters do not
+        count, and neither does a cleared tag, a removed line or a rejected
+        statement.
+
+        :return: ``{tag_id: count}``; a tag on no line here is absent.
+        :rtype: dict[int, int]
+        """
+        allowed = {a.id for a in FinancialAccountRepository(manager).get_by_matter(matter_id)}
+        if not allowed or not tag_ids:
+            return {}
+        links = TransactionTagLinkRepository(manager).select_many(
+            condition={"tag_id": tag_ids, "cleared_at": None})[0]
+        rejected = set(FinancialAccountStatementRepository(manager).rejected_ids(matter_id))
+        transaction_repo = FinancialAccountTransactionRepository(manager)
+        candidates = sorted({link.transaction_id for link in links})
+        on_matter: set[int] = set()
+        for chunk in (candidates[i:i + 200] for i in range(0, len(candidates), 200)):
+            on_matter.update(
+                r.id for r in transaction_repo.select_many(condition={"id": chunk})[0]
+                if r.financial_account_id in allowed
+                and r.deleted_at is None
+                and r.statement_id not in rejected
+            )
+        usage: dict[int, int] = {}
+        for link in links:
+            if link.transaction_id in on_matter:
+                usage[link.tag_id] = usage.get(link.tag_id, 0) + 1
+        return usage
 
     # ── Shared ────────────────────────────────────────────────────────────
 
