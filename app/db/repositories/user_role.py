@@ -13,6 +13,11 @@ from util.loggerfactory import LoggerFactory
 LOGGER = LoggerFactory.create_logger(__name__)
 
 
+def normalize_email(email: Optional[str]) -> str:
+    """An address as sign-in compares it: trimmed, lower case. Supabase stores it so."""
+    return (email or "").strip().lower()
+
+
 class UserRoleRepository(BaseRepository[UserRoleInDB]):
     """CRUD repository for the ``user_roles`` table."""
 
@@ -43,13 +48,22 @@ class UserRoleRepository(BaseRepository[UserRoleInDB]):
         Used by the first-login correlation flow. If an admin pre-created the
         user with multiple roles, all rows are linked together in one pass.
 
+        **Compared ignoring case and surrounding space.** Google hands back the
+        address in lower case, and a person typing it into a staff record does
+        not: an exact match turned "Jane.Doe@Gmail.com" into "no account is
+        awaiting activation". The unlinked rows are few, so they are compared
+        here rather than by a filter PostgREST would apply case-sensitively.
+
         :param auth_email: Email address to match against ``auth_email``.
         :return: List of unlinked rows (possibly empty).
         :rtype: list[UserRoleInDB]
         """
         LOGGER.debug("UserRoleRepository.get_unlinked_by_auth_email")
-        records, _ = self.select_many(condition={"auth_email": auth_email, "supabase_uid": None})
-        return records
+        wanted = normalize_email(auth_email)
+        if not wanted:
+            return []
+        records, _ = self.select_many(condition={"supabase_uid": None})
+        return [r for r in records if normalize_email(r.auth_email) == wanted]
 
     def uid_has_role(self, supabase_uid: str) -> bool:
         """

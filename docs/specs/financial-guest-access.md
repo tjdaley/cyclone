@@ -194,6 +194,35 @@ which is generic over `user_roles`) links it on first sign-in.
 
 ---
 
+## 7a. ⚠ PHI, when a guest ever sees a document
+
+A guest sees statements, and a bank statement is not a medical record — which
+is the *only* reason this surface does not consult the PHI flags 047 added
+(`documents.contains_phi`, `phi_subject_client`, `phi_subject_minor_child`,
+`matters.may_receive_childrens_phi`).
+
+**The trigger is the first guest endpoint that lists, links to, searches or
+counts a row from `documents`**, not the completion of the document pipeline.
+
+**A guest is stricter than a client, not the same**, and reusing the client
+portal's filter here would be wrong rather than merely duplicated. A tracing
+expert or a CPA is **outside the firm**, which is the boundary the restriction
+is written about. The exception that lets a client see their own PHI is the
+*client's* exception and does not transfer to somebody retained to examine it.
+So for a guest there is no "their own" case: absent a court order or a Texas
+Medical Privacy Act release naming that recipient and that data, a document
+carrying `contains_phi` does not reach a guest surface whoever it is about.
+
+**`guest_consents` is consent to the engagement, not a medical release**, and
+must never be read as one. The two are different instruments with different
+signatories and different scope.
+
+The full rule, including the four subject cases and the CSV restriction, is in
+`app/services/guest_access_service.py` and
+[`document-labeling/SPEC_document_pipeline.md`](document-labeling/SPEC_document_pipeline.md) §11.
+
+---
+
 ## 8. Not built in this pass
 
 - The emailed consent link (section 5).

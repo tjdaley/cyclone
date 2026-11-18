@@ -34,6 +34,69 @@ Their own tags only — the search decorates each line with every tag, so the
 list is filtered before it leaves. No account notes or purpose, no statement
 flags or provenance, no removed lines, no "untagged" filter (it would reveal
 that staff tagged a line), no inclusion of deleted rows.
+
+PHI IS NOT CHECKED HERE YET, AND THAT IS ONLY SAFE WHILE A GUEST SEES ONLY STATEMENTS
+───────────────────────────────────────────────────────────────────────────────
+Migration 047 added `documents`, and with it four columns nothing on this
+surface reads:
+
+    documents.contains_phi             bool, the superset
+    documents.phi_basis                label | extraction | manual
+    documents.phi_subject_client       bool
+    documents.phi_subject_minor_child  bool
+    matters.may_receive_childrens_phi  bool, default FALSE, set on matter EDIT
+
+Not consulting them is correct TODAY, for one reason only: no guest surface
+has any concept of a document that is not an account statement, and a bank
+statement is not a medical record.
+The moment that stops being true, this is a disclosure, not a bug report.
+
+**The trigger is the first time any guest surface lists, links to, searches or
+counts rows from `documents`.** Not when the pipeline is finished — when one
+endpoint here returns a document.
+
+THE RULE, WHICH IS NOT SYMMETRIC
+────────────────────────────────
+Whose PHI it is decides everything, and the four cases are not variations of
+one rule:
+
+  * The CLIENT's own PHI — may go to the client.
+  * A MINOR CHILD's PHI — may go to the client only where
+    `matters.may_receive_childrens_phi` is true. It defaults FALSE and is set
+    by hand on matter edit, deliberately not on matter creation: it records a
+    finding about a court order restricting a parent's access to their own
+    child's medical information, and a field on a setup form gets completed
+    reflexively.
+  * Neither flag set, `contains_phi` true — the opposing party's or a third
+    party's records. **The commonest case in a production, and the one a client
+    most wants to see.** It may never be shown.
+  * Anything PHI-derived must not leave as CSV. That format carries no caption
+    and no notice by design, so it is the one output that cannot carry the
+    restriction.
+
+Drug and alcohol results are treated as PHI here even though the governing
+statutes reach them only where the purpose of the test was diagnosis or
+treatment rather than compliance with a court order. Deliberately
+over-inclusive; do not "simplify" it.
+
+Any report that displays PHI carries a warning naming the four exceptions —
+not "contains sensitive data". `docs/specs/document-labeling/SPEC_document_pipeline.md` §11.
+
+WHY A GUEST IS STRICTER THAN A CLIENT, NOT THE SAME
+───────────────────────────────────────────────────────────────────────────────
+A tracing expert or a CPA is **outside the firm**, which is the boundary the
+restriction is written about. The exception that lets a client see their own
+PHI does not transfer to somebody retained to examine it: it is the client's
+exception, and the client is not the one reading.
+
+So for a guest there is no "their own" case at all. Absent a court order or a
+Texas Medical Privacy Act release naming that recipient and that data, a
+document with `contains_phi` does not reach a guest surface — **whoever it is
+about.** The consent in `guest_consents` is consent to the engagement; it is
+not a medical release and must not be read as one.
+
+This is the one place where reusing the client portal's filter would be wrong
+rather than merely duplicated.
 """
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional

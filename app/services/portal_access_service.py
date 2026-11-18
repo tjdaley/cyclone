@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from db.models.user_role import UserRole, UserRoleType
 from db.repositories.client import ClientRepository
-from db.repositories.user_role import UserRoleRepository
+from db.repositories.user_role import UserRoleRepository, normalize_email
 from db_handler import DatabaseManager
 from services.audit_logger import AuditLogger
 from util.loggerfactory import LoggerFactory
@@ -38,11 +38,6 @@ LOGGER = LoggerFactory.create_logger(__name__)
 
 class PortalAccessConflict(Exception):
     """The request cannot be honoured as things stand; the message says why."""
-
-
-def normalize_email(email: Optional[str]) -> str:
-    """The form correlation compares against: Supabase stores addresses lowercased."""
-    return (email or "").strip().lower()
 
 
 def _role_value(row: Any) -> str:

@@ -2736,6 +2736,21 @@ database will not catch the mistake.
 - **`client_tag_counts` is a coaching signal**, not bookkeeping: a client
   cleared forty times is mis-tagging systematically, and nobody would otherwise
   see it.
+- **PHI IS NOT CHECKED ON EITHER NON-STAFF SURFACE YET, AND THE REASON IS A
+  COINCIDENCE OF TIMING.** 047 added `documents.contains_phi`,
+  `phi_subject_client`, `phi_subject_minor_child` and
+  `matters.may_receive_childrens_phi`, and neither the client portal nor the
+  guest portal (052) reads any of them. That is correct only while **neither
+  surface has any concept of a document that is not an account statement** — a
+  bank statement is not a medical record. **The trigger is the first endpoint on
+  either surface that lists, links to, searches or counts a row from
+  `documents`**, not the day the pipeline is finished. The rule is asymmetric
+  and is set out in `client_portal_service` and `guest_access_service`: a client
+  may see their own PHI, and a minor child's only where
+  `may_receive_childrens_phi` is true; **a guest is outside the firm and has no
+  "their own" case at all**, because the exception belongs to the client and the
+  client is not the one reading. Consent to an engagement is not a medical
+  release. Nothing PHI-derived leaves as CSV — that format carries no notice.
 - Covered by `tests/test_client_portal.py`. 044 was applied to real Postgres and
   its three constraints verified to reject a link with two actors, none, or a
   clearing with nobody attached.
@@ -3497,6 +3512,7 @@ Tom asked on 2026-10-31 that they stay on the pending list:
 | Build a PostgREST `or` from typed text without double-quoting it | A comma or a bracket is `or` syntax, so "McKinney, TX" is refused. `_apply_text`, tested against real PostgREST |
 | Show a firm-wide tag's `in_use` as a count on a matter's screen | It counts every matter and cleared tags, so the chip disagrees with what clicking it finds and hints at other cases. `tag_usage`. `in_use` is for the Delete guard |
 | Write a bulk action as a loop of single-row calls | 100 lines was 100 UPDATEs, or 200 calls for a tag, and the screen sat still for seconds. `update_many`, `insert_many`, `delete_many`, `links_for_tag` in `repositories/financial.py`. Show `BulkProgress` too: a disabled dropdown looks like one nobody touched |
+| Change a staff member's sign-in email on the staff record alone | Correlation reads `user_roles.auth_email`, so the old rows wait for the old address and only roles granted afterwards work. `update_staff` carries it to every row; matching ignores case (`normalize_email`) |
 | Treat `clients.auth_email` as permission to sign in | Every client has one. Access is the `client` row in `user_roles`, written only by `portal_access_service.give` |
 | Leave a model field out of its response schema | It reads as absent, not as an error. `client_tagging_enabled` could be switched on and never off, because the checkbox always read false |
 | Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |

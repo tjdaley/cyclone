@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from db.models.user_role import UserRole, UserRoleType
 from db.repositories.staff import StaffRepository
 from db.repositories.staff_slug_access import StaffSlugAccessRepository
-from db.repositories.user_role import UserRoleRepository
+from db.repositories.user_role import UserRoleRepository, normalize_email
 from dependencies import get_db_manager, require_role
 from schemas.common import DeletedResponse
 from schemas.staff import (
@@ -130,7 +130,7 @@ def create_staff(
     if body.auth_email:
         role_repo = UserRoleRepository(manager)
         user_role = UserRole(
-            auth_email=body.auth_email,
+            auth_email=normalize_email(body.auth_email),
             role=UserRoleType(body.role.value),
             staff_id=record.id,
         )
@@ -190,6 +190,19 @@ def update_staff(
 
     LOGGER.info("staff.update: staff_id=%s by=%s self=%s admin=%s", staff_id, caller_uid, is_self, is_admin)
     record = repo.update(staff_id, updates)
+
+    # The sign-in email lives on the role rows too, and correlation reads it
+    # THERE. Changing it on the staff record alone left every existing role row
+    # waiting for the old address: the person signed in with the corrected one
+    # and was told no account was awaiting activation, while any role granted
+    # afterwards (copied from the staff record) worked.
+    if "auth_email" in updates and normalize_email(updates["auth_email"]) != normalize_email(target.auth_email):
+        role_repo = UserRoleRepository(manager)
+        rows = role_repo.get_by_staff(staff_id)
+        for row in rows:
+            role_repo.update(row.id, {"auth_email": normalize_email(updates["auth_email"])})
+        LOGGER.info("staff.update: auth_email carried to %s user_roles row(s) staff_id=%s",
+                    len(rows), staff_id)
 
     # Best-effort sync: if the staff member has a user_roles row matching the
     # OLD staff.role value, retitle it to the NEW value so RBAC stays aligned.
@@ -286,7 +299,7 @@ def set_staff_roles(
     for role in to_add:
         role_repo.insert(UserRole(
             supabase_uid=target.supabase_uid,
-            auth_email=target.auth_email,
+            auth_email=normalize_email(target.auth_email) or None,
             role=UserRoleType(role),
             staff_id=staff_id,
         ).model_dump())
