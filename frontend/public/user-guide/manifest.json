@@ -9,7 +9,7 @@
           "file": "01-getting-started.md",
           "number": "1",
           "title": "Getting started",
-          "summary": "Being given an account, first sign-in, what to do when it does not work"
+          "summary": "Being given an account, first sign-in, finding a matter, and what to do when sign-in does not work"
         }
       ]
     },
@@ -28,7 +28,7 @@
           "file": "03-matters.md",
           "number": "3",
           "title": "Creating a matter",
-          "summary": "The matter, its caption, and the fields that other screens depend on"
+          "summary": "The matter, its dashboard, its caption, and the fields that other screens depend on"
         }
       ]
     },

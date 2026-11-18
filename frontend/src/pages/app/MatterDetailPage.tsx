@@ -11,6 +11,7 @@ import {
   getMatterOpposingCounsel, getMatterCounselLinks,
   createOpposingCounsel, linkOpposingCounsel, updateMatterCounselLink, unlinkOpposingCounsel,
 } from '../../lib/api'
+import MatterHeader from '../../components/MatterHeader'
 import type {
   Matter, Client, Staff, MatterStaff, MatterStaffRole, OpposingParty,
   MatterChild, ChildSex, MatterClaim, ClaimKind, MatterPleading, PleadingStatus,
@@ -428,37 +429,12 @@ export default function MatterDetailPage() {
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto space-y-5">
-      {/* Header */}
-      <div>
-        <Link to="/app/matters" className="text-xs text-text-secondary hover:text-navy">← Matters</Link>
-        <div className="flex flex-wrap items-baseline gap-3 mt-1">
-          <h1 className="font-display text-2xl text-navy">{matter.short_name ?? matter.matter_name}</h1>
-          <span className="text-xs rounded-full px-2.5 py-1 font-medium capitalize bg-off-white text-text-secondary border border-border">
-            {matter.status.replace(/_/g, ' ')}
-          </span>
-          {matter.is_pro_bono && (
-            <span className="text-xs rounded-full px-2 py-0.5 bg-purple-100 text-purple-700">Pro bono</span>
-          )}
-          <Link to={`/app/matters/${matterId}/received`}
-            className="ml-auto text-sm text-navy underline">Received documents →</Link>
-          <Link to={`/app/matters/${matterId}/financials`}
-            className="text-sm text-navy underline">Financials →</Link>
-        </div>
-        <p className="text-sm text-text-secondary mt-1">
-          {[
-            matter.matter_number,
-            matter.court_name,
-            `${matter.county} County, ${matter.state}`,
-            matter.matter_type.replace(/_/g, ' '),
-            matter.discovery_level ? matter.discovery_level.replace('_', ' ') : null,
-          ].filter(Boolean).join(' · ')}
-        </p>
-        {client && (
-          <p className="text-sm text-text-secondary">
-            Client: <span className="text-text-primary">{fullName(client.name)}</span>
-          </p>
-        )}
-      </div>
+      <MatterHeader matterId={matterId} matter={matter} client={client}
+        actions={<>
+          <Link to={`/app/matters/${matterId}/received`} className="text-sm text-navy underline">Received documents →</Link>
+          <Link to={`/app/matters/${matterId}/financials`} className="text-sm text-navy underline">Financials →</Link>
+        </>} />
+      <h1 className="font-display text-xl text-navy">Matter details</h1>
 
       {/* ── Exhibit caption ── */}
       <CaptionSection matter={matter} onSaved={setMatter} />
@@ -784,7 +760,7 @@ export default function MatterDetailPage() {
             {pleadings.length === 0 && (
               <p className="text-xs text-amber-700">
                 No pleadings on this matter yet — a claim has to belong to one.{' '}
-                <Link to="/app/pleadings" className="underline">Ingest a pleading</Link> first.
+                <Link to={`/app/pleadings?matter=${matterId}`} className="underline">Ingest a pleading</Link> first.
               </p>
             )}
           </div>
@@ -889,7 +865,7 @@ export default function MatterDetailPage() {
         {sectionError.pleadings && <p className="text-xs text-red-600 mb-2">{sectionError.pleadings}</p>}
         {pleadings.length === 0 ? (
           <Empty>
-            None ingested. <Link to="/app/pleadings" className="text-navy underline">Ingest a pleading</Link>.
+            None ingested. <Link to={`/app/pleadings?matter=${matterId}`} className="text-navy underline">Ingest a pleading</Link>.
           </Empty>
         ) : (
           <div className="space-y-1.5">

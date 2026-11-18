@@ -2,11 +2,10 @@ import { useEffect, useRef, useState, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import {
-  getMatters, createMatter, updateMatter, getClients, getStaff,
-  getRateOverrides, setRateOverride, deleteRateOverride, previewMatterIntake,
+  getMatters, createMatter, getClients, previewMatterIntake,
 } from '../../lib/api'
 import type {
-  Matter, MatterCreatePayload, RateOverride, Client, Staff, MatterIntakePreview,
+  Matter, MatterCreatePayload, Client, MatterIntakePreview,
 } from '../../types'
 import MatterIntakePanel from './MatterIntakePanel'
 
@@ -14,7 +13,6 @@ const MATTER_TYPES = [
   'divorce', 'child_custody', 'modification', 'enforcement',
   'cps', 'probate', 'estate_planning', 'civil', 'other',
 ]
-const MATTER_STATUSES = ['intake', 'conflict_review', 'active', 'closed', 'archived']
 
 const STATUS_COLOR: Record<string, string> = {
   active:          'bg-green-100 text-green-800',
@@ -80,7 +78,6 @@ export default function MattersPage() {
   const [search, setSearch]     = useState('')
 
   const [clients, setClients]   = useState<Client[]>([])
-  const [staff, setStaff]       = useState<Staff[]>([])
 
   // Create form
   const [showCreate, setShowCreate]     = useState(false)
@@ -93,36 +90,11 @@ export default function MattersPage() {
   const [newCounty, setNewCounty]       = useState('')
   const [newCourtName, setNewCourtName] = useState('')
   const [newMatterNumber, setNewMatterNumber] = useState('')
+  const [newBillingId, setNewBillingId] = useState('')
   const [newNotes, setNewNotes]         = useState('')
   const [creating, setCreating]         = useState(false)
   const [createError, setCreateError]   = useState<string | null>(null)
 
-  // Edit form
-  const [editId, setEditId]               = useState<number | null>(null)
-  const [edShortName, setEdShortName]     = useState('')
-  const [edName, setEdName]               = useState('')
-  const [edStatus, setEdStatus]           = useState('')
-  const [closePrompt, setClosePrompt]     = useState(false)
-  const [edProBono, setEdProBono]         = useState(false)
-  const [edState, setEdState]             = useState('')
-  const [edCounty, setEdCounty]           = useState('')
-  const [edCourtName, setEdCourtName]     = useState('')
-  const [edMatterNumber, setEdMatterNumber] = useState('')
-  const [edFeeDate, setEdFeeDate]         = useState('')
-  const [edOpenedDate, setEdOpenedDate]   = useState('')
-  const [edClosedDate, setEdClosedDate]   = useState('')
-  const [edRetainer, setEdRetainer]       = useState('')
-  const [edNotes, setEdNotes]             = useState('')
-  const [saving, setSaving]               = useState(false)
-  const [editError, setEditError]         = useState<string | null>(null)
-
-  // Rate override panel (shown within edit)
-  const [overrides, setOverrides]             = useState<RateOverride[]>([])
-  const [loadingOverrides, setLoadingOverrides] = useState(false)
-  const [ovStaffId, setOvStaffId]             = useState<number | ''>('')
-  const [ovRate, setOvRate]                   = useState('')
-  const [savingOv, setSavingOv]               = useState(false)
-  const [ovError, setOvError]                 = useState<string | null>(null)
 
   useEffect(() => {
     getMatters()
@@ -130,17 +102,7 @@ export default function MattersPage() {
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load'))
       .finally(() => setLoading(false))
     getClients().then(setClients).catch(console.error)
-    getStaff().then(setStaff).catch(console.error)
   }, [])
-
-  useEffect(() => {
-    if (!editId) { setOverrides([]); return }
-    setLoadingOverrides(true); setOvError(null)
-    getRateOverrides(editId)
-      .then(setOverrides)
-      .catch(console.error)
-      .finally(() => setLoadingOverrides(false))
-  }, [editId])
 
   const visible = matters
     .filter(m => {
@@ -164,68 +126,6 @@ export default function MattersPage() {
   }
 
   const canCreate = profile?.role === 'attorney' || profile?.role === 'admin'
-  const isAdmin = profile?.role === 'admin'
-
-  function openEdit(m: Matter) {
-    if (editId === m.id) { setEditId(null); return }
-    setEditId(m.id)
-    setEdShortName(m.short_name ?? '')
-    setEdName(m.matter_name)
-    setEdStatus(m.status)
-    setEdProBono(m.is_pro_bono)
-    setEdState(m.state)
-    setEdCounty(m.county)
-    setEdCourtName(m.court_name ?? '')
-    setEdMatterNumber(m.matter_number ?? '')
-    setEdFeeDate(m.fee_agreement_signed_date ?? '')
-    setEdOpenedDate(m.opened_date ?? '')
-    setEdClosedDate(m.closed_date ?? '')
-    setEdRetainer(String(m.retainer_amount))
-    setEdNotes(m.notes ?? '')
-    setEditError(null)
-  }
-
-  function handleSaveEdit(e: FormEvent) {
-    e.preventDefault()
-    if (editId === null) return
-    const current = matters.find(m => m.id === editId)
-    // Only on the way INTO closed, and only if there is still something to turn
-    // off: re-saving a closed matter's notes must not ask again.
-    if (current && isClosed(edStatus) && !isClosed(current.status)
-        && (current.client_portal_enabled ?? true)) {
-      setClosePrompt(true)
-      return
-    }
-    void saveEdit()
-  }
-
-  async function saveEdit(extra: Record<string, unknown> = {}) {
-    setClosePrompt(false)
-    setSaving(true); setEditError(null)
-    try {
-      const payload: Record<string, unknown> = {
-        short_name: edShortName.trim() || null,
-        matter_name: edName.trim(),
-        status: edStatus,
-        is_pro_bono: edProBono,
-        state: edState.trim(),
-        county: edCounty.trim(),
-        court_name: edCourtName.trim() || null,
-        matter_number: edMatterNumber.trim() || null,
-        fee_agreement_signed_date: edFeeDate || null,
-        opened_date: edOpenedDate || null,
-        closed_date: edClosedDate || null,
-        retainer_amount: parseFloat(edRetainer) || 0,
-        notes: edNotes.trim() || null,
-        ...extra,
-      }
-      const updated = await updateMatter(editId!, payload)
-      setMatters(prev => prev.map(m => m.id === editId ? updated : m))
-      setEditId(null)
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to save')
-    } finally { setSaving(false) }
-  }
 
   async function handleCreateMatter(e: FormEvent) {
     e.preventDefault()
@@ -242,6 +142,7 @@ export default function MattersPage() {
         county: newCounty.trim(),
         court_name: newCourtName.trim() || undefined,
         matter_number: newMatterNumber.trim() || undefined,
+        billing_id: newBillingId.trim() || undefined,
         notes: newNotes.trim() || undefined,
       }
       const created = await createMatter(payload)
@@ -252,35 +153,6 @@ export default function MattersPage() {
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create matter')
     } finally { setCreating(false) }
-  }
-
-  async function handleSetOverride(e: FormEvent) {
-    e.preventDefault()
-    if (!editId || !ovStaffId || !ovRate) return
-    setSavingOv(true); setOvError(null)
-    try {
-      const saved = await setRateOverride(editId, Number(ovStaffId), parseFloat(ovRate))
-      setOverrides(prev => {
-        const idx = prev.findIndex(o => o.staff_id === Number(ovStaffId))
-        if (idx >= 0) { const next = [...prev]; next[idx] = saved; return next }
-        return [...prev, saved]
-      })
-      setOvStaffId(''); setOvRate('')
-    } catch (err) { setOvError(err instanceof Error ? err.message : 'Failed to save override') }
-    finally { setSavingOv(false) }
-  }
-
-  async function handleDeleteOverride(overrideId: number) {
-    if (!editId) return
-    try {
-      await deleteRateOverride(editId, overrideId)
-      setOverrides(prev => prev.filter(o => o.id !== overrideId))
-    } catch (err) { setOvError(err instanceof Error ? err.message : 'Failed to delete override') }
-  }
-
-  function staffDisplayName(staffId: number) {
-    const s = staff.find(st => st.id === staffId)
-    return s ? `${s.name.first_name} ${s.name.last_name}` : `Staff #${staffId}`
   }
 
   // Intake takes over the page: reviewing a case style has nothing to do with
@@ -301,7 +173,7 @@ export default function MattersPage() {
           <p className="text-text-secondary mt-1">{matters.length} total</p>
         </div>
         {canCreate && (
-          <button className="btn-primary" onClick={() => { setShowCreate(s => !s); setEditId(null) }}>
+          <button className="btn-primary" onClick={() => { setShowCreate(s => !s) }}>
             {showCreate ? 'Cancel' : 'New matter'}
           </button>
         )}
@@ -397,6 +269,10 @@ export default function MattersPage() {
                 <label className="label">Matter number</label>
                 <input className="input mt-1" value={newMatterNumber} onChange={e => setNewMatterNumber(e.target.value)} placeholder="Court-assigned case number" />
               </div>
+              <div>
+                <label className="label">Billing ID</label>
+                <input className="input mt-1" value={newBillingId} onChange={e => setNewBillingId(e.target.value)} placeholder="The matter's number in the billing system" />
+              </div>
               <div className="flex items-end pb-1">
                 <div className="flex items-center gap-2">
                   <input type="checkbox" id="pro-bono" checked={newProBono} onChange={e => setNewProBono(e.target.checked)} className="rounded border-border" />
@@ -466,156 +342,21 @@ export default function MattersPage() {
                           {m.status.replace(/_/g, ' ')}
                         </span>
                       </td>
-                      {/* Row opens the matter; editing the record itself stays here. */}
+                      {/* Row opens the matter; Edit opens its record. */}
                       <td className="px-5 py-3 text-right">
                         <button
                           type="button"
                           className="text-xs text-navy underline"
                           onClick={e => {
                             e.stopPropagation()
-                            if (editId === m.id) { setEditId(null); return }
-                            openEdit(m); setShowCreate(false)
+                            navigate(`/app/matters/${m.id}/edit`)
                           }}
                         >
-                          {editId === m.id ? 'Close' : 'Edit'}
+                          Edit
                         </button>
                       </td>
                     </tr>
 
-                    {/* Edit + rate overrides panel */}
-                    {editId === m.id && (
-                      <tr key={`edit-${m.id}`}>
-                        <td colSpan={4} className="px-5 py-4 bg-off-white/50 border-b border-border">
-                          <div className="space-y-6" onClick={e => e.stopPropagation()}>
-                            {/* Edit form */}
-                            <form onSubmit={handleSaveEdit} className="space-y-3 max-w-3xl">
-                              <h3 className="font-semibold text-navy text-sm">Edit matter</h3>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                <div>
-                                  <label className="label">Short name</label>
-                                  <input className="input mt-1" value={edShortName} onChange={e => setEdShortName(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">Matter name</label>
-                                  <input className="input mt-1" value={edName} onChange={e => setEdName(e.target.value)} />
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                <div>
-                                  <label className="label">Status</label>
-                                  <select className="input mt-1" value={edStatus} onChange={e => setEdStatus(e.target.value)}>
-                                    {MATTER_STATUSES.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="label">State</label>
-                                  <input className="input mt-1" value={edState} onChange={e => setEdState(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">County</label>
-                                  <input className="input mt-1" value={edCounty} onChange={e => setEdCounty(e.target.value)} />
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                <div>
-                                  <label className="label">Court name</label>
-                                  <input className="input mt-1" value={edCourtName} onChange={e => setEdCourtName(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">Matter number</label>
-                                  <input className="input mt-1" value={edMatterNumber} onChange={e => setEdMatterNumber(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">Retainer ($)</label>
-                                  <input className="input mt-1" type="number" step="0.01" min="0" value={edRetainer} onChange={e => setEdRetainer(e.target.value)} />
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                <div>
-                                  <label className="label">Fee agreement signed</label>
-                                  <input className="input mt-1" type="date" value={edFeeDate} onChange={e => setEdFeeDate(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">Opened date</label>
-                                  <input className="input mt-1" type="date" value={edOpenedDate} onChange={e => setEdOpenedDate(e.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="label">Closed date</label>
-                                  <input className="input mt-1" type="date" value={edClosedDate} onChange={e => setEdClosedDate(e.target.value)} />
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <input type="checkbox" id={`pb-${m.id}`} checked={edProBono} onChange={e => setEdProBono(e.target.checked)} className="rounded border-border" />
-                                <label htmlFor={`pb-${m.id}`} className="text-sm text-navy">Pro bono</label>
-                              </div>
-                              <div>
-                                <label className="label">Notes</label>
-                                <textarea className="input mt-1" rows={2} value={edNotes} onChange={e => setEdNotes(e.target.value)} />
-                              </div>
-                              {editError && <p className="text-sm text-red-600">{editError}</p>}
-                              <div className="flex gap-3">
-                                <button type="submit" className="btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
-                                <button type="button" className="btn-secondary" onClick={() => setEditId(null)}>Cancel</button>
-                              </div>
-                            </form>
-
-                            {/* Rate overrides */}
-                            <div className="max-w-lg border-t border-border pt-4">
-                              <h3 className="font-semibold text-navy text-sm mb-3">Rate overrides</h3>
-                              {loadingOverrides && <p className="text-sm text-text-secondary">Loading…</p>}
-                              {!loadingOverrides && overrides.length === 0 && <p className="text-sm text-text-secondary mb-3">No rate overrides set. Default rates apply.</p>}
-                              {!loadingOverrides && overrides.length > 0 && (
-                                <table className="w-full text-sm mb-4">
-                                  <thead>
-                                    <tr className="border-b border-border">
-                                      <th className="text-left py-1.5 text-xs font-semibold text-text-secondary uppercase tracking-wide">Staff</th>
-                                      <th className="text-left py-1.5 text-xs font-semibold text-text-secondary uppercase tracking-wide">Rate</th>
-                                      {isAdmin && <th />}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {overrides.map(o => (
-                                      <tr key={o.id} className="border-b border-border last:border-0">
-                                        <td className="py-1.5 text-navy">{staffDisplayName(o.staff_id)}</td>
-                                        <td className="py-1.5 text-navy">${o.rate.toFixed(0)}/hr</td>
-                                        {isAdmin && (
-                                          <td className="py-1.5 text-right">
-                                            <button onClick={() => handleDeleteOverride(o.id)} className="text-xs text-red-600 hover:underline">Remove</button>
-                                          </td>
-                                        )}
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              )}
-                              {ovError && <p className="text-sm text-red-600 mb-2">{ovError}</p>}
-                              {isAdmin && (
-                                <form onSubmit={handleSetOverride} className="flex gap-2 items-end">
-                                  <div className="flex-1">
-                                    <label className="label">Staff member</label>
-                                    <select className="input mt-1" value={ovStaffId} onChange={e => setOvStaffId(e.target.value ? Number(e.target.value) : '')}>
-                                      <option value="">— select —</option>
-                                      {staff.filter(s => s.role === 'attorney' || s.role === 'paralegal').map(s => (
-                                        <option key={s.id} value={s.id}>
-                                          {s.name.first_name} {s.name.last_name} {s.default_billing_rate != null ? `($${s.default_billing_rate}/hr default)` : ''}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                  <div className="w-28">
-                                    <label className="label">Rate ($/hr)</label>
-                                    <input className="input mt-1" type="number" min="0" step="0.01" placeholder="250" value={ovRate} onChange={e => setOvRate(e.target.value)} />
-                                  </div>
-                                  <button type="submit" className="btn-primary" disabled={savingOv || !ovStaffId || !ovRate}>
-                                    {savingOv ? 'Saving…' : 'Set'}
-                                  </button>
-                                </form>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
                   </>
                 )
               })}
@@ -623,33 +364,6 @@ export default function MattersPage() {
           </table>
         )}
       </div>
-
-      {closePrompt && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4"
-          role="dialog" aria-modal="true" aria-label="Portal access for this matter"
-          onClick={e => { if (e.target === e.currentTarget) setClosePrompt(false) }}>
-          <div className="card p-5 w-full max-w-lg my-16 bg-white">
-            <h3 className="font-semibold text-navy">Turn off portal access to this matter?</h3>
-            <p className="text-sm text-text-secondary mt-1">
-              You are closing this matter. If the client has portal access, they can keep reading
-              its accounts and transactions unless you turn it off. You can turn it back on later
-              from the matter&rsquo;s page, for a modification or an enforcement.
-            </p>
-            <div className="flex flex-wrap justify-end gap-2 mt-4">
-              <button type="button" className="btn-secondary" onClick={() => setClosePrompt(false)}>
-                Keep editing
-              </button>
-              <button type="button" className="btn-secondary" onClick={() => void saveEdit()}>
-                Close and leave it on
-              </button>
-              <button type="button" className="btn-primary"
-                onClick={() => void saveEdit({ client_portal_enabled: false })}>
-                Close and turn it off
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

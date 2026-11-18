@@ -2,6 +2,7 @@
 app/db/repositories/matter.py - Repository for Matter, MatterStaff, BillingSplit, MatterRateOverride,
 and OpposingParty models.
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 from db.models.matter import (
@@ -11,6 +12,7 @@ from db.models.matter import (
     MatterStaffInDB,
     MatterStatus,
     OpposingPartyInDB,
+    StaffRecentMatterInDB,
 )
 from db_handler import BaseRepository, DatabaseManager
 
@@ -184,3 +186,22 @@ class OpposingPartyRepository(BaseRepository[OpposingPartyInDB]):
         """
         LOGGER.debug("OpposingPartyRepository.get_by_matter: matter_id=%s", matter_id)
         return self.select_many(condition={"matter_id": matter_id})[0]
+
+
+class StaffRecentMatterRepository(BaseRepository[StaffRecentMatterInDB]):
+    """Which matters each staff member opened, most recent first (054)."""
+
+    def __init__(self, manager: DatabaseManager):
+        super().__init__(manager, "staff_recent_matters", StaffRecentMatterInDB)
+
+    def touch(self, staff_id: int, matter_id: int) -> None:
+        """Record a visit. One row per staff member per matter; a revisit moves it to the top."""
+        self.upsert({"staff_id": staff_id, "matter_id": matter_id,
+                     "viewed_at": datetime.now(timezone.utc).isoformat()},
+                    on_conflict="staff_id,matter_id")
+
+    def recent(self, staff_id: int, limit: int) -> list[int]:
+        """Matter ids this staff member opened, most recent first."""
+        rows = self.select_many(condition={"staff_id": staff_id},
+                                sort_by="viewed_at", sort_direction="desc")[0]
+        return [row.matter_id for row in rows[:limit]]

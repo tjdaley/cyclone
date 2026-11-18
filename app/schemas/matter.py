@@ -29,6 +29,7 @@ class MatterCreateRequest(BaseModel):
     county: str = Field(..., description="County where the matter is filed")
     court_name: Optional[str] = Field(default=None)
     matter_number: Optional[str] = Field(default=None)
+    billing_id: Optional[str] = Field(default=None, description="The external billing system's number")
     discovery_level: Optional[DiscoveryLevel] = Field(default=None)
     notes: Optional[str] = None
 
@@ -50,6 +51,7 @@ class MatterUpdateRequest(BaseModel):
     county: Optional[str] = None
     court_name: Optional[str] = None
     matter_number: Optional[str] = None
+    billing_id: Optional[str] = None
     discovery_level: Optional[DiscoveryLevel] = None
     notes: Optional[str] = None
     case_style: Optional[str] = None
@@ -89,6 +91,7 @@ class MatterResponse(BaseModel):
     county: str
     court_name: Optional[str]
     matter_number: Optional[str]
+    billing_id: Optional[str] = None
     discovery_level: Optional[DiscoveryLevel]
     notes: Optional[str]
     case_style: Optional[str]

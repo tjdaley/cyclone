@@ -9,7 +9,7 @@ access to that matter's **Accounts**, **Transactions** and **Inventory** —
 nothing else — once the client has consented. They can read, export, and tag
 transactions with tags of their own. They cannot change anything.
 
-Everything is on the matter's detail page, under **Financial professionals**.
+Everything is on the matter's **Matter details** page, under **Financial professionals**.
 
 ## What they can and cannot do
 

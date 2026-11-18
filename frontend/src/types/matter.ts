@@ -50,6 +50,8 @@ export interface Matter {
   county: string
   court_name: string | null
   matter_number: string | null
+  /** The matter's number in the firm's external billing system (054). */
+  billing_id?: string | null
   discovery_level: 'level_1' | 'level_2' | 'level_3' | null
   notes: string | null
   /** Formal style of the case, as written on a filing. Heads every exhibit. */
@@ -121,6 +123,7 @@ export interface MatterCreatePayload {
   county: string
   court_name?: string | null
   matter_number?: string | null
+  billing_id?: string | null
   notes?: string
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
+import MatterHeader from '../../components/MatterHeader'
 
 import {
   MAX_DIRECT_POST_MB, belongsInReceivedDocuments, isTooLargeError,
@@ -793,10 +794,8 @@ export default function MatterFinancialsPage() {
   return (
     <div className="px-6 py-8 max-w-6xl mx-auto space-y-6">
       <div>
-        <Link to={`/app/matters/${matterId}`} className="text-sm text-navy underline">
-          ← {matter?.short_name ?? matter?.matter_name ?? 'Matter'}
-        </Link>
-        <h1 className="font-display text-3xl text-navy mt-1">Financials</h1>
+        <MatterHeader matterId={matterId} matter={matter} />
+        <h1 className="font-display text-3xl text-navy mt-4">Financials</h1>
         <p className="text-text-secondary mt-1">
           Account statements, parsed to the transaction. The source for inventories,
           settlement spreadsheets, and waste exhibits.

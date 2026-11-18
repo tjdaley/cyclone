@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
+import MatterHeader from '../../components/MatterHeader'
 
 import {
   benchPages, benchThumbnail, bundlePages, finishBench, ingestDocumentAsStatement,
@@ -241,6 +242,7 @@ export default function SplittingBenchPage() {
   if (!session.surveyed) {
     return (
       <div className="p-6">
+        <div className="mb-4"><MatterHeader matterId={session.matter_id} /></div>
         <div className="card max-w-xl">
           <h1 className="font-display text-xl text-navy">Still being read</h1>
           <p className="mt-2 text-sm text-text-secondary">
@@ -272,6 +274,7 @@ export default function SplittingBenchPage() {
 
   return (
     <div className="p-4">
+      <div className="mb-4"><MatterHeader matterId={session.matter_id} /></div>
       {/* The size of the job, stated. An oversized pile routes here instead of
           being refused, so cancelling has to be an informed choice. */}
       <div className="card mb-4">

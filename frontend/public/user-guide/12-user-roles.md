@@ -20,7 +20,7 @@ both. Access is granted if **any** role held allows the action.
 
 > **Clients and financial professionals are not set up on the Admin page.** You
 > give and revoke their access where the work is: on the client's edit form
-> ([Chapter 16](16-client-portal.md)) and on the matter's detail page
+> ([Chapter 16](16-client-portal.md)) and on the matter's **Matter details** page
 > ([Chapter 18](18-financial-professionals.md)).
 >
 > **Neither lands in the staff app.** A client is taken to their own portal, and
@@ -47,7 +47,7 @@ own chapters.
 
 | Menu item | attorney | paralegal | admin |
 | --------- | :------: | :-------: | :---: |
-| Dashboard, Billing, Matters, Clients, Discovery, Pleadings, Profile | ✅ | ✅ | ✅ |
+| Dashboard, Billing, Matters, Clients, Profile | ✅ | ✅ | ✅ |
 | Leads | ✅ | ✅ | ✅ |
 | Admin | — | — | ✅ |
 | Costs | — | — | ✅ |

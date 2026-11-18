@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
-import { getMatters } from '../../lib/api'
-import type { Matter } from '../../types'
+import { getClients, getMatters, getRecentMatters } from '../../lib/api'
+import type { Client, Matter } from '../../types'
 
 function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
@@ -22,21 +22,73 @@ const STATUS_COLOR: Record<string, string> = {
   archived:        'bg-gray-100 text-gray-500',
 }
 
+const MAX_RESULTS = 25
+
+function clientName(client: Client | undefined): string {
+  return client ? `${client.name.first_name} ${client.name.last_name}` : ''
+}
+
+/** Every word typed must appear in the client's name, the matter's names, the cause number or the billing id. */
+function matches(matter: Matter, client: Client | undefined, words: string[]): boolean {
+  const haystack = [
+    clientName(client), matter.matter_name, matter.short_name,
+    matter.matter_number, matter.billing_id,
+  ].filter(Boolean).join(' ').toLowerCase()
+  return words.every(w => haystack.includes(w))
+}
+
+function MatterRows({ matters, clients }: { matters: Matter[]; clients: Map<number, Client> }) {
+  return (
+    <ul className="divide-y divide-border">
+      {matters.map(m => (
+        <li key={m.id}>
+          <Link to={`/app/matters/${m.id}`}
+            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-5 py-3 hover:bg-off-white/60 transition-colors">
+            <span className="font-medium text-navy">{m.short_name ?? m.matter_name}</span>
+            <span className="text-sm text-text-secondary">{clientName(clients.get(m.client_id))}</span>
+            {m.matter_number && <span className="text-xs text-text-secondary">Cause No. {m.matter_number}</span>}
+            {m.billing_id && <span className="text-xs text-text-secondary">Billing {m.billing_id}</span>}
+            <span className={`ml-auto text-xs rounded-full px-2.5 py-1 font-medium capitalize ${STATUS_COLOR[m.status] ?? 'bg-gray-100 text-gray-600'}`}>
+              {m.status.replace(/_/g, ' ')}
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export default function DashboardPage() {
   const { profile } = useAuth()
   const [matters, setMatters] = useState<Matter[]>([])
+  const [clients, setClients] = useState<Map<number, Client>>(new Map())
+  const [recent, setRecent] = useState<Matter[]>([])
+  const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    getMatters()
-      .then(setMatters)
+    Promise.all([getMatters(), getClients(), getRecentMatters()])
+      .then(([ms, cs, rs]) => {
+        setMatters(ms)
+        setClients(new Map(cs.map(c => [c.id, c])))
+        setRecent(rs)
+      })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load matters'))
       .finally(() => setLoading(false))
   }, [])
 
-  const open   = matters.filter(m => m.status === 'active' || m.status === 'intake' || m.status === 'conflict_review').length
+  const open    = matters.filter(m => m.status === 'active' || m.status === 'intake' || m.status === 'conflict_review').length
   const proBono = matters.filter(m => m.is_pro_bono).length
+
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const results = useMemo(
+    () => words.length
+      ? matters.filter(m => matches(m, clients.get(m.client_id), words))
+      : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [matters, clients, query],
+  )
 
   return (
     <div className="px-6 py-8 max-w-6xl mx-auto">
@@ -55,59 +107,48 @@ export default function DashboardPage() {
         <StatCard label="Your role"      value={profile?.role ?? '—'} />
       </div>
 
-      {/* Recent matters */}
+      {/* Find a matter */}
+      <div className="card overflow-hidden mb-6">
+        <div className="px-5 py-4 border-b border-border">
+          <label className="label" htmlFor="matter-search">Find a matter</label>
+          <input id="matter-search" className="input mt-1" autoFocus value={query}
+            placeholder="Client name, matter name, cause number or billing ID"
+            onChange={e => setQuery(e.target.value)} />
+        </div>
+        {words.length > 0 && (
+          results.length === 0
+            ? <p className="px-5 py-6 text-sm text-text-secondary">No matter matches that.</p>
+            : <>
+                <MatterRows matters={results.slice(0, MAX_RESULTS)} clients={clients} />
+                {results.length > MAX_RESULTS && (
+                  <p className="px-5 py-3 text-xs text-text-secondary border-t border-border">
+                    Showing {MAX_RESULTS} of {results.length}. Add another word to narrow it.
+                  </p>
+                )}
+              </>
+        )}
+      </div>
+
+      {/* Recently opened */}
       <div className="card overflow-hidden">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-          <h2 className="font-semibold text-navy">Recent matters</h2>
+          <h2 className="font-semibold text-navy">Recently opened</h2>
           <Link to="/app/matters" className="text-sm text-navy/70 hover:text-navy transition-colors">
-            View all →
+            All matters →
           </Link>
         </div>
 
-        {loading && (
-          <div className="px-5 py-10 text-center text-text-secondary text-sm">Loading…</div>
-        )}
+        {loading && <div className="px-5 py-10 text-center text-text-secondary text-sm">Loading…</div>}
+        {error && <div className="px-5 py-10 text-center text-red-600 text-sm">{error}</div>}
 
-        {error && (
-          <div className="px-5 py-10 text-center text-red-600 text-sm">{error}</div>
-        )}
-
-        {!loading && !error && matters.length === 0 && (
+        {!loading && !error && recent.length === 0 && (
           <div className="px-5 py-10 text-center text-text-secondary text-sm">
-            No matters yet.{' '}
-            <Link to="/app/matters" className="text-navy underline">Open the first one.</Link>
+            Matters you open will appear here. Search above, or{' '}
+            <Link to="/app/matters" className="text-navy underline">see all matters</Link>.
           </div>
         )}
 
-        {!loading && !error && matters.length > 0 && (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-off-white">
-                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Caption</th>
-                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide hidden md:table-cell">Type</th>
-                <th className="text-left px-5 py-3 text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {matters.slice(0, 8).map(m => (
-                <tr key={m.id} className="border-b border-border last:border-0 hover:bg-off-white/60 transition-colors">
-                  <td className="px-5 py-3 font-medium text-navy">
-                    {m.short_name ?? m.matter_name}
-                    {m.is_pro_bono && (
-                      <span className="ml-2 text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5">Pro bono</span>
-                    )}
-                  </td>
-                  <td className="px-5 py-3 text-text-secondary hidden md:table-cell capitalize">{m.matter_type.replace('_', ' ')}</td>
-                  <td className="px-5 py-3">
-                    <span className={`text-xs rounded-full px-2.5 py-1 font-medium capitalize ${STATUS_COLOR[m.status] ?? 'bg-gray-100 text-gray-600'}`}>
-                      {m.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        {!loading && !error && recent.length > 0 && <MatterRows matters={recent} clients={clients} />}
       </div>
     </div>
   )

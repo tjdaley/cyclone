@@ -111,7 +111,7 @@ def download_document(
 def list_items(
     document_id: int,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> list[DiscoveryRequestItemResponse]:
     """Return all request items within a discovery document."""
     repo = DiscoveryRequestItemRepository(manager)
@@ -252,7 +252,7 @@ def upload_discovery(
 def get_response(
     request_id: int,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> DiscoveryResponseSchema:
     """Return the response record for a discovery request item."""
     repo = DiscoveryResponseRepository(manager)
@@ -268,7 +268,7 @@ def update_response(
     body: DiscoveryResponseUpdateRequest,
     request: Request,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> DiscoveryResponseSchema:
     """Update a discovery response (client draft or attorney review)."""
     repo = DiscoveryResponseRepository(manager)

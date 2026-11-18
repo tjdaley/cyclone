@@ -6,7 +6,8 @@
 
 ## Getting there
 
-**Matters** → click the matter → **Financials →** (top right).
+Open the matter's dashboard and choose **Import statements**. The other
+Financials tiles open the same page on a different tab.
 
 The Financials page has six tabs, and they are the shape of the whole job:
 

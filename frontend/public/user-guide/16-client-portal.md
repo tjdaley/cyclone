@@ -75,7 +75,7 @@ Cyclone refuses both while access is in place.
 
 ### Hide one matter
 
-Matter detail page → **Client portal** → untick **Show this matter in the client's
+Matter dashboard → **Matter details** → **Client portal** → untick **Show this matter in the client's
 portal**. The client cannot see that matter at all, and everything they marked on
 it is kept. Tick it again to bring it back.
 
@@ -92,7 +92,7 @@ and make sure the client has access.
 
 ### Let them tag, on each matter
 
-Go to the matter detail page → **Client portal** → tick **Let the client tag
+Go to the matter dashboard → **Matter details** → **Client portal** → tick **Let the client tag
 transactions**.
 
 | | |

@@ -300,6 +300,10 @@ export async function setAttorneyResponders(
 
 // ── Clients ───────────────────────────────────────────────────────────
 
+export async function getClient(clientId: number): Promise<Client> {
+  return apiFetch<Client>(`/api/v1/clients/${clientId}`)
+}
+
 export async function getClients(): Promise<Client[]> {
   return apiFetch<Client[]>('/api/v1/clients')
 }
@@ -357,6 +361,16 @@ export async function getMatters(): Promise<Matter[]> {
 
 export async function getMatter(matterId: number): Promise<Matter> {
   return apiFetch<Matter>(`/api/v1/matters/${matterId}`)
+}
+
+/** The matters this staff member opened most recently, newest first. */
+export async function getRecentMatters(limit = 8): Promise<Matter[]> {
+  return apiFetch<Matter[]>(`/api/v1/matters/recent?limit=${limit}`)
+}
+
+/** Record a visit to a matter's dashboard, for the recent list. */
+export async function markMatterViewed(matterId: number): Promise<void> {
+  await apiFetch<void>(`/api/v1/matters/${matterId}/viewed`, { method: 'POST' })
 }
 
 export async function createMatter(payload: MatterCreatePayload): Promise<Matter> {

@@ -1,14 +1,16 @@
 import { useEffect, useState, useRef, DragEvent } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
+import MatterHeader from '../../components/MatterHeader'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import {
-  getMatters, getDiscoveryDocuments, getDiscoveryItems, uploadDiscoveryPDF,
+  getDiscoveryDocuments, getDiscoveryItems, uploadDiscoveryPDF,
   updateDiscoveryItem, getStandardPrivileges, getStandardObjections,
   downloadDiscoveryDocx,
 } from '../../lib/api'
 import type {
-  Matter, DiscoveryDocument, DiscoveryRequestItem, DiscoveryUploadResponse,
+  DiscoveryDocument, DiscoveryRequestItem, DiscoveryUploadResponse,
   DiscoveryRequestItemUpdatePayload, StandardPrivilege, StandardObjection,
 } from '../../types'
 
@@ -46,8 +48,10 @@ function formatDate(iso: string) {
 }
 
 export default function DiscoveryPage() {
-  const [matters, setMatters]         = useState<Matter[]>([])
-  const [matterId, setMatterId]       = useState<number | null>(null)
+  // The matter comes only from the address (?matter=7). This page is reached
+  // from a matter's dashboard, so there is no picker of its own.
+  const [searchParams] = useSearchParams()
+  const matterId = Number(searchParams.get('matter')) || null
   const [documents, setDocuments]     = useState<DiscoveryDocument[]>([])
   const [loadingDocs, setLoadingDocs] = useState(false)
 
@@ -71,10 +75,6 @@ export default function DiscoveryPage() {
   const [drafts, setDrafts]       = useState<Record<number, Partial<DiscoveryRequestItemUpdatePayload>>>({})
   const [saving, setSaving]       = useState<Record<number, boolean>>({})
   const [saveError, setSaveError] = useState<Record<number, string | null>>({})
-
-  useEffect(() => {
-    getMatters().then(ms => setMatters(ms.filter(m => m.status === 'active'))).catch(console.error)
-  }, [])
 
   useEffect(() => {
     if (!matterId) { setDocuments([]); return }
@@ -142,19 +142,18 @@ export default function DiscoveryPage() {
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
       <div className="mb-8">
+        <div className="mb-4"><MatterHeader matterId={matterId} /></div>
         <h1 className="font-display text-3xl text-navy">Discovery</h1>
         <p className="text-text-secondary mt-1">Upload, review, and track discovery requests.</p>
       </div>
 
-      {/* Matter selector */}
-      <div className="card p-5 mb-6">
-        <label className="label" htmlFor="matter-select">Select matter</label>
-        <select id="matter-select" className="input mt-1" value={matterId ?? ''}
-          onChange={e => { setMatterId(e.target.value ? Number(e.target.value) : null); setSelectedDocId(null) }}>
-          <option value="">— choose a matter —</option>
-          {matters.map(m => <option key={m.id} value={m.id}>{m.short_name ?? m.matter_name}</option>)}
-        </select>
-      </div>
+      {!matterId && (
+        <div className="card p-5 mb-6 text-sm text-text-secondary">
+          Discovery work happens inside a matter. Open one from the{' '}
+          <Link to="/app/dashboard" className="text-navy underline">dashboard</Link>, then choose{' '}
+          <span className="text-text-primary">Discovery requests</span>.
+        </div>
+      )}
 
       {matterId && (
         <>

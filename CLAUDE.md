@@ -98,6 +98,8 @@ cyclone/
 │       │                          # common, auth, client, matter, staff, billing, discovery, pleading
 │       ├── components/
 │       │   ├── ProtectedRoute.tsx
+│       │   ├── MatterHeader.tsx   # The matter's name, facts and ← Matter dashboard, atop every matter page
+│       │   ├── BulkProgress.tsx   # "Tagging 57 lines…" beside a bulk control
 │       │   └── AppShell.tsx       # Sidebar nav, role-gated menu items
 │       └── pages/
 │           ├── LandingPage.tsx
@@ -114,7 +116,10 @@ cyclone/
 │               ├── ClientsPage.tsx
 │               ├── DiscoveryPage.tsx
 │               ├── PleadingsPage.tsx
-│               ├── MatterDetailPage.tsx   # /app/matters/:matterId — parties, staff, children, counsel, claims
+│               ├── DashboardPage.tsx      # Find a matter (client, name, cause no., billing id) + recently opened
+│               ├── MatterDashboardPage.tsx # /app/matters/:matterId — the tiles every matter's work starts from
+│               ├── MatterEditPage.tsx     # /app/matters/:matterId/edit — the matter record + rate overrides
+│               ├── MatterDetailPage.tsx   # /app/matters/:matterId/details — parties, staff, children, counsel, claims
 │               ├── MatterIntakePanel.tsx  # Review a dropped pleading → new client + matter
 │               ├── LeadPromotePanel.tsx   # Promote a lead → client + matter (optional pleading)
 │               ├── TagManager.tsx          # Create/edit/retire matter tags; firm tags read-only
@@ -171,6 +176,7 @@ cyclone/
 │       ├── 051_account_currency.sql     # financial_accounts.currency + matter_currency_rates (inventory conversion)
 │       ├── 052_financial_guest_access.sql # financial-professional guests, grants, consents, document ledger — see §11d
 │       ├── 053_matter_portal_access.sql # matters.client_portal_enabled — hide one matter from the client's portal
+│       ├── 054_matter_dashboard.sql     # matters.billing_id (unique, case-blind) + staff_recent_matters
 │       └── run_all.sql                     # NOTE: only includes 001–005; later files are run by hand
 ├── docker-compose.yml             # Production: tagged images, frontend on :8094 behind haproxy
 ├── docker-compose.override.yml    # Dev: hot reload, DEBUG logging, ports 3000/8000
@@ -2976,6 +2982,16 @@ Used **only** for auth session management (`src/lib/supabaseClient.ts`). Do not 
 - Protected routes: `/app/*` wrapped in `ProtectedRoute` → `AppShell`
 - `ProtectedRoute` redirects to `/login` (no session), `/onboarding` (no role), `/portal` (client), `/guest` (financial professional), or `/access-denied` (none of those)
 - Admin-only nav items filtered by role in `AppShell`
+- **Navigation is matter-centric.** The Dashboard finds a matter; its dashboard
+  (`/app/matters/:id`) is tiles onto pages that already exist, each opened on
+  that matter: `/details`, `/edit`, `/received`, `/financials?tab=…`, and
+  `/app/pleadings?matter=` / `/app/discovery?matter=`. **Pleadings and
+  Discovery have no matter picker and no sidebar link** (Tom, Nov 2026): the
+  matter comes only from the address, and without one the page says to open a
+  matter. Every page that works on one matter starts with `MatterHeader`. Tile
+  counts of waiting work are the planned second pass. Opening a dashboard calls
+  `POST /matters/{id}/viewed`, which feeds `GET /matters/recent` (per staff
+  member, on the server).
 
 ### Dual-Density Layout
 
@@ -3149,7 +3165,9 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Pleading ingestion with preview/commit review | ✅ Built (parties, children, opposing counsel, claims) |
 | Pleading lifecycle status + stored PDF viewing | ✅ Built (live/superseded/withdrawn/inactive; signed-URL viewer) |
 | Discovery `instructions_to_client` (internal work product) | ✅ Built — never exported |
-| Matter detail page (`/app/matters/:id`) | ✅ Built — parties, staff w/ origination meter, children, counsel, claims by pleading |
+| Matter detail page (`/app/matters/:id/details`) | ✅ Built — parties, staff w/ origination meter, children, counsel, claims by pleading |
+| Matter dashboard, matter search, recently opened | ✅ Built — 054. Tiles onto every matter page; search by client, matter name, cause number and `billing_id`; recent list per staff member. **Not built:** counts of waiting work on the tiles, and a Billing tile (billing is not yet matter-scoped) |
+| `matters.billing_id` | ✅ Built — 054. The external billing system's number, for correlation during migration. Text, unique ignoring case and spaces; blank stored as null |
 | CRUD for matter children / claims / counsel links / staff | ✅ Built (API + matter detail page) |
 | Matter intake from a dropped pleading | ✅ Built — neutral extraction, "who do we represent", client/lead matching |
 | Lead → client + matter promotion, and linking an existing client | ✅ Built (`converted_to_client_id` / `converted_to_matter_id` now written) |
@@ -3513,6 +3531,7 @@ Tom asked on 2026-10-31 that they stay on the pending list:
 | Show a firm-wide tag's `in_use` as a count on a matter's screen | It counts every matter and cleared tags, so the chip disagrees with what clicking it finds and hints at other cases. `tag_usage`. `in_use` is for the Delete guard |
 | Write a bulk action as a loop of single-row calls | 100 lines was 100 UPDATEs, or 200 calls for a tag, and the screen sat still for seconds. `update_many`, `insert_many`, `delete_many`, `links_for_tag` in `repositories/financial.py`. Show `BulkProgress` too: a disabled dropdown looks like one nobody touched |
 | Change a staff member's sign-in email on the staff record alone | Correlation reads `user_roles.auth_email`, so the old rows wait for the old address and only roles granted afterwards work. `update_staff` carries it to every row; matching ignores case (`normalize_email`) |
+| Admit `client` in a staff route's `require_role` | Staff routes are keyed by an id in the path and not scoped to a client's own matters. Six did, including a discovery-response WRITE. The portal has its own router; `tests/test_matter_dashboard.py` fails if any staff route admits `client` |
 | Treat `clients.auth_email` as permission to sign in | Every client has one. Access is the `client` row in `user_roles`, written only by `portal_access_service.give` |
 | Leave a model field out of its response schema | It reads as absent, not as an error. `client_tagging_enabled` could be switched on and never off, because the checkbox always read false |
 | Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |

@@ -19,7 +19,7 @@ anything useful until all three are done.
 
 ## Step 1 — Record the look-back dates (once per matter)
 
-**Matters** → the matter → **Discovery scope**.
+Matter dashboard → **Matter details** → **Discovery scope**.
 
 | Field | What date goes here |
 | ----- | ------------------- |

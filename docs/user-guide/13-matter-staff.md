@@ -25,7 +25,7 @@ today. Raise it rather than assuming an assignment covers it.
 
 ## Assigning someone
 
-**Matters** → the matter → the **Staff** section → **+ Assign staff**.
+Matter dashboard → **Matter details** → the **Staff** section → **+ Assign staff**.
 
 1. Choose the staff member.
 2. Choose their role on the matter:

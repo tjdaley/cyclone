@@ -69,7 +69,7 @@ Built from the matter:
 ```
 
 Fields the matter cannot supply are printed as a blank rule and reported to you
-— see below. Set the case style and alignment on the matter detail page
+— see below. Set the case style and alignment on the **Matter details** page
 ([Chapter 3](03-matters.md)).
 
 ### 2. The table
@@ -148,7 +148,7 @@ After a download you may see an amber panel:
 > - No case style is recorded on this matter
 
 The file downloaded, with blank rules where those fields go. **Fix them on the
-matter detail page and export again before filing.** This warning is the only
+Matter details page and export again before filing.** This warning is the only
 thing standing between a blank and a filing.
 
 ---

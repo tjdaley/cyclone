@@ -248,7 +248,7 @@ Four things to know before you rely on it:
 | **Liabilities show as negative** | The card statement says you owe $1,045.45; the inventory shows −$1,045.45, because it reduces the estate. Both are right, and they answer different questions |
 | **Every row has its own "as of" date** | There is no live balance here. Each figure is the closing balance of a real statement, which is what makes it citable — so two accounts usually speak as of different days |
 | **"no statement" is not zero** | An account with nothing on file is listed with no balance and left out of the total. The count sits beneath the table. **Those rows are the ones to chase**, and the [Compliance tab](11-discovery-tracking.md) says which months are missing |
-| **Held by is P, R or J** | Taken from the account's ownership and the matter's client alignment. If the column reads **C and O**, the matter has no alignment recorded — set it on the matter detail page ([Chapter 3](03-matters.md)) |
+| **Held by is P, R or J** | Taken from the account's ownership and the matter's client alignment. If the column reads **C and O**, the matter has no alignment recorded — set it on the **Matter details** page ([Chapter 3](03-matters.md)) |
 
 ### Leaving an account out of the totals
 

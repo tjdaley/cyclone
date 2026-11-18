@@ -1,7 +1,7 @@
 """
 app/routers/matters.py - Matter management endpoints.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from db.repositories.matter import (
     BillingSplitRepository,
@@ -9,7 +9,9 @@ from db.repositories.matter import (
     MatterRepository,
     MatterStaffRepository,
     OpposingPartyRepository,
+    StaffRecentMatterRepository,
 )
+from db.repositories.staff import StaffRepository
 from dependencies import get_db_manager, require_role
 from schemas.common import DeletedResponse
 from schemas.matter import (
@@ -70,11 +72,53 @@ def list_matters(
     return [MatterResponse(**r.model_dump()) for r in records]
 
 
+def _clean_billing_id(body) -> None:
+    """A blank billing id is no billing id, so the unique index never sees ''."""
+    if "billing_id" in body.model_fields_set:
+        body.billing_id = (body.billing_id or "").strip() or None
+
+
+def _staff_id(request: Request, manager) -> int:
+    staff = StaffRepository(manager).get_by_supabase_uid(request.state.supabase_uid)
+    if staff is None:
+        raise HTTPException(status_code=422, detail="Could not resolve staff member from your login")
+    return staff.id
+
+
+@router.get("/recent", response_model=list[MatterResponse])
+def recent_matters(
+    request: Request,
+    limit: int = Query(default=8, ge=1, le=50),
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
+) -> list[MatterResponse]:
+    """The matters this staff member opened most recently, newest first."""
+    ids = StaffRecentMatterRepository(manager).recent(_staff_id(request, manager), limit)
+    if not ids:
+        return []
+    found = {m.id: m for m in MatterRepository(manager).select_many(condition={"id": ids})[0]}
+    return [MatterResponse(**found[i].model_dump()) for i in ids if i in found]
+
+
+@router.post("/{matter_id}/viewed", status_code=204)
+def matter_viewed(
+    matter_id: int,
+    request: Request,
+    manager=Depends(get_db_manager),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
+) -> Response:
+    """Record that this staff member opened the matter's dashboard."""
+    if MatterRepository(manager).select_one(condition={"id": matter_id}) is None:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    StaffRecentMatterRepository(manager).touch(_staff_id(request, manager), matter_id)
+    return Response(status_code=204)
+
+
 @router.get("/{matter_id}", response_model=MatterResponse)
 def get_matter(
     matter_id: int,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> MatterResponse:
     """Return a single matter by ID."""
     repo = MatterRepository(manager)
@@ -92,6 +136,7 @@ def create_matter(
 ) -> MatterResponse:
     """Create a new matter."""
     repo = MatterRepository(manager)
+    _clean_billing_id(body)
     LOGGER.info("matters.create: client_id=%s", body.client_id)
     record = repo.insert(body.model_dump())
     return MatterResponse(**record.model_dump())
@@ -118,6 +163,7 @@ def update_matter(
     repo = MatterRepository(manager)
     if repo.select_one(condition={"id": matter_id}) is None:
         raise HTTPException(status_code=404, detail="Matter not found")
+    _clean_billing_id(body)
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No fields provided for update")

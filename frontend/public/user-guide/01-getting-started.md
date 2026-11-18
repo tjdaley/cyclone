@@ -104,23 +104,51 @@ screens instead of the dashboard: [Chapter 16](16-client-portal.md) and
 
 ## Finding your way around
 
-The left-hand menu is the whole application:
+**Work on a case starts from the matter, not the menu.** Find the matter, open
+its dashboard, and every part of the case is a tile from there.
+
+### Finding a matter
+
+The **Dashboard** opens with two things:
+
+| | |
+| - | - |
+| **Find a matter** | Type any part of the client's name, the matter's name, the cause number or the billing ID. Every word you type has to match, so `smith 2024` narrows faster than `smith` |
+| **Recently opened** | The matters **you** opened most recently, newest first. It follows you between computers |
+
+Clicking a matter opens its **matter dashboard**. The **Matters** list in the
+menu opens the same dashboards.
+
+### The matter dashboard
+
+The top of the page names the matter: its status, cause number, billing ID,
+court, county, type and the client. The same header sits at the top of every
+page you reach from here, with **← Matter dashboard** to come back.
+
+Below it are tiles, grouped the way the work is:
+
+| Group | Tiles |
+| ----- | ----- |
+| **Matter** | **Edit matter** (name, status, court, numbers, dates, retainer, rate overrides) and **Matter details** (parties, staff, children, counsel, claims, caption, discovery scope, client portal, financial professionals). See [Chapter 3](03-matters.md) |
+| **Pleadings** | **Pleadings**: ingest one, review its claims, track which is live |
+| **Discovery** | **Discovery requests**, and **Statements held**, the compliance grid ([Chapter 11](11-discovery-tracking.md)) |
+| **Financials** | **Received documents**, **Import statements**, **Accounts**, **Transactions**, **Inventory** and the **Financial Information Statement**. That is Part 3 of this guide |
+
+### The menu
 
 | Menu item | What it is | Who sees it |
 | --------- | ---------- | ----------- |
-| **Dashboard** | Landing page | Everyone |
+| **Dashboard** | Find a matter, and the ones you opened recently | Everyone |
 | **Billing** | Time entry, including plain-English entry | Everyone |
-| **Matters** | The matter list — and the way into everything about a case | Everyone |
+| **Matters** | Every matter, with filters, and **+ New matter** | Everyone |
 | **Clients** | The client list and the conflict check | Everyone |
-| **Discovery** | Written discovery requests served on us | Everyone |
-| **Pleadings** | Filed documents, with parties and claims pulled out | Everyone |
 | **Leads** | Prospective clients | Attorney, paralegal, admin |
 | **Profile** | Your own details | Everyone |
 | **Admin** | Staff, roles, knowledge base | Admin only |
+| **Costs** | What the AI work costs ([Chapter 15](15-costs.md)) | Admin only |
 
-**Financial statement work is not in this menu.** It lives inside a matter:
-**Matters** → click the matter → **Financials →** at the top right. That is
-Part 3 of this guide.
+Discovery and Pleadings are no longer in the menu: both belong to one matter,
+so they open from its dashboard.
 
 ---
 

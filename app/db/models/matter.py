@@ -262,6 +262,11 @@ class Matter(BaseModel):
         default=None,
         description="Court-assigned case/matter number",
     )
+    billing_id: Optional[str] = Field(
+        default=None,
+        description="The matter's number in the firm's external billing system (054). "
+                    "Unique where filled in, ignoring case",
+    )
     discovery_level: Optional[DiscoveryLevel] = Field(
         default=None,
         description="Texas TRCP 190 discovery level for this matter",
@@ -344,4 +349,19 @@ class MatterRateOverrideInDB(MatterRateOverride):
         default=None,
         description="Timestamp of last update, set by the database on update",
     )
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StaffRecentMatter(BaseModel):
+    """One staff member's last visit to one matter, for the opening page (054)."""
+    staff_id: int = Field(..., description="The staff member who opened the matter")
+    matter_id: int = Field(..., description="The matter they opened")
+    viewed_at: datetime = Field(..., description="When they last opened it")
+
+
+class StaffRecentMatterInDB(StaffRecentMatter):
+    """Database model for staff_recent_matters."""
+    id: int = Field(..., description="Primary key, set by the database")
+    created_at: datetime = Field(..., description="Set by the database")
+    updated_at: Optional[datetime] = Field(default=None, description="Set by the database")
     model_config = ConfigDict(from_attributes=True)

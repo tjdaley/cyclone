@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import MatterHeader from '../../components/MatterHeader'
 
 import { listReceivedDocuments, rerouteReceivedDocument } from '../../lib/api'
 import { uploadReceivedDirect } from '../../lib/directUpload'
@@ -105,9 +106,10 @@ export default function ReceivedDocumentsPage() {
   }
 
   return (
-    <div className="p-4">
+    <div className="px-6 py-8 max-w-6xl mx-auto">
       <div className="mb-4">
-        <h1 className="font-display text-xl text-navy">Received documents</h1>
+        <div className="mb-4"><MatterHeader matterId={id} /></div>
+        <h1 className="font-display text-3xl text-navy">Received documents</h1>
         <p className="text-sm text-text-secondary">
           Files exactly as they were served on us, received from the client, or
           returned by a subpoena. Nothing is ever written back to one: the

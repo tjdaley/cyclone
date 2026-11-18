@@ -10,14 +10,14 @@ first, except that everything in Part 3 assumes a matter exists.
 
 | | |
 | - | - |
-| [1. Getting started](01-getting-started.md) | Being given an account, first sign-in, what to do when it does not work |
+| [1. Getting started](01-getting-started.md) | Being given an account, first sign-in, finding a matter, and what to do when sign-in does not work |
 
 ## Part 2 — Setting up work
 
 | | |
 | - | - |
 | [2. Creating a client](02-clients.md) | The client record, the conflict check, and the three other ways a client gets created |
-| [3. Creating a matter](03-matters.md) | The matter, its caption, and the fields that other screens depend on |
+| [3. Creating a matter](03-matters.md) | The matter, its dashboard, its caption, and the fields that other screens depend on |
 
 ## Part 3 — Financial statement discovery
 

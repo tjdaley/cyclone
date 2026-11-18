@@ -305,7 +305,8 @@ export default function TransactionSearchPanel({ matterId, accounts }: {
           ) : null}
         </div>
 
-        <div className="md:col-span-2">
+        {/* The whole row: a matter can carry a dozen accounts. */}
+        <div className="md:col-span-4">
           <span className="label">Accounts</span>
           <div className="flex flex-wrap gap-1.5 mt-1">
             {accounts.length === 0 && <span className="text-sm text-text-secondary">No accounts yet</span>}

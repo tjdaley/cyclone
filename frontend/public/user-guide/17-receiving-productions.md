@@ -17,7 +17,7 @@ If somebody hands you tidy monthly statement PDFs, skip it and drop them on
 
 ## Getting there
 
-**Matters** → click the matter → **Received documents →** (top right).
+Open the matter's dashboard and choose **Received documents**.
 
 ---
 

@@ -175,7 +175,7 @@ def parse_natural_language(
 def get_client_balance(
     matter_id: int,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> ClientBalanceResponse:
     """
     Return the client financial balance for a matter.
@@ -197,7 +197,7 @@ def get_client_balance(
 def list_cycles_by_matter(
     matter_id: int,
     manager=Depends(get_db_manager),
-    _=Depends(require_role(["attorney", "admin", "paralegal", "client"])),
+    _=Depends(require_role(["attorney", "admin", "paralegal"])),
 ) -> list[BillingCycleResponse]:
     """Return all billing cycles for a matter."""
     repo = BillingCycleRepository(manager)

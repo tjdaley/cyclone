@@ -25,6 +25,7 @@ billing, discovery, pleadings, and all of the financial work in Part 3.
    | **County** | Yes | e.g. *Dallas*. Appears in the exhibit caption. |
    | **Court name** | No | e.g. *401st District Court*. Appears in the exhibit caption. |
    | **Matter number** | No | The court-assigned cause number. Appears in the exhibit caption. |
+   | **Billing ID** | No | The matter's number in the firm's billing system, so the two can be matched up. Searchable from the Dashboard. No two matters may share one; capitals and spaces do not make two different. |
    | **Pro bono** | No | A tick box, and it is not cosmetic — see the warning below. |
    | **Notes** | No | |
 
@@ -40,9 +41,14 @@ billing, discovery, pleadings, and all of the financial work in Part 3.
 
 ## Opening a matter
 
-Click any row in the matter list. That opens the matter detail page, which is
-where nearly everything about the case is set. The sections, in the order they
-appear:
+Click a matter on the Dashboard, or any row in the **Matters** list. That opens
+its **matter dashboard**: one tile for each part of the case
+([Chapter 1](01-getting-started.md#the-matter-dashboard) lists them).
+
+### Matter details
+
+The **Matter details** tile is where nearly everything about the case is set.
+The sections, in the order they appear:
 
 | Section | What it holds |
 | ------- | ------------- |
@@ -55,7 +61,8 @@ appear:
 | **Claims** | What is being asked for, grouped by the pleading that asked. |
 | **Pleadings** | Filed documents on this matter. |
 
-The link to the financial work is at the **top right**: **Financials →**.
+Shortcuts to **Received documents →** and **Financials →** sit at the right of
+the matter's name.
 
 ---
 
@@ -102,15 +109,23 @@ The full order Cyclone uses to decide a rate:
 
 ---
 
-## Other matter fields
+## Editing the matter
 
-Expand a matter in the list and click **Edit** to reach:
+The **Edit matter** tile, or **Edit** beside a matter in the **Matters** list,
+opens the matter's own record on a page of its own. **Save changes** or
+**Cancel** takes you back to where you came from.
+
+It holds everything you entered when creating the matter, including the
+**Billing ID**, plus:
 
 **Status** — `intake`, `conflict review`, `active`, `closed`, `archived`. Moving a
 matter to `closed` or `archived` asks whether to turn off the client's portal
 access to it ([Chapter 16](16-client-portal.md#hide-one-matter)).
 **Retainer**, **Fee agreement signed**, **Opened date**, **Closed date**, and
 **Notes**.
+
+**Rate overrides** are below the form: a different hourly rate for one staff
+member on this matter. Admins set and remove them.
 
 ---
 
