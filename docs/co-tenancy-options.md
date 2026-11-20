@@ -303,3 +303,83 @@ Centralised logging (backlog, CLAUDE.md §16a) becomes more valuable here than i
 is today: with one stack per firm, *"which firm was this?"* is a field, and an
 operator should not need SSH to answer it. CloudWatch's `awslogs` driver takes a
 per-stack tag, which is the natural place for the firm name.
+
+---
+
+## 8. Bring your own API key (BYOK) — notes, nothing built
+
+Tom, 2026-11-20, thinking aloud about charging for Cyclone. Recorded so the
+reasoning is not re-derived from scratch.
+
+### The idea
+
+A firm may optionally supply its own LLM vendor keys, stored in SSM under its
+tenant path. Per firm, a policy: **fall back to the house key** when the firm's
+key fails (out of funds, revoked) **or fail outright**. Why a firm would want it:
+
+- With an auto-replenishing key, the firm pays the vendor directly and we do not
+  bill for AI usage at all.
+- A firm that has negotiated vendor discounts gets them.
+
+### The apparent complication, and why it mostly is not one
+
+*"A firm may not hold keys for every vendor, or share our Anthropic → OpenAI →
+Gemini preference, so it would need its own preference map."*
+
+Under option 2 (a stack per firm, e.g. `koonsfuller.cyclone.jdbot.us`, haproxy
+routing to it, its own Supabase project and SSM path), the existing
+configuration already handles most of this:
+
+- **Missing vendors need nothing.** `llm_service` already *skips* a candidate
+  whose vendor has no key, without calling it (CLAUDE.md §11). A firm holding
+  only an OpenAI key starts every chain at OpenAI automatically.
+- **A different ORDER is the part that is not free,** and the reason is
+  deliberate. Chains live in `app/config/llm_profiles.json` *inside the image*,
+  so two nodes on one tag cannot disagree (§11: model identity must be fleet
+  configuration, or it produces bugs nobody can reproduce). A per-firm order
+  means a per-firm catalog file — `LLM_PROFILES_FILE` already names the path, so
+  one mounted per stack would work, and the fleet-hash principle still holds
+  *within* a firm. **But think before offering it at all:** chain order is
+  *measured* extraction accuracy on evidence, not a taste. A firm that puts
+  Gemini first will find its pleadings and affidavits refused (§11), and one
+  that adds DeepSeek gets mis-stated amounts. Recommendation: honour missing
+  keys (free), do **not** offer reordering; at most a short list of vetted
+  alternative chains.
+
+Tom's conclusion was that a stack per firm makes shared multi-firm instances
+unnecessary, at least for firms of any size. Agreed — see §6. **The open
+commercial question is the one or two lawyer shop:** its floor cost is a
+Supabase project ($10–25/month, §2) plus its share of a box, so whether solos are
+in the target market is a pricing decision, not an architecture one.
+
+### What would actually have to be built
+
+1. **Two keys per vendor, and a policy.** Firm key first; on a *key* failure
+   (auth, quota, insufficient funds) either the house key or a hard failure, per
+   the firm's setting. Distinguish key failures from transient ones: a vendor
+   timeout on the firm's key should fail over across vendors as today, not spend
+   the house key.
+2. **The ledger must say whose key paid.** A `key_owner` (`firm` | `house`)
+   column on `llm_calls`, written from the first BYOK call. **Attribution cannot
+   be backfilled** (§6), and this column *is* the bill: house-key spend priced
+   by 041 is what gets invoiced, and the Costs page becomes the billing basis.
+3. **A hard failure must say why, in words.** An import that dies because the
+   firm's key ran dry must report "your Anthropic key was refused: insufficient
+   funds", not a generic extraction failure — the person reading it is the one
+   who can top it up.
+4. **Validate a key when it is entered**, with one cheap call, rather than
+   discovering it is wrong halfway through a 200-statement production.
+5. **Who writes the key into SSM.** Ops-run is simplest. Self-service from an
+   admin screen means the instance role needs `ssm:PutParameter` on its own
+   path, a wider permission than it holds today; scope it to that path only.
+
+### Worth knowing either way
+
+- **BYOK moves the data-processing relationship.** Client evidence sent on the
+  firm's key is governed by the *firm's* agreement with the vendor — its
+  retention, its zero-data-retention status, its training opt-outs — not ours.
+  That is a selling point for a firm with its own enterprise terms, and a risk
+  for one using a consumer-tier key. The engagement terms should say which
+  applies.
+- BYOK and the tenancy decision are independent: per-firm keys are useful under
+  option 2 as well, and §5.6 already weighs shared against per-firm keys.

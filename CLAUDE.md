@@ -989,6 +989,13 @@ statements reachable.**
   blank or unreadable page is deliberately not reported: that is
   `PAGE_UNREADABLE`'s job, and reporting it here would fire the warning on
   documents where nothing is missing.
+- **A combined statement's summary page is not a gap** (`_combined_summary_pages`).
+  Ally opens with one page listing every account in the package; no account
+  claims it, and because the flag is the document's, it put ~200 reconciled
+  statements from 46 uploads into the queue. The page is excused only when the
+  masked numbers printed on it are **exactly** the indexed accounts (two or
+  more, by last four), so a summary naming an account nobody indexed still
+  warns, and that warning is then true.
 
 **A long statement must be read in passes.** One call reliably handles a short statement and reliably gives up on a long one. A 27-page statement of 286 entries came back with 38 — every credit, then fifteen debits, then a closing brace. The JSON was valid, the input was 36,863 characters against a 60,000 ceiling, and the output used about a seventh of its 32,000-token budget: nothing failed, nothing was truncated, the model just stopped. **No limit can be raised to fix that, because no limit was reached.** Above `_MAX_SINGLE_PASS_PAGES` the document is indexed once (accounts, periods, balances, page ranges) and then each statement is walked `_PAGES_PER_CHUNK` pages at a time asking only for transactions, so every answer is small enough that finishing is the easy option. Line numbers are assigned in Python — each pass only ever saw a slice — and every pass is handed the statement period, or a line printed "12/04" has no year.
 
@@ -3251,7 +3258,8 @@ A model field with no matching column is not a risk, it is a guaranteed 500: `mo
 | Email notifications | ❌ Not started |
 | Fee agreement templates + e-sign | ❌ Model exists; no UI or workflow |
 | Client intake form / StepWizard | ❌ Not started |
-| Shared components (DataTable, ConfirmDialog) | ❌ Pages use inline tables |
+| Shared components (DataTable, ConfirmDialog) | ⏳ `components/ConfirmDialog.tsx` built (`useConfirm`, awaitable, tone + multiple actions, Cancel takes focus). Used on the Financials page; **8 native `window.confirm` calls remain** in AdminPage, ClientPortalAccessPanel, PayeeRulingManager, SplittingBenchPage, TagManager and GuestTransactionsPage. DataTable not started |
+| Account flags a statement that does not tie | ✅ Built — the account list carries `unreconciled_statements` (accepted or not; delta NULL excluded), shown as a red chip that opens the account. Accepting one out of balance asks first, with the figures and a "Read it again" option |
 | Receiving a production as produced | ✅ Built — 047. `source_documents` holds the file exactly as served: hashed on receipt, never split, OCR'd or re-saved. Uploaded **browser-to-storage over a signed URL**, so the bytes never pass through the API |
 | Routing a received file | ✅ Built — `pagination_coverage` decides: OCR first, the bench, or an automatic split. Deterministic, no model, computed in the survey job. Measured 74% vs 8% on two real piles, **both with a text layer**, which is why text quality is not the test |
 | Splitting bench (one PDF → N documents, by hand) | ✅ Built — thumbnails, discontinuous selection, per-bundle undo, finish-and-sweep. Server-side bundle list. No naming: a document is a row, and its description comes from classification |
@@ -3463,6 +3471,14 @@ Two facts from it worth carrying anywhere near the subject:
 Keep putting `firm_id` on new firm-scoped tables regardless of the decision, as
 039 did for `llm_calls`: attribution cannot be backfilled.
 
+**Bring your own API key** (Tom, 2026-11-20; nothing built) is in
+`docs/co-tenancy-options.md` §8. In one line: a firm's own vendor keys in its
+SSM path, falling back to the house key or failing by the firm's choice. Missing
+vendors are already skipped by `llm_service`. Do **not** let firms reorder
+chains, because order is measured accuracy on evidence. If it is ever built, the
+first change is a `key_owner` column on `llm_calls`, because that column is the
+bill.
+
 ### Financial-professional guest access — the three pieces not built
 
 Guest access shipped (052, §11d). These were deliberately left for later, and
@@ -3534,6 +3550,8 @@ Tom asked on 2026-10-31 that they stay on the pending list:
 | Admit `client` in a staff route's `require_role` | Staff routes are keyed by an id in the path and not scoped to a client's own matters. Six did, including a discovery-response WRITE. The portal has its own router; `tests/test_matter_dashboard.py` fails if any staff route admits `client` |
 | Treat `clients.auth_email` as permission to sign in | Every client has one. Access is the `client` row in `user_roles`, written only by `portal_access_service.give` |
 | Leave a model field out of its response schema | It reads as absent, not as an error. `client_tagging_enabled` could be switched on and never off, because the checkbox always read false |
+| Use `window.confirm` / `window.alert` | They read as errors, so people dismiss them unread — exactly the habit a confirmation exists to interrupt. `useConfirm()` from `components/ConfirmDialog.tsx` |
+| Let one account response zero a count only the list computes | A PATCH replaced the row and the "does not tie" chip vanished on the account just edited. Return None ("not computed here") and keep the list's figure |
 | Use `from app.xxx import` in backend code | Use relative imports: `from util.settings import settings` |
 | Call `logging.getLogger()` directly | `LoggerFactory.create_logger(__name__)` |
 | Fix a logging import cycle with a lazy import alone | It breaks the cycle at module scope and not inside it. A module reached *through* `loggerfactory` still gets `ImportError` from a partially initialized module. Fall back to stderr and cache only the real logger |
