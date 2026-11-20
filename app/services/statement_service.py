@@ -40,6 +40,7 @@ from db.repositories.financial import (
 )
 from db_handler import DatabaseManager
 from services import account_number_service, bates_service
+from services.account_discovery_service import _MASKED as _MASKED_NUMBER
 from services.exhibit_service import Column, Exhibit, Line, Row, Run, money
 from services.category_rule_service import category_rule_service
 from services.llm_service import llm_service
@@ -1930,10 +1931,13 @@ class StatementService:
         #
         # `SUSPECT_SPLIT` already catches statements that OVERLAP. This is the
         # opposite direction and needs its own answer: a gap.
-        unclaimed = sorted(set(
-            self._unclaimed_pages(pages, statements)
-            + self._unindexed_statement_starts(pages, statements)
-        ))
+        unclaimed = sorted(
+            set(
+                self._unclaimed_pages(pages, statements)
+                + self._unindexed_statement_starts(pages, statements)
+            )
+            - set(self._combined_summary_pages(pages, statements))
+        )
         for statement in statements:
             statement.pop("_pages_read", None)
         if unclaimed:
@@ -1973,6 +1977,64 @@ class StatementService:
             number for number, text in sorted(pages.items())
             if number > 1 and number not in starts and _PAGE_ONE.search(text or "")
         ]
+
+    @staticmethod
+    def _combined_summary_pages(
+        pages: dict[int, str], statements: list[dict[str, Any]],
+    ) -> list[int]:
+        """
+        Leading pages that are a combined statement's list of its own accounts.
+
+        **A summary page belongs to no account, and that is not a gap.** Ally
+        opens a combined statement with one page tabulating every account in the
+        package — name, masked number, opening and closing balance — and the
+        first account's own header is on page 2. No statement claims page 1, so
+        `_unclaimed_pages` reported it, and because the flag is the DOCUMENT's
+        it was raised on every statement in it: 46 uploads put ~200 statements
+        that reconciled to the cent into the exceptions queue. A queue that full
+        of nothing is how a statement that really is off by $0.20 gets accepted
+        in the same run of clicks.
+
+        The page is recognised by what it SAYS about the index, not by what it
+        looks like, so it is a check as well as an exemption. It is excused
+        only when the masked account numbers printed on it are exactly the
+        accounts that were indexed — two or more, compared by last four:
+
+        * A summary naming an account nobody indexed is **not** excused. That is
+          a statement the index missed, and the warning is then true.
+        * An indexed statement with no last four makes the sets incomparable,
+          so nothing is excused. Unknown stays loud.
+        * Only pages before every claimed page qualify. A summary further in
+          is already absorbed by the statement before it; a page in the middle
+          naming several accounts is far more likely a register full of
+          transfers.
+        """
+        if len(statements) < 2:
+            return []
+        indexed: set[str] = set()
+        for statement in statements:
+            account = statement.get("account") or {}
+            digits = re.sub(r"\D", "", str(
+                account.get("account_number_last4")
+                or account.get("account_number_masked") or ""))
+            if len(digits) < 4:
+                return []
+            indexed.add(digits[-4:])
+        if len(indexed) < 2:
+            return []
+
+        claimed = [p for s in statements for p in (s.get("_pages_read") or ())]
+        if not claimed:
+            return []
+        first_claimed = min(claimed)
+        summaries = []
+        for number, text in sorted(pages.items()):
+            if number >= first_claimed:
+                break
+            printed = {m[-4:] for m in _MASKED_NUMBER.findall(text or "")}
+            if printed == indexed:
+                summaries.append(number)
+        return summaries
 
     @staticmethod
     def _unclaimed_pages(

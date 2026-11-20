@@ -287,6 +287,69 @@ check("and saying what to do about it",
       "split the PDF" in flags["PAGES_NOT_INDEXED"]["note"], True)
 check("so it is not auto-accepted", summary["auto_accepted"], 0)
 
+# ── 6. A combined statement's summary page is not a gap ──────────────────
+#
+# Ally prints a combined statement as one page listing every account, then one
+# section per account starting on page 2. Page 1 belongs to no account, was
+# reported unclaimed, and the flag landed on every statement in the document:
+# ~200 reconciled statements held for review from 46 uploads.
+print("6. a combined statement's summary page")
+ALLY = [("spend", "7811"), ("10-income-tithe", "2693"), ("30-taxes", "2701")]
+
+
+def ally(summary_lists=None, last4s=None):
+    """Page 1 is the summary; each account then gets one page of its own."""
+    listed = summary_lists if summary_lists is not None else [n for _, n in ALLY]
+    out = ["<<<PAGE 1>>>", "COMBINED CUSTOMER STATEMENT  Page 1",
+           "Account Name Account Number Beginning Balance Ending Balance"]
+    out += ["account xxxxxx%s $10.00 $10.00" % n for n in listed]
+    out.append("Deposit Agreement update. " * 20)
+    for page, (name, number) in enumerate(ALLY, start=2):
+        out += ["<<<PAGE %d>>>" % page, "COMBINED CUSTOMER STATEMENT  Page %d" % page,
+                "%s Summary For: Account Number: xxxxxx%s" % (name, number),
+                "Internet transfer from Savings account XXXXXX2693 " * 8]
+    return "\n".join(out)
+
+
+class AllyLLM:
+    def __init__(self, last4s=None):
+        self.last4s = last4s or [n for _, n in ALLY]
+
+    def complete_detailed(self, system, body, profile=None, **kwargs):
+        if "indexing" not in system:
+            return reply('{"transactions": []}')
+        blocks = []
+        for page, ((name, number), told) in enumerate(zip(ALLY, self.last4s), start=2):
+            blocks.append(
+                '{"first_page": %d, "last_page": %d, "header_text": "%s Summary For:",'
+                ' "account": {"institution": "Ally Bank", "account_type": "savings",'
+                ' "account_number_last4": %s},'
+                ' "period": {"start_date": "2025-12-24", "end_date": "2026-01-23"},'
+                ' "balances": {"beginning_balance": 10, "ending_balance": 10}}'
+                % (page, page, name, "null" if told is None else '"%s"' % told))
+        return reply('{"statements": [%s]}' % ",".join(blocks))
+
+
+# Above the single-pass ceiling, so the document is indexed and walked -- the
+# only path that computes unindexed pages.
+padding = "\n".join("<<<PAGE %d>>>\nDisclosures. %s" % (n, "Regulation E. " * 30)
+                    for n in range(5, 5 + mod._MAX_SINGLE_PASS_PAGES))
+
+mod.llm_service = AllyLLM()
+combined = statement_service.extract(ally() + "\n" + padding)
+check("the summary page is not reported", combined.get("unindexed_pages"), None)
+
+print("   a summary naming an account nobody indexed is still reported")
+mod.llm_service = AllyLLM()
+missed_one = statement_service.extract(
+    ally(summary_lists=[n for _, n in ALLY] + ["4631"]) + "\n" + padding)
+check("page 1 reported", missed_one.get("unindexed_pages"), [1])
+
+print("   an indexed account with no last four excuses nothing")
+mod.llm_service = AllyLLM(last4s=["7811", None, "2701"])
+unknown = statement_service.extract(ally() + "\n" + padding)
+check("page 1 reported", unknown.get("unindexed_pages"), [1])
+
 print("")
 print("FAILURES: %d" % len(FAILURES))
 for name in FAILURES:
