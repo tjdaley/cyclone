@@ -11,9 +11,11 @@ Run from the app directory (same image as the API):
     python crm_worker.py
 """
 import imaplib
+import os
 import socket
 import ssl
 import time
+from datetime import datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -25,7 +27,7 @@ from services.job_service import job_service
 from db.repositories.foreign_lead import ForeignLeadRepository
 from db.repositories.lead_agent_run import LeadAgentRunRepository
 from util.loggerfactory import LoggerFactory
-from util.redis_client import lock
+from util.redis_client import beat, lock
 from util.settings import settings
 from util.usage_scope import usage_scope
 
@@ -220,8 +222,21 @@ def main() -> None:
     # executor closed on the way out would only cancel work already claimed.
     pool = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="job")
     next_crm_run = 0.0
+    # One key per worker PROCESS: two workers on one node (a restart overlapping
+    # the old container) must not overwrite each other's beat.
+    worker_name = "%s:%s:%d" % (settings.id, socket.gethostname(), os.getpid())
+    # Long enough that a slow tick (a mail host that takes its whole timeout)
+    # does not read as a dead worker; short enough that a real death shows
+    # within a minute or two.
+    beat_ttl = max(90, job_interval * 10, settings.mail_timeout_seconds * 3)
     while True:
         _run_jobs(pool, capacity)
+        # Read by the public status page (services/status_service.py).
+        beat(worker_name, {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "running": len(_IN_FLIGHT),
+            "capacity": capacity,
+        }, beat_ttl)
         now = time.monotonic()
         if now >= next_crm_run:
             next_crm_run = now + crm_interval

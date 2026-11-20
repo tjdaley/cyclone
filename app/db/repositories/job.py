@@ -1,6 +1,7 @@
 """
 app/db/repositories/job.py - CRUD for the ``jobs`` table.
 """
+from datetime import datetime
 from typing import Optional
 
 from db.models.job import JobInDB, JobKind, JobStatus
@@ -39,6 +40,28 @@ class JobRepository(BaseRepository[JobInDB]):
             end=max(limit - 1, 0),
         )
         return records
+
+    def oldest_queued_at(self) -> Optional[datetime]:
+        """
+        When the longest-waiting queued job was queued, or None if none is.
+
+        For the status page, which needs one fast answer and an honest failure:
+        built on the client directly, so it does NOT go through the manager's
+        retry-with-backoff (three tries, 2-10s apart). A status check that hangs
+        twenty seconds before saying the database is down is itself an outage.
+        Raises on any database error; the caller reports it.
+        """
+        rows = (
+            self.manager.client.table(self.table_name)
+            .select("created_at")
+            .eq("status", JobStatus.queued.value)
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        ).data or []
+        if not rows:
+            return None
+        return datetime.fromisoformat(str(rows[0]["created_at"]).replace("Z", "+00:00"))
 
     def get_for_staff(self, job_id: str, staff_id: int) -> Optional[JobInDB]:
         """

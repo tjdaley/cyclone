@@ -153,6 +153,52 @@ def lock(key: str, ttl_seconds: int = 300) -> Iterator[bool]:
                 LOGGER.warning("redis lock release failed key=%s err=%s", key, str(e))
 
 
+# ── Worker heartbeats ────────────────────────────────────────────────────────
+#
+# THE WORKER WAS INVISIBLE FROM OUTSIDE ITS OWN LOG. The API's health check
+# answered "ok" with the worker dead, and a dead worker is the outage users feel
+# first: every upload waits in the queue and nothing says why. Each worker
+# process now writes one short-lived key per loop; a key that stops being
+# renewed expires, so "no keys" means "no worker" without anybody having to
+# notice a process exit.
+
+_HEARTBEAT_PREFIX = "cyclone:worker:"
+
+
+def beat(worker: str, payload: dict, ttl_seconds: int) -> None:
+    """
+    Say this worker is alive. Never raises: a heartbeat that failed must not
+    stop the loop that is doing the real work.
+    """
+    import json
+    try:
+        get_redis().set(_HEARTBEAT_PREFIX + worker, json.dumps(payload), ex=ttl_seconds)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("heartbeat: could not write %s: %s", worker, str(e))
+
+
+def live_workers() -> list[dict]:
+    """
+    Every worker whose heartbeat has not expired.
+
+    **Raises when Redis cannot be read**, unlike everything else here. The
+    caller has to tell "no workers" from "could not look", because the first is
+    an outage and the second is only a blind spot — reporting one as the other
+    is exactly the false alarm (or false comfort) a status page must not give.
+    """
+    import json
+    r = get_redis()
+    beats = []
+    for key in r.scan_iter(match=_HEARTBEAT_PREFIX + "*", count=100):
+        raw = r.get(key)
+        if raw:
+            try:
+                beats.append(json.loads(raw))
+            except ValueError:
+                beats.append({})
+    return beats
+
+
 def make_msgid_token() -> str:
     """A unique-enough ownership token for a lock holder."""
     import uuid

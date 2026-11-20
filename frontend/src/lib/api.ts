@@ -2151,3 +2151,31 @@ export async function tagGuestTransactions(
   )
   return result.changed
 }
+
+// ── Public service status ────────────────────────────────────────────────────
+
+import type { ServiceStatus, StatusResult } from '../types'
+
+/**
+ * The public status report.
+ *
+ * Not `apiFetch`, deliberately, and it never throws. The status page is the
+ * one screen that must keep working when the API does not: a 502 from nginx or
+ * a dropped connection is not an error to display, it IS the status — "the
+ * servers are not answering". So every failure is returned as `unreachable`,
+ * with the HTTP status when there was one and whether the browser itself is
+ * offline (a different problem, with a different fix: the user's connection).
+ * No bearer token either: the endpoint is public and the page must work signed
+ * out.
+ */
+export async function getServiceStatus(): Promise<StatusResult> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+  try {
+    const res = await fetch(`${baseUrl}/api/status`, { cache: 'no-store' })
+    if (!res.ok) return { kind: 'unreachable', httpStatus: res.status, offline }
+    return { kind: 'report', status: (await res.json()) as ServiceStatus }
+  } catch {
+    return { kind: 'unreachable', httpStatus: null, offline }
+  }
+}

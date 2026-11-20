@@ -345,7 +345,7 @@ export default function UserGuidePage() {
       <footer className="border-t border-border mt-12">
         <div className="max-w-6xl mx-auto px-6 py-8 flex flex-col sm:flex-row
                         items-center justify-between gap-3 text-xs text-text-secondary">
-          <span>&copy; {new Date().getFullYear()} Cyclone</span>
+          <span>&copy; {new Date().getFullYear()} by Thomas J. Daley, J.D.</span>
           <div className="flex gap-6">
             <Link to="/privacy" className="hover:text-navy transition-colors">Privacy Policy</Link>
             <Link to="/terms" className="hover:text-navy transition-colors">Terms of Use</Link>

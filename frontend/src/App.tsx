@@ -22,6 +22,7 @@ import AccessDeniedPage    from './pages/AccessDeniedPage'
 import PrivacyPolicyPage  from './pages/PrivacyPolicyPage'
 import TermsOfUsePage     from './pages/TermsOfUsePage'
 import UserGuidePage      from './pages/UserGuidePage'
+import StatusPage         from './pages/StatusPage'
 
 import DashboardPage  from './pages/app/DashboardPage'
 import BillingPage    from './pages/app/BillingPage'
@@ -59,7 +60,8 @@ export default function App() {
               the route would not gate the content. */}
           <Route path="/guide"           element={<UserGuidePage />} />
           <Route path="/guide/:slug"     element={<UserGuidePage />} />
-
+          {/* Public on purpose: the page has to work when sign-in does not. */}
+          <Route path="/status"          element={<StatusPage />} />
           {/* Protected — staff portal */}
           <Route element={<ProtectedRoute />}>
             <Route element={<AppShell />}>

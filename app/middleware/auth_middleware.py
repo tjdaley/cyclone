@@ -22,6 +22,7 @@ LOGGER = LoggerFactory.create_logger(__name__)
 # Paths that do not require authentication
 _EXCLUDED_PATHS: set[str] = {
     "/api/health",
+    "/api/status",   # the public status page — coarse by design, see status_service
     "/api/config",
     "/docs",
     "/openapi.json",

@@ -489,14 +489,14 @@ export default function LandingPage() {
           <div className="flex flex-col items-center md:items-start gap-2">
             <img src="/brand/jdbot-lockup.png" alt="jdbot.us" className="h-8 w-auto" />
             <p className="text-xs text-text-secondary">
-              Cyclone is a jdbot.us product · &copy; {new Date().getFullYear()}
+              Cyclone is a jdbot.us product · &copy; {new Date().getFullYear()} by Thomas J. Daley, J.D.
             </p>
           </div>
           <nav className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm text-text-secondary">
             <Link to="/guide" className="hover:text-brand-ink transition-colors">User guide</Link>
             <Link to="/privacy" className="hover:text-brand-ink transition-colors">Privacy policy</Link>
             <Link to="/terms" className="hover:text-brand-ink transition-colors">Terms of use</Link>
-            <a href="/api/health" className="hover:text-brand-ink transition-colors">Service status</a>
+            <Link to="/status" className="hover:text-brand-ink transition-colors">Service status</Link>
           </nav>
         </div>
       </footer>

@@ -114,6 +114,14 @@ class StorageService:
             "token": result.get("token"),
         }
 
+    def ping(self) -> None:
+        """
+        Can the document store be reached at all? Lists one entry at the bucket
+        root. Unlike ``stat``, a failure RAISES: the status page has to tell
+        "unreachable" from "nothing there", and ``stat`` deliberately cannot.
+        """
+        self._client().list("", {"limit": 1})
+
     def stat(self, storage_path: str) -> Optional[dict]:
         """
         Does this object exist, and how big is it?

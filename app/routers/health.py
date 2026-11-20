@@ -7,8 +7,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from dependencies import require_role
+from dependencies import get_db_manager, require_role
 from schemas.common import MessageResponse
+from schemas.status import ServiceStatusResponse
+from services.status_service import status_service
 from util.config_fingerprint import detailed_fingerprint, public_fingerprint
 from util.settings import settings
 
@@ -24,6 +26,24 @@ def health_check() -> MessageResponse:
     :rtype: MessageResponse
     """
     return MessageResponse(message="ok")
+
+
+@router.get("/api/status", response_model=ServiceStatusResponse)
+def service_status() -> ServiceStatusResponse:
+    """
+    What the public status page shows: each part of Cyclone a user depends on,
+    checked, with a sentence saying what its state means for them.
+
+    ``/api/health`` stays the container liveness probe and is NOT this: a probe
+    that failed whenever the worker or a vendor was down would restart a healthy
+    API over somebody else's outage. Unauthenticated, coarse, and cached for a
+    few seconds — see services/status_service.py.
+
+    The manager is built inside the check rather than injected, so a database
+    that cannot be configured is reported as down instead of turning the status
+    page itself into a 500.
+    """
+    return ServiceStatusResponse(**status_service.report(get_db_manager))
 
 
 @router.get("/api/config")
