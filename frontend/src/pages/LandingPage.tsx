@@ -1,260 +1,505 @@
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
-// ── Icon helpers (inline SVG to keep the bundle lean) ────────────────────────
+/**
+ * The public landing page.
+ *
+ * **Every sentence here is a claim about the product, so it claims only what is
+ * built.** The previous version promised Stripe payments, PDF bills, built-in
+ * conflict checking and client-drafted discovery responses — none of which
+ * existed. A prospective firm that signs in and cannot find what the front page
+ * promised has learned that the front page is not to be believed, which is the
+ * worst thing a product whose whole argument is "every figure is defensible"
+ * can teach anybody. When a feature ships, add it here; not before.
+ *
+ * The logo marks in /brand are cut from the link-share image with exact
+ * colour-to-alpha edges. They are drawn for LIGHT backgrounds: the swirl's
+ * dark half and the "jdbot" wordmark disappear on navy, so the one dark band
+ * on this page carries no logo.
+ *
+ * The illustration in the hero is sample data, not a client's. Keep it that
+ * way — this page is public.
+ */
 
-function IconBolt() {
+// ── Icons (inline SVG, 24px grid, stroke) ───────────────────────────────────
+
+function Icon({ d }: { d: string }) {
   return (
-    <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={1.6} viewBox="0 0 24 24"
+      aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d={d} />
     </svg>
   )
 }
 
-function IconUsers() {
-  return (
-    <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-    </svg>
-  )
+const ICON = {
+  // a stack of statements
+  statements: 'M6 3.75h9l3 3V20.25H6zM15 3.75v3h3M9 11.25h6M9 14.25h6M9 17.25h3',
+  // a grid with one empty cell
+  grid: 'M3.75 4.5h16.5v15H3.75zM3.75 9.5h16.5M3.75 14.5h16.5M9.25 4.5v15M14.75 4.5v15',
+  // a gavel-free exhibit: a document with a stamp
+  exhibit: 'M5.25 3.75h10.5l3 3v13.5H5.25zM8.25 9h7.5M8.25 12h7.5M8.25 15h4.5M14.25 15.75l1.5 1.5 3-3',
+  // a person with a key: outside professional
+  expert: 'M9 11.25a3.375 3.375 0 100-6.75 3.375 3.375 0 000 6.75zM3 19.5a6 6 0 0110.6-3.86M16.5 14.25a1.875 1.875 0 113.75 0 1.875 1.875 0 01-3.75 0zM18.375 16.125V20.25M18.375 18.375h1.5',
+  // two speech bubbles: client involvement
+  client: 'M7.5 9.75h6M7.5 12.75h3.75M3 6.75A2.25 2.25 0 015.25 4.5h9A2.25 2.25 0 0116.5 6.75v6A2.25 2.25 0 0114.25 15H9l-3.75 3v-3A2.25 2.25 0 013 12.75zM16.5 9h2.25A2.25 2.25 0 0121 11.25v5.25a2.25 2.25 0 01-2.25 2.25v2.25l-3-2.25h-3',
+  // a briefcase: the practice basics
+  practice: 'M3.75 8.25h16.5v11.25H3.75zM9 8.25V6a1.5 1.5 0 011.5-1.5h3A1.5 1.5 0 0115 6v2.25M3.75 13.5h16.5',
 }
 
-function IconDocument() {
+// ── The hero illustration: a compliance grid, sample data ──────────────────
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+// Apr and Aug: the production skipped them. A statement is filed under the
+// month it CLOSES in (as on the real compliance grid), so the April cell is the
+// period 4 March - 3 April; the findings text below must agree with that.
+const MISSING = new Set([3, 7])
+
+function ComplianceIllustration() {
+  let stamp = 412
   return (
-    <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-    </svg>
-  )
-}
+    <figure role="img"
+      aria-label="Illustration: a year of statements for one checking account, with April and August missing from the production, and a savings account the statements mention that was never produced."
+      className="relative">
+      <div aria-hidden="true"
+        className="rounded-2xl border border-border bg-white shadow-xl shadow-brand-ink/10 p-5 sm:p-6">
+        <div className="flex items-baseline justify-between gap-3">
+          <div>
+            <p className="text-[11px] font-semibold tracking-widest uppercase text-brand-teal-dark">
+              Statements produced · 2025
+            </p>
+            <p className="font-semibold text-brand-ink mt-0.5">Example Bank · Checking ····4070</p>
+          </div>
+          <span className="shrink-0 text-xs rounded-full px-2 py-0.5 bg-green-100 text-green-800">
+            10 of 12 reconciled
+          </span>
+        </div>
 
-function IconScale() {
-  return (
-    <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.97zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 5.49z" />
-    </svg>
-  )
-}
+        <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5 mt-4">
+          {MONTHS.map((m, i) => {
+            const missing = MISSING.has(i)
+            const bates = missing ? null : `KF ${String(stamp).padStart(6, '0')}`
+            if (!missing) stamp += 3
+            return (
+              <div key={m}
+                className={`rounded-md px-1.5 py-2 text-center ${missing
+                  ? 'border border-dashed border-red-400 bg-red-50'
+                  : 'border border-brand-teal/20 bg-brand-teal/[0.06]'}`}>
+                <p className={`text-[11px] font-semibold ${missing ? 'text-red-700' : 'text-brand-ink'}`}>{m}</p>
+                <p className={`font-mono text-[9px] mt-0.5 truncate ${missing ? 'text-red-600' : 'text-text-secondary'}`}>
+                  {missing ? 'missing' : bates}
+                </p>
+              </div>
+            )
+          })}
+        </div>
 
-function IconChat() {
-  return (
-    <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
-    </svg>
-  )
-}
-
-// ── Feature card ──────────────────────────────────────────────────────────────
-
-interface FeatureProps {
-  icon: React.ReactNode
-  title: string
-  description: string
-}
-
-function Feature({ icon, title, description }: FeatureProps) {
-  return (
-    <div className="flex gap-4">
-      <div className="flex-shrink-0 w-14 h-14 rounded-xl bg-navy/10 text-navy
-                      flex items-center justify-center">
-        {icon}
+        <div className="mt-4 space-y-2 text-[13px]">
+          <div className="flex gap-2 rounded-lg bg-off-white px-3 py-2">
+            <span className="mt-1 w-1.5 h-1.5 shrink-0 rounded-full bg-red-500" />
+            <p className="text-text-primary">
+              <span className="font-semibold">Not produced:</span> 4 March through 3 April, and
+              2 July through 1 August — 62 days.
+            </p>
+          </div>
+          <div className="flex gap-2 rounded-lg bg-off-white px-3 py-2">
+            <span className="mt-1 w-1.5 h-1.5 shrink-0 rounded-full bg-amber-500" />
+            <p className="text-text-primary">
+              <span className="font-semibold">Referenced, never disclosed:</span> Savings ····9260 —
+              six transfers out.
+            </p>
+          </div>
+        </div>
       </div>
-      <div>
-        <h3 className="font-semibold text-navy text-lg mb-1">{title}</h3>
-        <p className="text-text-secondary text-sm leading-relaxed">{description}</p>
+    </figure>
+  )
+}
+
+// ── Building blocks ─────────────────────────────────────────────────────────
+
+function Pillar({ icon, kicker, title, children }: {
+  icon: string; kicker: string; title: string; children: React.ReactNode
+}) {
+  return (
+    <div className="group rounded-2xl border border-border bg-white p-6 sm:p-7 transition-shadow
+                    hover:shadow-lg hover:shadow-brand-ink/5">
+      <div className="flex items-center gap-3 mb-4">
+        <span className="w-11 h-11 rounded-xl flex items-center justify-center
+                         bg-brand-teal/10 text-brand-teal-dark ring-1 ring-brand-teal/20">
+          <Icon d={icon} />
+        </span>
+        <span className="text-[11px] font-semibold tracking-widest uppercase text-brand-teal-dark">
+          {kicker}
+        </span>
       </div>
+      <h3 className="font-display text-2xl text-brand-ink leading-snug mb-3">{title}</h3>
+      <div className="text-text-secondary leading-relaxed space-y-3">{children}</div>
     </div>
   )
 }
 
-// ── Step card ─────────────────────────────────────────────────────────────────
-
-function Step({ number, title, description }: { number: string; title: string; description: string }) {
+function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
   return (
-    <div className="text-center">
-      <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-gold flex items-center
-                      justify-center text-navy font-display font-bold text-xl">
-        {number}
-      </div>
-      <h3 className="font-semibold text-navy text-lg mb-2">{title}</h3>
-      <p className="text-text-secondary text-sm leading-relaxed max-w-xs mx-auto">{description}</p>
+    <li className="relative pl-14">
+      <span className="absolute left-0 top-0 w-10 h-10 rounded-full flex items-center justify-center
+                       bg-brand-ink text-white font-display text-lg">
+        {n}
+      </span>
+      <h3 className="font-semibold text-brand-ink text-lg mb-1.5">{title}</h3>
+      <p className="text-text-secondary leading-relaxed">{children}</p>
+    </li>
+  )
+}
+
+function Principle({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="border-l-2 border-brand-cyan pl-5">
+      <h3 className="font-semibold text-white text-lg mb-1.5">{title}</h3>
+      <p className="text-white/70 leading-relaxed">{children}</p>
     </div>
   )
 }
 
-// ── Main page component ───────────────────────────────────────────────────────
+// ── Page ────────────────────────────────────────────────────────────────────
 
 export default function LandingPage() {
   const { session } = useAuth()
+  const signIn = session
+    ? <Link to="/app/dashboard" className="btn-primary bg-brand-ink hover:bg-navy">Go to Cyclone</Link>
+    : <Link to="/login" className="btn-primary bg-brand-ink hover:bg-navy">Sign in</Link>
 
   return (
-    <div className="min-h-screen bg-white font-sans">
+    <div className="min-h-screen bg-white font-sans text-text-primary">
 
-      {/* ── Navigation ── */}
-      <header className="fixed inset-x-0 top-0 z-50 bg-white/95 backdrop-blur border-b border-border">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <span className="font-display text-2xl text-navy tracking-tight">Cyclone</span>
-          <nav className="flex items-center gap-6">
-            <a href="#features" className="text-sm text-text-secondary hover:text-navy transition-colors">
-              Features
+      {/* ── Header ── */}
+      <header className="fixed inset-x-0 top-0 z-50 bg-white/90 backdrop-blur border-b border-border/70">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+          <Link to="/" className="flex items-center gap-2.5 min-w-0" aria-label="Cyclone home">
+            <img src="/brand/cyclone-mark.png" alt="" className="h-8 w-auto" />
+            <span className="font-display text-2xl text-brand-ink tracking-tight">Cyclone</span>
+            <span className="hidden sm:inline text-xs text-text-secondary mt-1.5">by jdbot.us</span>
+          </Link>
+          <nav className="flex items-center gap-5">
+            <a href="#what-it-does"
+              className="hidden md:inline text-sm text-text-secondary hover:text-brand-ink transition-colors">
+              What it does
             </a>
-            <a href="#how-it-works" className="text-sm text-text-secondary hover:text-navy transition-colors">
+            <a href="#how-it-works"
+              className="hidden md:inline text-sm text-text-secondary hover:text-brand-ink transition-colors">
               How it works
             </a>
-            {session
-              ? <Link to="/app/dashboard" className="btn-primary text-sm">Go to app</Link>
-              : <Link to="/login"         className="btn-primary text-sm">Sign in</Link>
-            }
+            <a href="#ai-costs"
+              className="hidden md:inline text-sm text-text-secondary hover:text-brand-ink transition-colors">
+              AI costs
+            </a>
+            <a href="#built-for-court"
+              className="hidden md:inline text-sm text-text-secondary hover:text-brand-ink transition-colors">
+              Built for court
+            </a>
+            {signIn}
           </nav>
         </div>
       </header>
 
       {/* ── Hero ── */}
-      <section className="pt-32 pb-24 px-6 bg-gradient-to-br from-navy via-navy-light to-[#005a9e]">
-        <div className="max-w-4xl mx-auto text-center">
-          <div className="inline-block px-3 py-1 rounded-full bg-gold/20 text-gold text-xs
-                          font-semibold tracking-widest uppercase mb-6">
-            Legal Practice Management
+      <section className="relative overflow-hidden pt-28 sm:pt-32 pb-20 sm:pb-24 px-4 sm:px-6
+        bg-[radial-gradient(ellipse_at_top_right,rgba(0,188,204,0.14),transparent_55%),radial-gradient(ellipse_at_bottom_left,rgba(5,24,41,0.06),transparent_50%)]">
+        <div className="max-w-6xl mx-auto grid lg:grid-cols-[1.05fr_1fr] gap-12 lg:gap-16 items-center">
+          <div>
+            <p className="inline-flex items-center gap-2 rounded-full border border-brand-teal/30
+                          bg-white/70 px-3 py-1 text-xs font-semibold tracking-widest uppercase
+                          text-brand-teal-dark">
+              <span className="w-1.5 h-1.5 rounded-full bg-brand-cyan" />
+              Financial discovery for family law
+            </p>
+            <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl text-brand-ink leading-[1.08] mt-6">
+              Every account.
+              <br />Every month.
+              <br /><span className="text-brand-teal">Every gap.</span>
+            </h1>
+            <p className="text-lg sm:text-xl text-text-secondary leading-relaxed mt-6 max-w-xl">
+              Cyclone reads the bank, brokerage and card statements in a production, checks each one
+              against its own printed balances, and shows you what is missing: the months nobody
+              produced, and the accounts the statements mention that nobody disclosed.
+            </p>
+            <div className="flex flex-wrap gap-3 mt-9">
+              <Link to={session ? '/app/dashboard' : '/login'}
+                className="btn-primary bg-brand-ink hover:bg-navy px-7 py-3 text-base">
+                {session ? 'Go to Cyclone' : 'Sign in to your firm'}
+              </Link>
+              <a href="#what-it-does" className="btn-secondary border-brand-ink text-brand-ink
+                 hover:bg-brand-ink px-7 py-3 text-base">
+                See what it does
+              </a>
+            </div>
           </div>
-          <h1 className="font-display text-5xl md:text-6xl text-white leading-tight mb-6">
-            The practice platform your clients will actually use.
-          </h1>
-          <p className="text-blue-100 text-xl leading-relaxed mb-10 max-w-2xl mx-auto">
-            Cyclone brings together AI-powered billing, collaborative discovery, and a clean
-            client portal — all in one secure, attorney-crafted platform.
-          </p>
-          <div className="flex flex-wrap gap-4 justify-center">
-            <Link to="/login" className="btn-gold px-8 py-3 text-base">
-              Sign in to your firm
-            </Link>
-            <a href="#features" className="btn-secondary border-white/40 text-white
-                                           hover:bg-white/10 hover:text-white px-8 py-3 text-base">
-              See what's inside
-            </a>
-          </div>
+          <ComplianceIllustration />
         </div>
       </section>
 
-      {/* ── Social proof strip ── */}
-      <div className="bg-off-white border-y border-border py-6 px-6">
-        <p className="text-center text-sm text-text-secondary">
-          Built for family law, probate, estate planning, and civil litigation
-          &nbsp;·&nbsp; HIPAA-aware &nbsp;·&nbsp; Data stays in your Supabase tenant
-        </p>
+      {/* ── Three facts ── */}
+      <div className="border-y border-border bg-off-white">
+        <ul className="max-w-6xl mx-auto px-4 sm:px-6 py-5 grid sm:grid-cols-3 gap-3 sm:gap-6 text-sm
+                       text-text-secondary text-center">
+          <li><span className="font-semibold text-brand-ink">Read to the transaction</span> — not summarized</li>
+          <li><span className="font-semibold text-brand-ink">Every figure cites its page</span> — Bates and all</li>
+          <li><span className="font-semibold text-brand-ink">Your firm's own instance</span> and database</li>
+        </ul>
       </div>
 
-      {/* ── Features ── */}
-      <section id="features" className="py-24 px-6">
-        <div className="max-w-5xl mx-auto">
-          <div className="text-center mb-16">
-            <h2 className="font-display text-4xl text-navy mb-4">
-              Everything your firm needs, nothing it doesn't
+      {/* ── What it does ── */}
+      <section id="what-it-does" className="scroll-mt-16 py-20 sm:py-28 px-4 sm:px-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="max-w-2xl mb-14">
+            <h2 className="font-display text-3xl sm:text-4xl text-brand-ink leading-tight">
+              From a box of statements to an argument you can file.
             </h2>
-            <p className="text-text-secondary text-lg max-w-2xl mx-auto">
-              Cyclone is designed around how attorneys actually work — not around how software vendors
-              think they should.
+            <p className="text-lg text-text-secondary mt-4 leading-relaxed">
+              The work that used to take a paralegal a week of spreadsheets — and still left you
+              wondering what was missing — done in the time it takes to read the production once.
             </p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-10">
-            <Feature
-              icon={<IconBolt />}
-              title="Natural language billing"
-              description={`Say "bill .25 to the Smith divorce for drafting the initial petition" and Cyclone does the rest. Our AI parses, classifies, and rates the entry for your review before committing a single record.`}
-            />
-            <Feature
-              icon={<IconUsers />}
-              title="Client portal"
-              description="Clients see exactly what you want them to see: upcoming events, billing statements, and their discovery tasks. Pay directly through Stripe-hosted links — no separate payment system needed."
-            />
-            <Feature
-              icon={<IconDocument />}
-              title="Collaborative discovery"
-              description="Upload opposing counsel's interrogatories, RFAs, and RFPs. Cyclone segments and classifies each request. Clients draft their own responses; you review, object, and finalize — all in one workflow."
-            />
-            <Feature
-              icon={<IconScale />}
-              title="Matter & billing management"
-              description="Multi-timekeeper matters, per-matter rate cards with individual overrides, pro-bono flagging, and billing splits for appointed matters. Designed for the complexity of real family law practice."
-            />
-            <Feature
-              icon={<IconChat />}
-              title="Built-in conflict checking"
-              description="Fuzzy trigram matching against all existing clients and opposing parties before a new matter is opened. Results surface to the responsible attorney for review — never disclosed to the prospective client."
-            />
-            <Feature
-              icon={<IconBolt />}
-              title="Multi-vendor AI"
-              description="Swap between Anthropic, Gemini, OpenAI, Groq, or DeepSeek with a single environment variable. Use a fast model for billing parse and a powerful model for discovery ingestion — independently configurable."
-            />
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <Pillar icon={ICON.statements} kicker="Discovery" title="Statements, read line by line">
+              <p>
+                Drop one statement or a stack of them. Cyclone files each against its account,
+                extracts every transaction, and checks the arithmetic: opening balance plus every
+                line must equal the printed close.
+              </p>
+              <p>
+                A statement that does not tie is held for a person, with the exact difference.
+              </p>
+            </Pillar>
+
+            <Pillar icon={ICON.grid} kicker="Gap detection" title="What they didn't produce">
+              <p>
+                A month-by-month grid of what each side has produced, Bates number in every cell.
+                Gaps are measured in days and written out as the numbered paragraph of a motion
+                to compel.
+              </p>
+              <p>
+                And the accounts the production names but does not contain — transfers to
+                unproduced accounts, incoming wires, payments to undisclosed creditors, and money
+                moving through Venmo, PayPal and crypto platforms.
+              </p>
+            </Pillar>
+
+            <Pillar icon={ICON.exhibit} kicker="Trial exhibits" title="Exhibits in minutes, not days">
+              <p>
+                Any search becomes a Rule 1006 summary: the case caption, the criteria that
+                produced it, the documents and Bates ranges behind it, and the verification
+                notice — in Word, PDF, Markdown or CSV.
+              </p>
+              <p>
+                The Financial Information Statement and an account inventory come from the same
+                records, so they cannot disagree.
+              </p>
+            </Pillar>
+
+            <Pillar icon={ICON.expert} kicker="Expert access" title="Your CPA, in the same records">
+              <p>
+                Give a tracing expert or CPA the matter's accounts, transactions and inventory —
+                with the client's consent, limited to one matter, expiring on the date you set,
+                and revocable on the next click.
+              </p>
+              <p>
+                They work in the same figures you do, and no spreadsheet travels by email.
+              </p>
+            </Pillar>
+
+            <Pillar icon={ICON.client} kicker="Client portal" title="Clients who help, not just watch">
+              <p>
+                Clients see their accounts and statements, and they do the part only they can:
+                marking the transactions they know about — the separate-property deposit, the
+                payment to a lender, the trip that was not a business trip.
+              </p>
+              <p>
+                You choose the tags they may use, review every mark, and lock tagging before a
+                hearing.
+              </p>
+            </Pillar>
+
+            <Pillar icon={ICON.practice} kicker="And the practice" title="The rest of the matter">
+              <p>
+                Matters opened straight from a filed pleading, with parties, children and counsel
+                read off it. Time entered in a sentence. Discovery requests split into numbered
+                items, answered, and exported to Word.
+              </p>
+            </Pillar>
           </div>
         </div>
       </section>
 
       {/* ── How it works ── */}
-      <section id="how-it-works" className="py-24 px-6 bg-off-white">
-        <div className="max-w-4xl mx-auto">
-          <div className="text-center mb-16">
-            <h2 className="font-display text-4xl text-navy mb-4">How it works</h2>
-            <p className="text-text-secondary text-lg">Three steps from firm setup to running matters.</p>
+      <section id="how-it-works" className="scroll-mt-16 py-20 sm:py-28 px-4 sm:px-6 bg-off-white">
+        <div className="max-w-6xl mx-auto grid lg:grid-cols-[1fr_1.2fr] gap-12 lg:gap-20">
+          <div>
+            <h2 className="font-display text-3xl sm:text-4xl text-brand-ink leading-tight">
+              How it works
+            </h2>
+            <p className="text-lg text-text-secondary mt-4 leading-relaxed max-w-md">
+              Three steps, and the middle one is Cyclone's. Nothing you rely on was guessed at
+              along the way.
+            </p>
+          </div>
+          <ol className="space-y-10">
+            <Step n={1} title="Drop the production">
+              PDFs exactly as they were served, however many pages. A production that bundles
+              hundreds of pages is split into its documents on a bench built for the job, and the
+              original is kept as received.
+            </Step>
+            <Step n={2} title="Cyclone reads and checks">
+              Accounts, periods, balances and every line, each tied to its Bates-stamped page.
+              Anything that does not reconcile, or that had to be inferred, is flagged for a
+              person to look at.
+            </Step>
+            <Step n={3} title="Argue from it">
+              Search and tag the transactions, export the exhibit, copy the motion-to-compel
+              paragraph, and bring in your expert and your client.
+            </Step>
+          </ol>
+        </div>
+      </section>
+
+      {/* ── AI costs ──
+          The figures are Tom's own measured spend (2026-11), stated as
+          experience and not as a quote. They are MODEL spend only — the Costs
+          page does not count hosting or storage — so the copy says "AI costs"
+          and never implies more. Revisit them if vendor prices move. */}
+      <section id="ai-costs" className="scroll-mt-16 py-20 sm:py-28 px-4 sm:px-6">
+        <div className="max-w-6xl mx-auto grid lg:grid-cols-[1.1fr_1fr] gap-12 lg:gap-16 items-center">
+          <div>
+            <p className="text-xs font-semibold tracking-widest uppercase text-brand-teal-dark">AI costs</p>
+            <h2 className="font-display text-3xl sm:text-4xl text-brand-ink leading-tight mt-3">
+              What is the AI costing? In dollars, by matter.
+            </h2>
+            <p className="text-lg text-text-secondary mt-4 leading-relaxed">
+              AI is sold in tokens, which tells a lawyer nothing about what a case will cost.
+              Cyclone prices every call in dollars and adds it up by matter — so you can set what
+              the AI cost against what it delivered, and know before you start roughly what a
+              case will run.
+            </p>
+            <ul className="mt-7 space-y-3 text-text-primary">
+              {[
+                ['In dollars, not tokens.', 'Priced against the vendor’s rate on the day of each call.'],
+                ['By matter, task, person and month.', 'The question you are asked, answered the way it is asked.'],
+                ['Every call counted.', 'Including attempts that failed or were refused — vendors charge for many of those too.'],
+                ['Never guessed.', 'A call with no known price is flagged, and the total says it is a floor.'],
+              ].map(([lead, rest]) => (
+                <li key={lead} className="flex gap-3">
+                  <svg className="w-5 h-5 shrink-0 mt-0.5 text-brand-teal" fill="none" stroke="currentColor"
+                    strokeWidth={2.2} viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
+                  <span><span className="font-semibold text-brand-ink">{lead}</span>{' '}
+                    <span className="text-text-secondary">{rest}</span></span>
+                </li>
+              ))}
+            </ul>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-12">
-            <Step
-              number="1"
-              title="Firm setup"
-              description="Add your offices and staff. Each attorney or paralegal receives an invitation link. Their first sign-in automatically links their account — no separate password system."
-            />
-            <Step
-              number="2"
-              title="Open matters"
-              description="Run a conflict check, execute a fee agreement, and configure rate cards and retainer thresholds. Billing and discovery can start the same day."
-            />
-            <Step
-              number="3"
-              title="Work and bill"
-              description="Enter time naturally or with the form. Close billing cycles to generate PDF statements. Clients pay through Stripe. Audit log captures everything."
-            />
+          <div className="rounded-2xl border border-border bg-off-white p-6 sm:p-8">
+            <p className="text-sm font-semibold text-brand-ink">What we have seen, over the life of a matter</p>
+            <div className="grid sm:grid-cols-2 gap-4 mt-5">
+              <div className="rounded-xl bg-white border border-border p-5">
+                <p className="text-sm text-text-secondary">A few hundred statements</p>
+                {/* lining-nums: Playfair draws old-style figures by default,
+                    which bob above and below the line — wrong for a price. */}
+                <p className="mt-2 font-display text-4xl text-brand-ink lining-nums">
+                  <span className="text-xl align-top text-text-secondary mr-1">under</span>$150
+                </p>
+                <p className="text-xs text-text-secondary mt-2">in AI costs, start to finish</p>
+              </div>
+              <div className="rounded-xl bg-white border border-border p-5">
+                <p className="text-sm text-text-secondary">A much larger case</p>
+                <p className="mt-2 font-display text-4xl text-brand-ink lining-nums">
+                  <span className="text-xl align-top text-text-secondary mr-1">under</span>$700
+                </p>
+                <p className="text-xs text-text-secondary mt-2">in AI costs, start to finish</p>
+              </div>
+            </div>
+            <p className="text-xs text-text-secondary mt-5 leading-relaxed">
+              Measured in our own use. Not a quote: vendor prices change, and every case is its own.
+              Your firm sees its actual figures, matter by matter, from the first upload.
+            </p>
           </div>
         </div>
       </section>
 
-      {/* ── CTA ── */}
-      <section className="py-24 px-6 bg-navy text-center">
-        <h2 className="font-display text-4xl text-white mb-4">
-          Ready to streamline your practice?
+      {/* ── Built for court ── */}
+      <section id="built-for-court" className="scroll-mt-16 py-20 sm:py-28 px-4 sm:px-6 bg-brand-ink
+        bg-[radial-gradient(ellipse_at_top_left,rgba(0,188,204,0.16),transparent_55%)]">
+        <div className="max-w-6xl mx-auto">
+          <div className="max-w-2xl mb-14">
+            <p className="text-xs font-semibold tracking-widest uppercase text-brand-cyan">Built for court</p>
+            <h2 className="font-display text-3xl sm:text-4xl text-white leading-tight mt-3">
+              Built to be cross-examined.
+            </h2>
+            <p className="text-lg text-white/70 mt-4 leading-relaxed">
+              A figure you cannot defend on the stand is worse than no figure at all. So Cyclone
+              is built around four rules.
+            </p>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-x-12 gap-y-10">
+            <Principle title="Nothing is invented to make it balance.">
+              A statement that does not reconcile is recorded with its exact difference — never
+              patched with a plug line nobody can explain.
+            </Principle>
+            <Principle title="Every figure traces to a page.">
+              Bates numbers are read off the stamp, never filled in from the pages around it. An
+              unstamped page says so.
+            </Principle>
+            <Principle title="Every correction has a name on it.">
+              A changed amount, an added line or a corrected balance records who changed it, when,
+              and why — and the original value stays on the record.
+            </Principle>
+            <Principle title="The software reads. A person decides.">
+              No model files a transaction into a category on its own. Firm-written rules and
+              people do, and every assignment says which.
+            </Principle>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Sign in ── */}
+      <section className="py-20 sm:py-24 px-4 sm:px-6 text-center">
+        <img src="/brand/cyclone-mark.png" alt="" className="h-16 w-auto mx-auto" />
+        <h2 className="font-display text-3xl sm:text-4xl text-brand-ink mt-6">
+          Already a Cyclone firm?
         </h2>
-        <p className="text-blue-100 text-lg mb-8 max-w-xl mx-auto">
+        <p className="text-lg text-text-secondary mt-3 max-w-xl mx-auto">
           Sign in with your firm's Google account. Your administrator has already set up your access.
         </p>
-        <Link to="/login" className="btn-gold px-10 py-3 text-base">
-          Sign in to Cyclone
-        </Link>
+        <div className="mt-8 flex flex-wrap justify-center gap-3">
+          <Link to={session ? '/app/dashboard' : '/login'}
+            className="btn-primary bg-brand-ink hover:bg-navy px-8 py-3 text-base">
+            {session ? 'Go to Cyclone' : 'Sign in to Cyclone'}
+          </Link>
+          <Link to="/guide" className="btn-secondary border-brand-ink text-brand-ink hover:bg-brand-ink
+             px-8 py-3 text-base">
+            Read the user guide
+          </Link>
+        </div>
       </section>
 
       {/* ── Footer ── */}
-      <footer className="bg-[#001e36] py-10 px-6">
-        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <span className="font-display text-xl text-white/80">Cyclone</span>
-          <p className="text-xs text-white/40">
-            &copy; {new Date().getFullYear()} &mdash; Legal Practice Management Platform
-          </p>
-          <div className="flex flex-wrap justify-center gap-6 text-xs text-white/40">
-            <Link to="/guide"
-              className="text-gold/80 hover:text-gold transition-colors font-medium">
-              User Guide
-            </Link>
-            <Link to="/privacy" className="hover:text-white/70 transition-colors">Privacy Policy</Link>
-            <Link to="/terms" className="hover:text-white/70 transition-colors">Terms of Use</Link>
-            <a href="/api/health" className="hover:text-white/70 transition-colors">API Status</a>
+      <footer className="border-t border-border bg-off-white py-10 px-4 sm:px-6">
+        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex flex-col items-center md:items-start gap-2">
+            <img src="/brand/jdbot-lockup.png" alt="jdbot.us" className="h-8 w-auto" />
+            <p className="text-xs text-text-secondary">
+              Cyclone is a jdbot.us product · &copy; {new Date().getFullYear()}
+            </p>
           </div>
+          <nav className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm text-text-secondary">
+            <Link to="/guide" className="hover:text-brand-ink transition-colors">User guide</Link>
+            <Link to="/privacy" className="hover:text-brand-ink transition-colors">Privacy policy</Link>
+            <Link to="/terms" className="hover:text-brand-ink transition-colors">Terms of use</Link>
+            <a href="/api/health" className="hover:text-brand-ink transition-colors">Service status</a>
+          </nav>
         </div>
       </footer>
-
     </div>
   )
 }

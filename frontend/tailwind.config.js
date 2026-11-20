@@ -16,6 +16,15 @@ export default {
           DEFAULT: '#FFFFFF',
           raised:  '#F0EEE9',
         },
+        // Sampled from the jdbot.us / Cyclone logo files in public/brand/.
+        // `teal` is the ".us" of the wordmark, and fails AA contrast for small
+        // text on white (3.3:1): small text takes `teal-dark`.
+        brand: {
+          ink:         '#051829',
+          teal:        '#0297a3',
+          'teal-dark': '#016d77',
+          cyan:        '#00bccc',
+        },
         'off-white': '#F5F5F0',
         border: '#D4D4CF',
         'text-primary':   '#1A1A1A',

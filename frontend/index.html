@@ -11,8 +11,22 @@
 
     <!-- Open Graph -->
     <meta property="og:type"        content="website" />
+    <meta property="og:site_name"   content="jdbot.us" />
     <meta property="og:title"       content="Cyclone — Legal Practice Management" />
     <meta property="og:description" content="Streamline billing, matter management, and client collaboration." />
+    <!-- The link-preview card. A preview image must be an ABSOLUTE URL (a
+         relative one is ignored, silently), and the host differs per
+         deployment, so __SITE_ORIGIN__ is filled in by nginx from the request's
+         own Host as the page is served (nginx.conf, sub_filter). Under the Vite
+         dev server it stays literal, which is harmless: nobody unfurls
+         localhost. Solid background on purpose: a transparent card puts the
+         navy wordmark on Slack's dark theme. Give a replacement a NEW filename —
+         Slack and the others cache unfurl images by URL. -->
+    <meta property="og:image"        content="__SITE_ORIGIN__/link-share-logo-1200x630.png" />
+    <meta property="og:image:width"  content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt"    content="jdbot.us — flagship product: Cyclone" />
+    <meta name="twitter:card"        content="summary_large_image" />
 
     <!-- Fonts (Google Fonts) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -20,7 +34,13 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700&family=JetBrains+Mono:wght@400&display=swap"
           rel="stylesheet" />
 
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Icons, generated from public/logo-512x512.png (the master; regenerate the
+         others from it rather than editing them). New filenames on purpose:
+         browsers cache favicons outside HTTP caching, so reusing a name keeps
+         showing the old icon. favicon.ico is for clients that request it
+         without reading this page. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body>
     <div id="root"></div>
