@@ -25,6 +25,7 @@ import CompliancePanel from './CompliancePanel'
 import InventoryPanel from './InventoryPanel'
 import NormalizedStatementButton from '../../components/NormalizedStatementButton'
 import StatementPdfButton from '../../components/StatementPdfButton'
+import { useConfirm } from '../../components/ConfirmDialog'
 import TransactionEditDialog, { CorrectedMark } from './TransactionEditDialog'
 import TransactionAddDialog from './TransactionAddDialog'
 import AccountAddDialog from './AccountAddDialog'
@@ -318,6 +319,7 @@ export default function MatterFinancialsPage() {
   const [addingAccount, setAddingAccount] = useState<
     null | { institution?: string | null; account_number_last4?: string | null;
              account_number_masked?: string | null }>(null)
+  const [confirmDialog, confirm] = useConfirm()
 
   async function refresh() {
     const [accountRows, exceptionRows] = await Promise.all([
@@ -600,11 +602,15 @@ export default function MatterFinancialsPage() {
    * have caught it by.
    */
   async function discardStatement(statement: AccountStatement) {
-    if (!window.confirm(
-      'Delete this statement?\n\nIts transactions go with it, and if that leaves the account ' +
-      'with nothing, the account goes too. The source PDF stays in storage, so it can be ' +
-      'uploaded again.',
-    )) return
+    if (await confirm({
+      title: 'Delete this statement?',
+      tone: 'danger',
+      body: <p>
+        Its transactions go with it, and if that leaves the account with nothing, the account
+        goes too. The source PDF stays in storage, so it can be uploaded again.
+      </p>,
+      actions: [{ key: 'delete', label: 'Delete statement', kind: 'danger' }],
+    }) !== 'delete') return
 
     setBusy(true)
     try {
@@ -627,11 +633,67 @@ export default function MatterFinancialsPage() {
   }
 
   async function decide(statement: AccountStatement, decision: 'accepted' | 'rejected') {
-    if (decision === 'rejected' && !window.confirm(
-      'Discard this statement?\n\nIts transactions are deleted with it, and if that leaves the ' +
-      'account with nothing, the account goes too. This cannot be undone — the source PDF stays ' +
-      'in storage, so it can be uploaded again.',
-    )) return
+    // ACCEPTING A STATEMENT THAT DOES NOT TIE IS A DIFFERENT ACT FROM ACCEPTING
+    // ONE THAT DOES, and in a queue of flagged-but-reconciled rows the two used
+    // to be the same click. Said with the figure, because "are you sure?" is a
+    // dialog people learn to dismiss and "$0.20 short" is not. Re-reading is
+    // offered beside accepting because it is usually the fix: a misread line
+    // comes out differently on a second reading.
+    if (decision === 'accepted' && !statement.reconciled && statement.reconciliation_delta !== null) {
+      const currency = currencyOf(statement.financial_account_id)
+      const account = accounts.find(a => a.id === statement.financial_account_id)
+      const choice = await confirm({
+        title: 'This statement does not reconcile',
+        tone: 'warning',
+        body: <>
+          <p>
+            {account ? accountLabel(account) : 'This account'}, {period(statement)}. The lines
+            read from it do not add up to the closing balance it prints.
+          </p>
+          <dl className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-1 rounded border border-border
+                         bg-off-white px-4 py-3 tabular-nums">
+            <dt className="text-text-secondary">Opening balance</dt>
+            <dd className="text-right">{money(statement.beginning_balance, currency)}</dd>
+            <dt className="text-text-secondary">Lines add up to a close of</dt>
+            <dd className="text-right">{money(statement.computed_ending_balance, currency)}</dd>
+            <dt className="text-text-secondary">The statement prints</dt>
+            <dd className="text-right">{money(statement.ending_balance, currency)}</dd>
+            <dt className="font-semibold text-red-800 border-t border-border pt-1">Off by</dt>
+            <dd className="text-right font-semibold text-red-800 border-t border-border pt-1">
+              {money(statement.reconciliation_delta, currency)}
+            </dd>
+          </dl>
+          <p>
+            Accepting clears it from this queue but leaves it out of balance, and every report
+            built on this account inherits the difference. The account will say so in the list.
+          </p>
+          <p className="text-text-secondary">
+            Reading it again often fixes a line that was misread. Correcting the line or the
+            balance fixes it for good.
+          </p>
+        </>,
+        cancelLabel: 'Go back',
+        actions: [
+          ...(statement.storage_path
+            ? [{ key: 'retry' as const, label: 'Read it again', kind: 'secondary' as const }]
+            : []),
+          { key: 'accept' as const, label: 'Accept anyway', kind: 'primary' as const },
+        ],
+      })
+      if (choice === 'retry') { await retry(statement); return }
+      if (choice !== 'accept') return
+    }
+
+    if (decision === 'rejected' && await confirm({
+      title: 'Discard this statement?',
+      tone: 'danger',
+      body: <p>
+        Its transactions are deleted with it, and if that leaves the account with nothing, the
+        account goes too. This cannot be undone — the source PDF stays in storage, so it can be
+        uploaded again.
+      </p>,
+      actions: [{ key: 'discard', label: 'Discard statement', kind: 'danger' }],
+    }) !== 'discard') return
 
     setBusy(true)
     try {
@@ -677,13 +739,19 @@ export default function MatterFinancialsPage() {
    */
   async function retry(statement: AccountStatement) {
     const file = statement.source_filename ? `"${statement.source_filename}"` : 'this document'
-    if (!window.confirm(
-      `Read ${file} again from the start?\n\n` +
-      'Everything that upload produced is discarded first — every statement from it, not ' +
-      'just this one, along with their transactions and any account left empty. The PDF is ' +
-      'then re-read, which recreates them.\n\n' +
-      'If the PDF can no longer be retrieved, nothing is deleted.',
-    )) return
+    if (await confirm({
+      title: `Read ${file} again from the start?`,
+      tone: 'warning',
+      body: <>
+        <p>
+          Everything that upload produced is discarded first — <strong>every statement from it,
+          not just this one</strong>, along with their transactions and any account left empty.
+          The PDF is then re-read, which recreates them.
+        </p>
+        <p className="text-text-secondary">If the PDF can no longer be retrieved, nothing is deleted.</p>
+      </>,
+      actions: [{ key: 'retry', label: 'Discard and re-read', kind: 'primary' }],
+    }) !== 'retry') return
 
     setBusy(true)
     setRetrying(statement.id)
@@ -780,7 +848,12 @@ export default function MatterFinancialsPage() {
       let updated = await updateFinancialAccount(accountId, patch)
       // Its own call, not a PATCH field, so the server stamps who and when.
       if (exclusion) updated = await setInventoryExclusion(accountId, exclusion)
-      setAccounts(prev => prev.map(a => (a.id === updated.id ? updated : a)))
+      // The PATCH response does not compute the out-of-balance count (null), so
+      // keep the one the list gave. Taking the response as-is would erase the
+      // warning on the very account somebody had just opened to look at.
+      setAccounts(prev => prev.map(a => (a.id === updated.id
+        ? { ...updated, unreconciled_statements: updated.unreconciled_statements ?? a.unreconciled_statements }
+        : a)))
       setEditing(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the account')
@@ -793,6 +866,7 @@ export default function MatterFinancialsPage() {
 
   return (
     <div className="px-6 py-8 max-w-6xl mx-auto space-y-6">
+      {confirmDialog}
       <div>
         <MatterHeader matterId={matterId} matter={matter} />
         <h1 className="font-display text-3xl text-navy mt-4">Financials</h1>
@@ -1362,6 +1436,20 @@ export default function MatterFinancialsPage() {
                       {a.currency}
                     </span>
                   )}
+                  {/* Accepting clears the queue; it does not make the
+                      arithmetic true. Without this an account holding a
+                      statement accepted out of balance looks like every
+                      other one until somebody opens it. */}
+                  {(a.unreconciled_statements ?? 0) > 0 && (
+                    <button type="button"
+                      className="text-xs rounded-full px-2 py-0.5 bg-red-100 text-red-800"
+                      title="Open the account to see which statement and by how much"
+                      onClick={() => { if (openAccountId !== a.id) void openAccount(a) }}>
+                      {a.unreconciled_statements === 1
+                        ? '1 statement does not tie'
+                        : `${a.unreconciled_statements} statements do not tie`}
+                    </button>
+                  )}
                   {a.excluded_from_inventory && (
                     <span className="text-xs rounded-full px-2 py-0.5 bg-gray-100 text-text-secondary"
                       title="Listed on the inventory but left out of its totals">
@@ -1810,6 +1898,7 @@ function DeletePanel({ account, onDeleted }: {
   const [preview, setPreview] = useState<AccountDeletePreview | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmDialog, confirm] = useConfirm()
 
   async function look() {
     setBusy(true); setError(null)
@@ -1822,11 +1911,18 @@ function DeletePanel({ account, onDeleted }: {
 
   async function commit() {
     if (!preview) return
-    if (!window.confirm(
-      `Delete ${preview.account_label}?\n\n${preview.statements} statement(s) and ` +
-      `${preview.transactions} transaction(s) go with it. This cannot be undone — the source ` +
-      'PDFs stay in storage, so the statements can be uploaded again.',
-    )) return
+    if (await confirm({
+      title: `Delete ${preview.account_label}?`,
+      tone: 'danger',
+      body: <p>
+        <span className="tabular-nums font-medium">{preview.statements}</span> statement
+        {preview.statements === 1 ? '' : 's'} and{' '}
+        <span className="tabular-nums font-medium">{preview.transactions}</span> transaction
+        {preview.transactions === 1 ? '' : 's'} go with it. This cannot be undone — the source
+        PDFs stay in storage, so the statements can be uploaded again.
+      </p>,
+      actions: [{ key: 'delete', label: 'Delete account', kind: 'danger' }],
+    }) !== 'delete') return
     setBusy(true); setError(null)
     try {
       await deleteAccount(account.id)
@@ -1838,6 +1934,8 @@ function DeletePanel({ account, onDeleted }: {
   }
 
   return (
+    <>
+    {confirmDialog}
     <details className="border border-red-200 rounded p-3" onToggle={e => {
       if ((e.target as HTMLDetailsElement).open && !preview && !busy) look()
     }}>
@@ -1878,6 +1976,7 @@ function DeletePanel({ account, onDeleted }: {
         </div>
       )}
     </details>
+    </>
   )
 }
 

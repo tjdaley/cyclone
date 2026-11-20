@@ -139,6 +139,11 @@ class FinancialAccountResponse(BaseModel):
     inventory_exclusion_note: Optional[str] = None
     inventory_excluded_by: Optional[str] = None
     inventory_excluded_at: Optional[datetime] = None
+    # How many of this account's statements do not tie to their printed close,
+    # accepted or not. Filled by the matter's account LIST only; None on a
+    # single-account response means "not computed here", never "none" — a 0
+    # there would erase the warning every time somebody edited the account.
+    unreconciled_statements: Optional[int] = None
 
 
 class InventoryExclusionRequest(BaseModel):

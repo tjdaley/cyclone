@@ -113,6 +113,12 @@ export interface FinancialAccount {
   inventory_exclusion_note: string | null
   inventory_excluded_by: string | null
   inventory_excluded_at: string | null
+  /**
+   * Statements on this account whose lines do not add up to the printed close,
+   * accepted or not. Only the matter's account list computes it; null on a
+   * single-account response means "not computed here", never "none".
+   */
+  unreconciled_statements: number | null
 }
 
 /** Why an account is listed on the inventory but left out of its totals. */

@@ -6,6 +6,7 @@ a document that may hold several months, which is far too long to hold a
 request open. The upload returns a job id; the worker does the work.
 """
 from decimal import Decimal
+from collections import Counter
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -273,9 +274,22 @@ def list_accounts(
     manager: Any = Depends(get_db_manager),
     _=Depends(require_role(_STAFF_ROLES)),
 ) -> list[FinancialAccountResponse]:
-    """List the accounts on a matter — the financial section of the inventory."""
+    """
+    List the accounts on a matter — the financial section of the inventory.
+
+    Each carries how many of its statements do not tie, so an account holding
+    one that was ACCEPTED out of balance is visible without opening it.
+    Accepting clears the exceptions queue; it does not clear this.
+    """
     records = FinancialAccountRepository(manager).get_by_matter(matter_id)
-    return [FinancialAccountResponse(**r.model_dump()) for r in records]
+    off = Counter(
+        s.financial_account_id
+        for s in FinancialAccountStatementRepository(manager).out_of_balance(matter_id)
+    )
+    return [
+        FinancialAccountResponse(**r.model_dump(), unreconciled_statements=off.get(r.id, 0))
+        for r in records
+    ]
 
 
 @router.get("/matters/{matter_id}/undisclosed-accounts",

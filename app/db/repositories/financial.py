@@ -255,6 +255,23 @@ class FinancialAccountStatementRepository(BaseRepository[FinancialAccountStateme
         """Return every statement on a matter."""
         return self.select_many(condition={"matter_id": matter_id}, sort_by="period_start")[0]
 
+    def out_of_balance(self, matter_id: int) -> list[FinancialAccountStatementInDB]:
+        """
+        Statements on a matter whose lines do not add up to the printed close.
+
+        Accepted ones included, deliberately: accepting clears the queue but
+        does not make the arithmetic true, and the account list has to keep
+        saying so. A statement with no printed balances (``reconciliation_delta``
+        NULL) could not be checked, which is a different fact, and is left out.
+        Rejected reads are not evidence of anything.
+        """
+        rows = self.select_many(condition={"matter_id": matter_id, "reconciled": False})[0]
+        return [
+            r for r in rows
+            if r.reconciliation_delta is not None
+            and r.review_status != StatementReviewStatus.rejected
+        ]
+
     def needing_review(self, matter_id: int) -> list[FinancialAccountStatementInDB]:
         """The exceptions queue: statements an attorney still has to look at."""
         return self.select_many(
